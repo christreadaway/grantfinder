@@ -180,11 +180,12 @@ async def scan_website(
                     yield f"data: {json.dumps({'type': 'extracted', 'item': event['item']})}\n\n"
                 elif event["type"] == "complete":
                     all_content.extend(event.get("content", []))
-                    yield f"data: {json.dumps({'type': 'status', 'message': f'Church website scan complete. {event[\"pages_crawled\"]} pages scanned.'})}\n\n"
+                    pages = event["pages_crawled"]
+                    yield f"data: {json.dumps({'type': 'status', 'message': f'Church website scan complete. {pages} pages scanned.'})}\n\n"
 
         # Scan school website if different
         if org.school_website and org.school_website != org.church_website:
-            yield f"data: {json.dumps({'type': 'status', 'message': f'Starting scan of school website...'})}\n\n"
+            yield f"data: {json.dumps({'type': 'status', 'message': 'Starting scan of school website...'})}\n\n"
             async for event in WebsiteService.crawl_website(org.school_website):
                 if event["type"] == "status":
                     yield f"data: {json.dumps(event)}\n\n"
@@ -192,7 +193,8 @@ async def scan_website(
                     yield f"data: {json.dumps({'type': 'extracted', 'item': event['item']})}\n\n"
                 elif event["type"] == "complete":
                     all_content.extend(event.get("content", []))
-                    yield f"data: {json.dumps({'type': 'status', 'message': f'School website scan complete. {event[\"pages_crawled\"]} pages scanned.'})}\n\n"
+                    pages = event["pages_crawled"]
+                    yield f"data: {json.dumps({'type': 'status', 'message': f'School website scan complete. {pages} pages scanned.'})}\n\n"
 
         # Use AI to extract structured information
         if all_content:

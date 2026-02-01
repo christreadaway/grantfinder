@@ -3,8 +3,8 @@ from functools import lru_cache
 
 
 class Settings(BaseSettings):
-    # Database
-    database_url: str = "postgresql+asyncpg://user:password@localhost:5432/grantfinder"
+    # Database - defaults to SQLite for local development
+    database_url: str = "sqlite+aiosqlite:///./grantfinder.db"
 
     # Google OAuth
     google_client_id: str = ""

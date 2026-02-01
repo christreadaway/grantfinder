@@ -76,7 +76,7 @@ export default function ContextPage() {
     try {
       const response = await getDocuments(currentOrganization.id)
       setUploadedDocs(response.data)
-      if (response.data.some((d: DocType) => d.extracted_needs?.length > 0)) {
+      if (response.data.some((d: DocType) => (d.extracted_needs?.length ?? 0) > 0)) {
         setDocsProcessed(true)
       }
     } catch (error) {
