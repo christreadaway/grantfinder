@@ -15,17 +15,10 @@ from models.schemas import (
     MatchResults, GrantMatch, OrganizationProfile
 )
 from routers.auth import get_current_user, User
+from state import get_match_results
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
-
-# In-memory storage for match results (replace with Supabase)
-match_results_db: dict = {}
-
-
-def store_match_results(user_id: str, results: MatchResults):
-    """Store match results for later export."""
-    match_results_db[results.session_id] = results
 
 
 @router.post("/")
@@ -37,8 +30,8 @@ async def export_results(
     Export match results in specified format.
     Supported formats: PDF, CSV, Markdown
     """
-    # Get match results
-    results = match_results_db.get(request.session_id)
+    # Get match results from shared state
+    results = get_match_results(request.session_id)
 
     if not results:
         raise HTTPException(status_code=404, detail="Match results not found")

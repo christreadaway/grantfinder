@@ -9,6 +9,9 @@ from bs4 import BeautifulSoup
 import logging
 import json
 import uuid
+import ipaddress
+import socket
+from urllib.parse import urlparse
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 
@@ -21,20 +24,97 @@ from models.schemas import (
 
 logger = logging.getLogger(__name__)
 
+# Blocked IP ranges for SSRF protection
+BLOCKED_IP_RANGES = [
+    ipaddress.ip_network("10.0.0.0/8"),      # Private
+    ipaddress.ip_network("172.16.0.0/12"),   # Private
+    ipaddress.ip_network("192.168.0.0/16"),  # Private
+    ipaddress.ip_network("127.0.0.0/8"),     # Loopback
+    ipaddress.ip_network("169.254.0.0/16"),  # Link-local
+    ipaddress.ip_network("0.0.0.0/8"),       # Current network
+    ipaddress.ip_network("::1/128"),         # IPv6 loopback
+    ipaddress.ip_network("fc00::/7"),        # IPv6 private
+    ipaddress.ip_network("fe80::/10"),       # IPv6 link-local
+]
+
+
+def is_safe_url(url: str) -> bool:
+    """
+    Validate URL for SSRF protection.
+    Only allows http/https to external hosts.
+    """
+    try:
+        parsed = urlparse(url)
+
+        # Only allow http and https schemes
+        if parsed.scheme not in ("http", "https"):
+            logger.warning(f"Blocked URL with invalid scheme: {url}")
+            return False
+
+        # Must have a hostname
+        if not parsed.hostname:
+            logger.warning(f"Blocked URL without hostname: {url}")
+            return False
+
+        # Block localhost variations
+        hostname_lower = parsed.hostname.lower()
+        if hostname_lower in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+            logger.warning(f"Blocked localhost URL: {url}")
+            return False
+
+        # Resolve hostname to IP and check against blocked ranges
+        try:
+            ip_addresses = socket.getaddrinfo(parsed.hostname, None)
+            for addr_info in ip_addresses:
+                ip_str = addr_info[4][0]
+                ip = ipaddress.ip_address(ip_str)
+
+                for blocked_range in BLOCKED_IP_RANGES:
+                    if ip in blocked_range:
+                        logger.warning(
+                            f"Blocked URL resolving to private IP: {url} -> {ip_str}"
+                        )
+                        return False
+        except socket.gaierror:
+            # DNS resolution failed - could be a non-existent domain
+            logger.warning(f"DNS resolution failed for URL: {url}")
+            return False
+
+        return True
+
+    except Exception as e:
+        logger.error(f"URL validation error for {url}: {e}")
+        return False
+
 
 class AIService:
     """Service for AI-powered analysis using Claude."""
 
     def __init__(self, api_key: str):
-        self.client = anthropic.Anthropic(api_key=api_key)
+        # Use AsyncAnthropic for proper async support
+        self.client = anthropic.AsyncAnthropic(api_key=api_key)
         self.model = "claude-sonnet-4-20250514"
 
     async def _fetch_webpage(self, url: str) -> str:
-        """Fetch and extract text from a webpage."""
+        """Fetch and extract text from a webpage with SSRF protection."""
+        # SECURITY: Validate URL before fetching
+        if not is_safe_url(url):
+            logger.error(f"URL failed safety check: {url}")
+            return ""
+
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(url, follow_redirects=True)
+            async with httpx.AsyncClient(
+                timeout=30.0,
+                follow_redirects=True,
+                max_redirects=5
+            ) as client:
+                response = await client.get(url)
                 response.raise_for_status()
+
+                # Verify final URL after redirects is also safe
+                if not is_safe_url(str(response.url)):
+                    logger.error(f"Redirect to unsafe URL: {response.url}")
+                    return ""
 
                 soup = BeautifulSoup(response.text, 'html.parser')
 
@@ -112,7 +192,7 @@ If school website is not provided or no school info found, set school_info to nu
 Return ONLY the JSON object, no other text."""
 
         try:
-            response = self.client.messages.create(
+            response = await self.client.messages.create(
                 model=self.model,
                 max_tokens=2000,
                 messages=[{"role": "user", "content": prompt}]
@@ -196,7 +276,7 @@ Make questions clear, specific, and relevant to Catholic parish/school contexts.
 Return ONLY the JSON array, no other text."""
 
         try:
-            response = self.client.messages.create(
+            response = await self.client.messages.create(
                 model=self.model,
                 max_tokens=3000,
                 messages=[{"role": "user", "content": prompt}]
@@ -302,7 +382,7 @@ Return a JSON object:
 Return ONLY the JSON object, no other text."""
 
         try:
-            response = self.client.messages.create(
+            response = await self.client.messages.create(
                 model=self.model,
                 max_tokens=2000,
                 messages=[{"role": "user", "content": prompt}]
@@ -470,7 +550,7 @@ Be conservative - if information is missing, lower the completeness score.
 Return ONLY the JSON array."""
 
         try:
-            response = self.client.messages.create(
+            response = await self.client.messages.create(
                 model=self.model,
                 max_tokens=4000,
                 messages=[{"role": "user", "content": prompt}]

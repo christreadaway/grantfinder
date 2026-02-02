@@ -21,13 +21,13 @@ from routers.auth import get_current_user, get_user_api_key, User
 from routers.grants import get_user_grants, get_user_foundations
 from services.ai_service import AIService
 from services.document_processor import process_document
+from state import profiles_db, store_match_results, get_match_results as get_stored_results
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 # In-memory storage for processing state
 processing_sessions: dict = {}
-profiles_db: dict = {}  # user_id -> OrganizationProfile
 
 
 async def get_ai_service(current_user: User = Depends(get_current_user)) -> AIService:
@@ -273,6 +273,9 @@ async def match_grants(
             user_id=current_user.id
         )
 
+        # Store results for later export
+        store_match_results(results.session_id, results)
+
         return results
 
     except Exception as e:
@@ -286,8 +289,16 @@ async def get_match_results(
     current_user: User = Depends(get_current_user)
 ):
     """Get match results for a specific session."""
-    # In production, retrieve from database
-    raise HTTPException(status_code=404, detail="Session not found")
+    results = get_stored_results(session_id)
+
+    if not results:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Verify user owns these results
+    if results.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    return results
 
 
 @router.post("/shortlist/{grant_id}")
@@ -303,4 +314,5 @@ async def toggle_shortlist(
 
 def get_user_profile(user_id: str) -> Optional[OrganizationProfile]:
     """Get user's profile (for internal use)."""
-    return profiles_db.get(user_id)
+    from state import get_profile
+    return get_profile(user_id)

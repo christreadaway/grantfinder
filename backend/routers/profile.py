@@ -9,13 +9,10 @@ import logging
 
 from models.schemas import OrganizationProfile
 from routers.auth import get_current_user, User
+from state import profiles_db
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
-
-# Re-use the profiles_db from processing router
-# In production, this would be Supabase
-from routers.processing import profiles_db
 
 
 @router.get("/", response_model=OrganizationProfile)
