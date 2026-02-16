@@ -1,41 +1,29 @@
-# Claude Code Instructions - GrantFinder
+# GrantFinder — CLAUDE.md
 
-## About This Project
-Grant discovery and application tracking system. Helps find relevant grants, track application deadlines, and manage the grant application process.
+> **Repository:** `github.com/christreadaway/grantfinder`
+> **Category:** Church
+> **Stack:** Firebase, Google Auth, HTML/JS
+> **Localhost Port:** 3007
 
-## About Me (Chris Treadaway)
-Product builder, not a coder. I bring requirements and vision — you handle implementation.
+## What This Project Is
+Grant discovery and application tracking tool
 
-**Working with me:**
-- Bias toward action - just do it, don't argue
-- Make terminal commands dummy-proof (always start with `cd ~/grantfinder`)
-- Minimize questions - make judgment calls and tell me what you chose
-- I get interrupted frequently - always end sessions with a handoff note
+## Session Start Protocol
+Before starting ANY work:
 
-## Tech Stack
-[To be determined based on codebase]
-
-## File Paths
-- **Always use:** `~/grantfinder/path/to/file`
-- **Never use:** `/Users/christreadaway/...`
-- **Always start commands with:** `cd ~/grantfinder`
-
-## PII Rules (CRITICAL)
-❌ NEVER include:
-- Real organization names → use [Organization Name]
-- Grant amounts → use placeholder numbers
-- Applicant names → use [Applicant Name]
-- Email addresses → use contact@example.com
-- File paths with /Users/christreadaway → use ~/
-
-✅ ALWAYS use placeholders
-
-## Key Features (Expected)
-- Grant database/search
-- Application deadline tracking
-- Eligibility matching
-- Application status management
-- Document preparation helpers
+1. Run `git fetch origin` to get latest remote state
+2. If creating a new branch, ALWAYS branch from latest `origin/main`:
+   ```
+   git fetch origin
+   git checkout -b <branch-name> origin/main
+   ```
+3. If PROJECT_STATUS.md or SESSION_NOTES.md are missing on the current branch, recover them:
+   ```
+   git checkout origin/main -- PROJECT_STATUS.md SESSION_NOTES.md 2>/dev/null || true
+   ```
+4. Read CLAUDE.md (this file) fully before starting work
+5. Read SESSION_NOTES.md if it exists — check for prior session context, blockers, and next steps
+6. Confirm the current branch and its relationship to main before making changes
 
 ## Session End Routine
 Before ending EVERY session, Claude will automatically create/update SESSION_NOTES.md:
@@ -88,39 +76,28 @@ Ready to merge: [Yes/No - why or why not]
 
 SESSION_NOTES.md is committed to the repo and tracks all session progress over time.
 
-## Git Branch Strategy
-- Claude Code creates new branch per session
-- Merge to main when stable
-- Delete merged branches immediately
+## Project-Specific Notes
+- Grant opportunity discovery
+- Application tracking and management
+- Google authentication, Firebase backend
 
-## Current Status
-Active project - has product spec v2.6 (Feb 2, 2026).
+## Security Requirements
+- Proactively self-evaluate for SQL injection, XSS, CSRF, auth bypasses, and other common vulnerabilities
+- Flag security issues before completing builds — do not wait to be asked
+- NEVER expose API keys, tokens, or credentials in code or committed files
+- Use .env files with .gitignore for local secrets
+- Use secrets managers or environment variables for production
 
----
-Last Updated: February 16, 2026
+## PII Rules
+- No real institution names, people, addresses, phones, or emails in code — use [Parish Name], [Staff Name], etc.
+- No local file paths in committed code — use ~/ or environment variables
+- No API keys, tokens, or credentials in any committed files
+- These rules apply to ALL code, artifacts, files, or snippets generated
 
+## User Context
+- Chris is a product builder, NOT a developer — provide detailed, dummy-proof instructions
+- When giving terminal commands, ALWAYS start with `cd` to the correct directory
+- Default to Windows paths (C:\Users\chris-treadaway\) — Chris works primarily on Windows
+- Minimize questions — make reasonable judgment calls and explain what you chose
+- Auth preference: Google Sign-In via Firebase (never username/password)
 
-## Session Management
-
-### Reading Past Work
-- `SESSION_NOTES.md` contains complete session history with detailed conversations
-- Read this file at session start if you need context on recent work
-- Sessions are ordered newest-first with full technical details
-
-### Ending Sessions
-At the end of each session, say:
-> "Append session notes to SESSION_NOTES.md"
-
-Claude will automatically:
-1. Generate a detailed session entry with conversation highlights
-2. Add it to the top of SESSION_NOTES.md (newest first)
-3. Include all technical work, files changed, commands used
-4. Commit the updated file
-
-### What Gets Logged
-- Conversation highlights (substantial exchanges)
-- Technical work and implementation details
-- Files modified/created
-- Commands executed
-- URLs and documentation referenced
-- Problem-solving context and decisions made
