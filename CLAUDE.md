@@ -53,3 +53,8 @@ git push
 
 ---
 Last Updated: February 16, 2026
+
+
+## Branch Rules
+Always work on the main branch. Do not create new branches unless explicitly asked. Commit and push all changes directly to main.
+
