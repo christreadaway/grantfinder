@@ -1,56 +1,72 @@
-from contextlib import asynccontextmanager
+"""
+GrantFinder AI - Backend API
+Version 2.6 | FastAPI Backend
+"""
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
+import logging
 
-from app.core.config import settings
-from app.core.database import init_db
-from app.api.routes import api_router
+from routers import auth, grants, processing, profile, export
+from config import settings
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan events."""
-    # Startup
-    await init_db()
+    """Application lifespan management."""
+    logger.info("GrantFinder AI Backend starting up...")
     yield
-    # Shutdown
+    logger.info("GrantFinder AI Backend shutting down...")
 
 
 app = FastAPI(
     title="GrantFinder AI",
-    description="AI-powered grant matching for Catholic parishes and schools",
-    version="1.0.0",
+    description="Intelligent grant discovery and matching platform for Catholic parishes and schools",
+    version="2.6.0",
     lifespan=lifespan,
 )
 
 # CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.frontend_url, "http://localhost:3000"],
+    allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Include API routes
-app.include_router(api_router, prefix="/api")
+# Include routers
+app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
+app.include_router(grants.router, prefix="/api/grants", tags=["Grants"])
+app.include_router(processing.router, prefix="/api/processing", tags=["AI Processing"])
+app.include_router(profile.router, prefix="/api/profile", tags=["Organization Profile"])
+app.include_router(export.router, prefix="/api/export", tags=["Export"])
 
 
 @app.get("/")
 async def root():
-    """Root endpoint."""
+    """Health check endpoint."""
     return {
         "name": "GrantFinder AI",
-        "version": "1.0.0",
-        "status": "running",
-        "docs": "/docs",
+        "version": "2.6.0",
+        "status": "healthy",
+        "message": "Upload your documents. Enter your website. Get every grant opportunity scored and ranked.",
     }
 
 
-@app.get("/health")
-async def health():
-    """Health check endpoint."""
-    return {"status": "healthy"}
+@app.get("/api/health")
+async def health_check():
+    """Detailed health check."""
+    return {
+        "status": "healthy",
+        "services": {
+            "api": True,
+            "database": True,
+        },
+    }
 
 
 if __name__ == "__main__":

@@ -1,51 +1,283 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
 
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+/* GrantFinder AI - Dark Mode Default Theme */
+/* Per v2.6 Spec: Professional, terminal aesthetic */
 
 :root {
+  /* Dark mode as default */
+  --background: #0a0a0a;
+  --foreground: #ededed;
+
+  /* Brand colors */
+  --primary: #3b82f6;
+  --primary-hover: #2563eb;
+  --secondary: #1e293b;
+  --accent: #22c55e;
+  --warning: #f59e0b;
+  --danger: #ef4444;
+
+  /* Terminal colors */
   --terminal-bg: #0d1117;
-  --terminal-text: #00ff00;
-  --terminal-cyan: #00ffff;
+  --terminal-text: #c9d1d9;
+  --terminal-green: #3fb950;
+  --terminal-yellow: #d29922;
+  --terminal-blue: #58a6ff;
+  --terminal-purple: #bc8cff;
+
+  /* Score tier colors */
+  --score-excellent: #22c55e;
+  --score-good: #eab308;
+  --score-possible: #f97316;
+  --score-weak: #ef4444;
+  --score-not-eligible: #6b7280;
+
+  /* UI elements */
+  --card-bg: #161b22;
+  --card-border: #30363d;
+  --input-bg: #0d1117;
+  --input-border: #30363d;
+}
+
+/* Light mode override (toggle in settings) */
+.light {
+  --background: #ffffff;
+  --foreground: #0f172a;
+  --secondary: #f1f5f9;
+  --card-bg: #ffffff;
+  --card-border: #e2e8f0;
+  --input-bg: #f8fafc;
+  --input-border: #e2e8f0;
+  --terminal-bg: #f6f8fa;
+  --terminal-text: #24292f;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-primary: var(--primary);
+  --color-secondary: var(--secondary);
+  --color-accent: var(--accent);
+  --color-card: var(--card-bg);
+  --color-card-border: var(--card-border);
 }
 
 body {
-  @apply bg-gray-900 text-gray-100;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 }
 
-/* Terminal animation */
-@keyframes blink {
-  0%, 50% { opacity: 1; }
-  51%, 100% { opacity: 0; }
+/* Terminal-style components */
+.terminal {
+  background: var(--terminal-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 13px;
+  line-height: 1.6;
 }
 
-.terminal-cursor {
-  animation: blink 1s infinite;
+.terminal-header {
+  background: var(--card-bg);
+  border-bottom: 1px solid var(--card-border);
+  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
-/* Terminal scrollbar */
-.terminal-scroll::-webkit-scrollbar {
+.terminal-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+}
+
+.terminal-dot.red { background: #ff5f56; }
+.terminal-dot.yellow { background: #ffbd2e; }
+.terminal-dot.green { background: #27c93f; }
+
+.terminal-body {
+  padding: 16px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.terminal-line {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.terminal-timestamp {
+  color: var(--terminal-purple);
+  flex-shrink: 0;
+}
+
+.terminal-status {
+  flex-shrink: 0;
+}
+
+.terminal-status.success { color: var(--terminal-green); }
+.terminal-status.info { color: var(--terminal-blue); }
+.terminal-status.warning { color: var(--terminal-yellow); }
+.terminal-status.error { color: var(--danger); }
+
+/* Score badges */
+.score-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 12px;
+  border-radius: 9999px;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.score-badge.excellent {
+  background: rgba(34, 197, 94, 0.2);
+  color: var(--score-excellent);
+}
+
+.score-badge.good {
+  background: rgba(234, 179, 8, 0.2);
+  color: var(--score-good);
+}
+
+.score-badge.possible {
+  background: rgba(249, 115, 22, 0.2);
+  color: var(--score-possible);
+}
+
+.score-badge.weak {
+  background: rgba(239, 68, 68, 0.2);
+  color: var(--score-weak);
+}
+
+.score-badge.not-eligible {
+  background: rgba(107, 114, 128, 0.2);
+  color: var(--score-not-eligible);
+}
+
+/* Cards */
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  padding: 24px;
+}
+
+/* Buttons */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border-radius: 8px;
+  font-weight: 500;
+  transition: all 0.2s;
+  cursor: pointer;
+  border: none;
+}
+
+.btn-primary {
+  background: var(--primary);
+  color: white;
+}
+
+.btn-primary:hover {
+  background: var(--primary-hover);
+}
+
+.btn-secondary {
+  background: var(--secondary);
+  color: var(--foreground);
+  border: 1px solid var(--card-border);
+}
+
+.btn-secondary:hover {
+  background: var(--card-bg);
+}
+
+/* Inputs */
+.input {
+  width: 100%;
+  padding: 10px 16px;
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  color: var(--foreground);
+  font-size: 14px;
+}
+
+.input:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
   width: 8px;
+  height: 8px;
 }
 
-.terminal-scroll::-webkit-scrollbar-track {
-  background: #1a1a2e;
+::-webkit-scrollbar-track {
+  background: var(--background);
 }
 
-.terminal-scroll::-webkit-scrollbar-thumb {
-  background: #4a4a6a;
+::-webkit-scrollbar-thumb {
+  background: var(--card-border);
   border-radius: 4px;
 }
 
-/* Score colors */
-.score-excellent { @apply text-green-400; }
-.score-good { @apply text-yellow-400; }
-.score-possible { @apply text-orange-400; }
-.score-weak { @apply text-red-400; }
-.score-not-eligible { @apply text-gray-500; }
+::-webkit-scrollbar-thumb:hover {
+  background: #4b5563;
+}
 
-/* Dark mode by default */
-html {
-  color-scheme: dark;
+/* Animations */
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.animate-pulse {
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+/* File upload drop zone */
+.dropzone {
+  border: 2px dashed var(--card-border);
+  border-radius: 12px;
+  padding: 40px;
+  text-align: center;
+  transition: all 0.2s;
+}
+
+.dropzone:hover,
+.dropzone.active {
+  border-color: var(--primary);
+  background: rgba(59, 130, 246, 0.05);
+}
+
+/* Progress bar */
+.progress-bar {
+  height: 8px;
+  background: var(--secondary);
+  border-radius: 9999px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--primary);
+  transition: width 0.3s ease;
 }

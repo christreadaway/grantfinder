@@ -1,96 +1,151 @@
-import axios from 'axios'
+/**
+ * API client for GrantFinder AI backend
+ */
+import axios, { AxiosInstance } from 'axios';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
-const api = axios.create({
-  baseURL: `${API_URL}/api`,
-  headers: {
-    'Content-Type': 'application/json',
-  },
-})
+class ApiClient {
+  private client: AxiosInstance;
+  private token: string | null = null;
 
-// Add auth token to requests
-api.interceptors.request.use((config) => {
-  if (typeof window !== 'undefined') {
-    const token = localStorage.getItem('token')
-    if (token) {
-      config.headers.Authorization = `Bearer ${token}`
-    }
-  }
-  return config
-})
+  constructor() {
+    this.client = axios.create({
+      baseURL: API_BASE_URL,
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    });
 
-// Handle auth errors
-api.interceptors.response.use(
-  (response) => response,
-  (error) => {
-    if (error.response?.status === 401) {
-      if (typeof window !== 'undefined') {
-        localStorage.removeItem('token')
-        localStorage.removeItem('user')
-        window.location.href = '/'
+    // Add auth interceptor
+    this.client.interceptors.request.use((config) => {
+      if (this.token) {
+        config.headers.Authorization = `Bearer ${this.token}`;
       }
-    }
-    return Promise.reject(error)
+      return config;
+    });
   }
-)
 
-export default api
+  setToken(token: string) {
+    this.token = token;
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('auth_token', token);
+    }
+  }
 
-// Auth
-export const getGoogleAuthUrl = () => api.get<{ auth_url: string }>('/auth/google')
-export const googleCallback = (code: string) =>
-  api.post<{ access_token: string; user: any }>('/auth/google/callback', null, { params: { code } })
+  loadToken() {
+    if (typeof window !== 'undefined') {
+      this.token = localStorage.getItem('auth_token');
+    }
+    return this.token;
+  }
 
-// Users
-export const getCurrentUser = () => api.get('/users/me')
-export const updateUser = (data: { name?: string; api_key?: string }) =>
-  api.put('/users/me', data)
+  clearToken() {
+    this.token = null;
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem('auth_token');
+    }
+  }
 
-// Organizations
-export const getOrganizations = () => api.get('/organizations/')
-export const createOrganization = (data: { name: string; church_website?: string; school_website?: string }) =>
-  api.post('/organizations/', data)
-export const getOrganization = (id: number) => api.get(`/organizations/${id}`)
-export const updateOrganization = (id: number, data: any) => api.put(`/organizations/${id}`, data)
-export const deleteOrganization = (id: number) => api.delete(`/organizations/${id}`)
-export const generateProfile = (orgId: number) => api.post(`/organizations/${orgId}/generate-profile`)
+  // Auth endpoints
+  async googleAuth(credential: string) {
+    const response = await this.client.post('/api/auth/google', { credential });
+    this.setToken(response.data.access_token);
+    return response.data;
+  }
 
-// Grants
-export const getGrantDatabases = () => api.get('/grants/databases')
-export const uploadGrantDatabase = (file: File, name?: string) => {
-  const formData = new FormData()
-  formData.append('file', file)
-  if (name) formData.append('name', name)
-  return api.post('/grants/databases/upload', formData, {
-    headers: { 'Content-Type': 'multipart/form-data' },
-  })
+  async getMe() {
+    const response = await this.client.get('/api/auth/me');
+    return response.data;
+  }
+
+  async setApiKey(apiKey: string) {
+    const response = await this.client.post('/api/auth/api-key', { api_key: apiKey });
+    return response.data;
+  }
+
+  async getApiKeyStatus() {
+    const response = await this.client.get('/api/auth/api-key/status');
+    return response.data;
+  }
+
+  // Grant endpoints
+  async uploadGrantDatabase(file: File) {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await this.client.post('/api/grants/upload', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return response.data;
+  }
+
+  async getGrants(category?: string) {
+    const params = category ? { category } : {};
+    const response = await this.client.get('/api/grants/', { params });
+    return response.data;
+  }
+
+  async getGrantStats() {
+    const response = await this.client.get('/api/grants/stats');
+    return response.data;
+  }
+
+  // Processing endpoints
+  async scanWebsite(churchUrl?: string, schoolUrl?: string) {
+    const response = await this.client.post('/api/processing/scan-website', {
+      church_url: churchUrl,
+      school_url: schoolUrl,
+    });
+    return response.data;
+  }
+
+  async generateQuestionnaire() {
+    const response = await this.client.post('/api/processing/generate-questionnaire');
+    return response.data;
+  }
+
+  async submitQuestionnaire(answers: any[], freeFormText?: string) {
+    const response = await this.client.post('/api/processing/submit-questionnaire', {
+      answers,
+      free_form_text: freeFormText,
+    });
+    return response.data;
+  }
+
+  async uploadDocument(file: File) {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await this.client.post('/api/processing/upload-document', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return response.data;
+  }
+
+  async getProfile() {
+    const response = await this.client.get('/api/processing/profile');
+    return response.data;
+  }
+
+  async updateProfile(profile: any) {
+    const response = await this.client.put('/api/processing/profile', profile);
+    return response.data;
+  }
+
+  async matchGrants() {
+    const response = await this.client.post('/api/processing/match-grants');
+    return response.data;
+  }
+
+  // Export endpoints
+  async exportResults(sessionId: string, format: 'csv' | 'md' | 'pdf', includeAll: boolean = false) {
+    const response = await this.client.post('/api/export/', {
+      session_id: sessionId,
+      format,
+      include_all_matches: includeAll,
+    }, { responseType: 'blob' });
+    return response.data;
+  }
 }
-export const getGrants = (dbId: number) => api.get(`/grants/databases/${dbId}`)
-export const deleteGrantDatabase = (dbId: number) => api.delete(`/grants/databases/${dbId}`)
-export const generateQuestionnaire = (dbId: number) => api.post(`/grants/databases/${dbId}/generate-questionnaire`)
 
-// Documents
-export const getDocuments = (orgId: number) => api.get(`/documents/${orgId}`)
-export const uploadDocuments = (orgId: number, files: File[]) => {
-  const formData = new FormData()
-  files.forEach((file) => formData.append('files', file))
-  return api.post(`/documents/${orgId}/upload`, formData, {
-    headers: { 'Content-Type': 'multipart/form-data' },
-  })
-}
-export const deleteDocument = (orgId: number, docId: number) =>
-  api.delete(`/documents/${orgId}/${docId}`)
-
-// Matching
-export const getMatchingSession = (sessionId: number) => api.get(`/matching/sessions/${sessionId}`)
-export const exportResults = (sessionId: number, format: 'markdown' | 'csv' | 'json') =>
-  api.get(`/matching/sessions/${sessionId}/export/${format}`, {
-    responseType: format === 'json' ? 'json' : 'blob',
-  })
-
-// SSE endpoints (for streaming)
-export const getScanWebsiteUrl = (orgId: number) => `${API_URL}/api/organizations/${orgId}/scan-website`
-export const getProcessDocumentsUrl = (orgId: number) => `${API_URL}/api/documents/${orgId}/process`
-export const getMatchingUrl = (orgId: number, grantDbId: number) =>
-  `${API_URL}/api/matching/${orgId}/match?grant_database_id=${grantDbId}`
+export const api = new ApiClient();
+export default api;
