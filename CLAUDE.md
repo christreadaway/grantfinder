@@ -55,6 +55,15 @@ git push
 Last Updated: February 16, 2026
 
 
+## GrantWriter Module (Application Writer)
+- **Where it lives:** `backend/routers/writer.py`, `backend/services/writer_service.py`, `backend/services/writer_export.py`, `backend/models/writer_schemas.py`, `frontend/src/app/writer/`. Full docs: `docs/grant-writer.md`.
+- **Single source of truth:** the writer READS and EXTENDS the existing org profile (`state.profiles_db`) and grant records (`routers/grants.grants_db`). Never duplicate them. An application is just `{user, grant_id}` + writer artifacts.
+- **AI orchestration map (one purpose-built prompt per stage):** Extract (`grant_spec_v1`, `voice_profile_v1`) → Map (`fit_gap_v1`) → Route (`intake_packets_v1`) → Draft (`section_draft_v1`) → Score (`self_score_v1`) → Refine (`section_refine_v1`) → Enforce (`voice_enforce_v1`). All in `writer_service.py`.
+- **Human approval gates (never bypass):** (1) strategy confirmation before drafting, (2) stakeholder emails are copy-paste only — never auto-sent, (3) export is an explicit user action — nothing is ever auto-submitted to a funder.
+- **Hard rules in code:** never fabricate (unsupported claims get flagged); never export over-limit or banned-phrase content; high-severity gaps block drafting until answered/confirmed/waived.
+- **Logging:** file logs at `~/logs/grantfinder/grantfinder.log` (daily rotation, 14 days). Every AI call logged with correlation ID, tokens, latency, cost. Debug bundle: `GET /api/writer/applications/{id}/debug-bundle` returns paste-ready markdown — look there first when something breaks. Set `LOG_LEVEL=debug` for verbose logs.
+- **Model:** set via `CLAUDE_MODEL` env var (default `claude-sonnet-5`). Never hardcode.
+
 ## Branch Rules
 Always work on the main branch. Do not create new branches unless explicitly asked. Commit and push all changes directly to main.
 

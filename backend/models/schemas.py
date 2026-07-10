@@ -186,6 +186,19 @@ class OrganizationProfile(BaseModel):
     # From Free-Form Text
     free_form_notes: Optional[str] = None
 
+    # =========================================================================
+    # Writer module extension (GrantWriter PRD 4.1) - the same profile powers
+    # both matching and application drafting. Single source of truth.
+    # =========================================================================
+    voice_profile: Optional[Dict[str, Any]] = None    # {style_guidelines, samples[], banned_phrases[]}
+    evidence: List[Dict[str, Any]] = []               # {id, type, summary, source_ref, linked_programs[]}
+    team_members: List[Dict[str, Any]] = []           # {name, role, credentials, expertise, fit_notes}
+    collaborations: List[Dict[str, Any]] = []         # {partner, description, type, approx_date}
+    validators: List[Dict[str, Any]] = []             # {name, role, relationship, can_write_letter, can_be_named}
+    in_kind_resources: List[Dict[str, Any]] = []      # {description, estimated_annual_value}
+    prior_grants_detail: List[Dict[str, Any]] = []    # {funder, amount, purpose, manager, outcome}
+    financial_capacity: Optional[str] = None          # prior grants managed, subaward ability, audit history
+
     # Metadata
     sources: List[str] = []  # Document/URL sources for each extraction
     confidence_score: float = 0.0

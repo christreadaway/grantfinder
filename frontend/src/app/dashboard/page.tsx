@@ -183,6 +183,16 @@ export default function Dashboard() {
     }
   };
 
+  const handleWriteApplication = async (grantId: string) => {
+    try {
+      const app = await api.createApplication(grantId);
+      router.push(`/writer?id=${app.id}`);
+    } catch (error: any) {
+      console.error('Failed to create application:', error);
+      alert(error?.response?.data?.detail || 'Could not start the application — is the backend running?');
+    }
+  };
+
   const handleDocumentUpload = (files: FileList | null) => {
     if (!files) return;
     setDocuments(prev => [...prev, ...Array.from(files)]);
@@ -833,7 +843,15 @@ export default function Dashboard() {
                     >
                       Visit Grant Website →
                     </a>
-                    <span className="text-sm text-gray-500">Contact: {match.contact}</span>
+                    <div className="flex items-center gap-4">
+                      <span className="text-sm text-gray-500">Contact: {match.contact}</span>
+                      <button
+                        onClick={() => handleWriteApplication(match.grant_id)}
+                        className="btn btn-primary text-sm"
+                      >
+                        Write Application →
+                      </button>
+                    </div>
                   </div>
                 </div>
               ))}
