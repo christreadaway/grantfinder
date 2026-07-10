@@ -19,10 +19,20 @@ from models.schemas import (
     WebsiteScanResult, Questionnaire, QuestionnaireQuestion,
     DocumentExtractionResult, MatchResults, GrantMatch,
     MatchScoreBreakdown, MatchScoreTier, Grant, OrganizationProfile,
-    GrantCategory, GeoQualified
+    GrantCategory, GeoQualified, GrantStatus
 )
+from config import settings
 
 logger = logging.getLogger(__name__)
+
+# US states whose orgs satisfy "Yes - TX Only" grants
+TX_STATE_VALUES = {"TX", "TEXAS"}
+
+# Paths worth crawling on a parish/school website, in priority order
+PRIORITY_PATH_KEYWORDS = [
+    "about", "school", "academic", "admission", "ministr", "parish",
+    "news", "bulletin", "giving", "stewardship", "capital", "facilities",
+]
 
 # Blocked IP ranges for SSRF protection
 BLOCKED_IP_RANGES = [
@@ -93,42 +103,91 @@ class AIService:
     def __init__(self, api_key: str):
         # Use AsyncAnthropic for proper async support
         self.client = anthropic.AsyncAnthropic(api_key=api_key)
-        self.model = "claude-sonnet-4-20250514"
+        self.model = settings.CLAUDE_MODEL
 
-    async def _fetch_webpage(self, url: str) -> str:
-        """Fetch and extract text from a webpage with SSRF protection."""
-        # SECURITY: Validate URL before fetching
+    async def _fetch_page(self, client: httpx.AsyncClient, url: str) -> tuple:
+        """Fetch one page; return (text, internal_links) with SSRF protection."""
         if not is_safe_url(url):
             logger.error(f"URL failed safety check: {url}")
-            return ""
+            return "", []
 
+        try:
+            response = await client.get(url)
+            response.raise_for_status()
+
+            # Verify final URL after redirects is also safe
+            if not is_safe_url(str(response.url)):
+                logger.error(f"Redirect to unsafe URL: {response.url}")
+                return "", []
+
+            soup = BeautifulSoup(response.text, 'html.parser')
+
+            # Collect same-host links before stripping nav elements
+            from urllib.parse import urljoin
+            base_host = urlparse(str(response.url)).hostname
+            links = []
+            for a in soup.find_all("a", href=True):
+                absolute = urljoin(str(response.url), a["href"])
+                parsed = urlparse(absolute)
+                if parsed.scheme in ("http", "https") and parsed.hostname == base_host:
+                    links.append(absolute.split("#")[0])
+
+            # Remove script and style elements
+            for script in soup(["script", "style", "nav", "footer", "header"]):
+                script.decompose()
+
+            text = soup.get_text(separator='\n', strip=True)
+            return text[:20000], links
+
+        except Exception as e:
+            logger.error(f"Failed to fetch {url}: {e}")
+            return "", []
+
+    async def _fetch_webpage(self, url: str) -> str:
+        """
+        Crawl a website: homepage plus the most grant-relevant internal pages
+        (about, school, ministries, news, bulletins, giving...).
+        """
         try:
             async with httpx.AsyncClient(
                 timeout=30.0,
                 follow_redirects=True,
                 max_redirects=5
             ) as client:
-                response = await client.get(url)
-                response.raise_for_status()
-
-                # Verify final URL after redirects is also safe
-                if not is_safe_url(str(response.url)):
-                    logger.error(f"Redirect to unsafe URL: {response.url}")
+                home_text, links = await self._fetch_page(client, url)
+                if not home_text:
                     return ""
 
-                soup = BeautifulSoup(response.text, 'html.parser')
+                pages = [f"=== PAGE: {url} ===\n{home_text}"]
+                visited = {url.rstrip("/")}
 
-                # Remove script and style elements
-                for script in soup(["script", "style", "nav", "footer", "header"]):
-                    script.decompose()
+                # Rank internal links by how grant-relevant their path looks
+                scored = []
+                for link in links:
+                    normalized = link.rstrip("/")
+                    if normalized in visited:
+                        continue
+                    path = urlparse(link).path.lower()
+                    score = sum(1 for kw in PRIORITY_PATH_KEYWORDS if kw in path)
+                    if score > 0:
+                        scored.append((score, link))
+                scored.sort(key=lambda item: item[0], reverse=True)
 
-                text = soup.get_text(separator='\n', strip=True)
+                for _, link in scored[:settings.WEBSITE_CRAWL_MAX_PAGES - 1]:
+                    normalized = link.rstrip("/")
+                    if normalized in visited:
+                        continue
+                    visited.add(normalized)
+                    page_text, _ = await self._fetch_page(client, link)
+                    if page_text:
+                        pages.append(f"=== PAGE: {link} ===\n{page_text}")
 
-                # Limit text length
-                return text[:50000]
+                combined = "\n\n".join(pages)
+                logger.info(f"Crawled {len(pages)} pages from {url}")
+                return combined[:80000]
 
         except Exception as e:
-            logger.error(f"Failed to fetch {url}: {e}")
+            logger.error(f"Failed to crawl {url}: {e}")
             return ""
 
     async def scan_websites(
@@ -435,14 +494,34 @@ Return ONLY the JSON object, no other text."""
         - Timing (10%)
         - Completeness (5%)
         """
+        import asyncio
+
         session_id = str(uuid.uuid4())
         matches: List[GrantMatch] = []
 
-        # Process in batches to manage token limits
+        # Spec rule: hard disqualifiers first, deterministically - no AI call
+        # needed (or billed) for grants that can't qualify.
+        to_score: List[Grant] = []
+        for grant in grants:
+            prefiltered = self._deterministic_prefilter(grant, profile)
+            if prefiltered:
+                matches.append(prefiltered)
+            else:
+                to_score.append(grant)
+
+        # Score remaining grants in parallel batches (bounded concurrency)
         batch_size = 10
-        for i in range(0, len(grants), batch_size):
-            batch = grants[i:i + batch_size]
-            batch_matches = await self._score_grant_batch(batch, profile)
+        batches = [to_score[i:i + batch_size] for i in range(0, len(to_score), batch_size)]
+        semaphore = asyncio.Semaphore(4)
+
+        async def score_with_limit(batch: List[Grant]) -> List[GrantMatch]:
+            async with semaphore:
+                return await self._score_grant_batch(batch, profile)
+
+        batch_results = await asyncio.gather(
+            *(score_with_limit(batch) for batch in batches)
+        )
+        for batch_matches in batch_results:
             matches.extend(batch_matches)
 
         # Sort by score descending
@@ -470,6 +549,78 @@ Return ONLY the JSON object, no other text."""
             expires_at=datetime.utcnow() + timedelta(days=90),
         )
 
+    def _deterministic_prefilter(
+        self,
+        grant: Grant,
+        profile: OrganizationProfile
+    ) -> Optional[GrantMatch]:
+        """
+        Apply hard disqualifiers in code so they are guaranteed (and free):
+        - Geographic restriction: TX-only grant + non-TX org -> Not Eligible
+        - Expired deadline (parseable date in the past) or CLOSED status
+        Returns a GrantMatch if disqualified, else None (send to AI scoring).
+        """
+        state = (profile.state or "").strip().upper()
+
+        def disqualified(reason: str, timing: float = 0) -> GrantMatch:
+            return GrantMatch(
+                grant_id=grant.id,
+                grant_name=grant.grant_name,
+                funder=grant.funder,
+                amount=grant.amount,
+                deadline=grant.deadline,
+                url=grant.url,
+                contact=grant.contact,
+                category=grant.category,
+                geo_qualified=grant.geo_qualified,
+                score=0,
+                score_tier=MatchScoreTier.NOT_ELIGIBLE,
+                score_breakdown=MatchScoreBreakdown(
+                    eligibility_fit=0, need_alignment=0,
+                    capacity_signals=0, timing=timing, completeness=100,
+                ),
+                explanation=reason,
+                evidence=[],
+            )
+
+        # Geographic filter first (per spec 5.2)
+        if grant.geo_qualified == GeoQualified.TX_ONLY and state and state not in TX_STATE_VALUES:
+            return disqualified(
+                f"Geographic restriction: this grant is limited to Texas organizations, "
+                f"and your organization is in {profile.state}."
+            )
+        if grant.geo_qualified == GeoQualified.NO:
+            return disqualified(
+                "This grant's geographic restriction excludes your organization "
+                "per the grant database."
+            )
+
+        # Closed / expired
+        if grant.status == GrantStatus.CLOSED:
+            return disqualified("This grant is marked CLOSED in the database.", timing=0)
+
+        deadline_date = self._parse_deadline(grant.deadline)
+        if deadline_date and deadline_date < datetime.utcnow().date():
+            return disqualified(
+                f"Deadline passed ({grant.deadline}). Check the funder's website "
+                f"for the next cycle.", timing=0
+            )
+
+        return None
+
+    @staticmethod
+    def _parse_deadline(deadline: str) -> Optional[Any]:
+        """Parse a deadline string into a date if it looks like one."""
+        if not deadline:
+            return None
+        text = str(deadline).strip()
+        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%B %d, %Y", "%b %d, %Y"):
+            try:
+                return datetime.strptime(text, fmt).date()
+            except ValueError:
+                continue
+        return None
+
     async def _score_grant_batch(
         self,
         grants: List[Grant],
@@ -489,6 +640,10 @@ Return ONLY the JSON object, no other text."""
             "security_concerns": profile.security_concerns,
             "current_initiatives": profile.current_initiatives,
             "annual_budget": profile.annual_budget,
+            "free_form_notes": profile.free_form_notes,
+            "questionnaire_answers": profile.questionnaire_answers,
+            "previous_grants": profile.previous_grants,
+            "student_count": profile.student_count,
         }
 
         grants_data = [
@@ -499,6 +654,8 @@ Return ONLY the JSON object, no other text."""
                 "amount": g.amount,
                 "deadline": g.deadline,
                 "description": g.description,
+                "eligibility_notes": g.eligibility_notes,
+                "funds_for": g.funds_for,
                 "geo_qualified": g.geo_qualified.value,
                 "category": g.category.value,
                 "url": g.url,
@@ -508,6 +665,8 @@ Return ONLY the JSON object, no other text."""
         ]
 
         prompt = f"""Score each grant for this Catholic organization.
+
+TODAY'S DATE: {datetime.utcnow().strftime('%Y-%m-%d')}
 
 ORGANIZATION PROFILE:
 {json.dumps(profile_summary, indent=2)}
@@ -617,33 +776,42 @@ Return ONLY the JSON array."""
 
                 matches.append(match)
 
+            # Coverage guarantee: any grant the AI response skipped still gets
+            # a reviewable entry instead of silently disappearing.
+            scored_ids = {m.grant_id for m in matches}
+            for grant in grants:
+                if grant.id not in scored_ids:
+                    matches.append(self._fallback_match(grant))
+
             return matches
 
         except Exception as e:
             logger.error(f"Grant scoring error: {e}")
             # Return default scores on error
-            return [
-                GrantMatch(
-                    grant_id=g.id,
-                    grant_name=g.grant_name,
-                    funder=g.funder,
-                    amount=g.amount,
-                    deadline=g.deadline,
-                    url=g.url,
-                    contact=g.contact,
-                    category=g.category,
-                    geo_qualified=g.geo_qualified,
-                    score=50,
-                    score_tier=MatchScoreTier.POSSIBLE,
-                    score_breakdown=MatchScoreBreakdown(
-                        eligibility_fit=50,
-                        need_alignment=50,
-                        capacity_signals=50,
-                        timing=50,
-                        completeness=50,
-                    ),
-                    explanation="Unable to fully evaluate - please review manually",
-                    evidence=[],
-                )
-                for g in grants
-            ]
+            return [self._fallback_match(g) for g in grants]
+
+    @staticmethod
+    def _fallback_match(grant: Grant) -> GrantMatch:
+        """Neutral 'review manually' match used when AI scoring is unavailable."""
+        return GrantMatch(
+            grant_id=grant.id,
+            grant_name=grant.grant_name,
+            funder=grant.funder,
+            amount=grant.amount,
+            deadline=grant.deadline,
+            url=grant.url,
+            contact=grant.contact,
+            category=grant.category,
+            geo_qualified=grant.geo_qualified,
+            score=50,
+            score_tier=MatchScoreTier.POSSIBLE,
+            score_breakdown=MatchScoreBreakdown(
+                eligibility_fit=50,
+                need_alignment=50,
+                capacity_signals=50,
+                timing=50,
+                completeness=50,
+            ),
+            explanation="Unable to fully evaluate - please review manually",
+            evidence=[],
+        )

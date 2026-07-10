@@ -90,6 +90,30 @@ class ApiClient {
     return response.data;
   }
 
+  // Grant discovery endpoints
+  async loadStarterDatabase() {
+    const response = await this.client.post('/api/discovery/seed');
+    return response.data;
+  }
+
+  async searchGrantsGov(keywords?: string[], maxResults?: number) {
+    const response = await this.client.post('/api/discovery/grants-gov', {
+      keywords,
+      max_results: maxResults,
+    });
+    return response.data;
+  }
+
+  async webDiscovery(focus?: string) {
+    const response = await this.client.post('/api/discovery/web-search', { focus });
+    return response.data;
+  }
+
+  async getDiscoverySources() {
+    const response = await this.client.get('/api/discovery/sources');
+    return response.data;
+  }
+
   // Processing endpoints
   async scanWebsite(churchUrl?: string, schoolUrl?: string) {
     const response = await this.client.post('/api/processing/scan-website', {

@@ -26,6 +26,9 @@ export default function Dashboard() {
   const [apiKeySet, setApiKeySet] = useState(false);
   const [grantFile, setGrantFile] = useState<File | null>(null);
   const [grantStats, setGrantStats] = useState<any>(null);
+  const [discoveredTotal, setDiscoveredTotal] = useState(0);
+  const [discoveryStatus, setDiscoveryStatus] = useState<string | null>(null);
+  const [discoveryBusy, setDiscoveryBusy] = useState<string | null>(null);
   const [churchUrl, setChurchUrl] = useState('');
   const [schoolUrl, setSchoolUrl] = useState('');
   const [websiteScanned, setWebsiteScanned] = useState(false);
@@ -80,8 +83,40 @@ export default function Dashboard() {
     }
   };
 
+  const runDiscovery = async (source: 'seed' | 'grants_gov' | 'web_discovery') => {
+    setDiscoveryBusy(source);
+    setDiscoveryStatus(null);
+    try {
+      let result;
+      if (source === 'seed') {
+        result = await api.loadStarterDatabase();
+        setDiscoveryStatus(`Starter database loaded: ${result.added} grants added (${result.total_grants} total).`);
+      } else if (source === 'grants_gov') {
+        result = await api.searchGrantsGov();
+        setDiscoveryStatus(`Grants.gov: found ${result.found}, added ${result.added} new (${result.total_grants} total).`);
+      } else {
+        result = await api.webDiscovery();
+        setDiscoveryStatus(`AI web discovery: found ${result.found}, added ${result.added} new (${result.total_grants} total).`);
+      }
+      setDiscoveredTotal(result.total_grants);
+    } catch (error: any) {
+      console.error(`Discovery (${source}) failed:`, error);
+      const detail = error?.response?.data?.detail || 'request failed — is the backend running?';
+      setDiscoveryStatus(`Discovery failed: ${detail}`);
+    } finally {
+      setDiscoveryBusy(null);
+    }
+  };
+
   const handleGrantUpload = async () => {
-    if (!grantFile) return;
+    // A user-uploaded Excel is now optional: discovery can fill the database.
+    if (!grantFile) {
+      if (discoveredTotal > 0) {
+        setGrantStats({ total_grants: discoveredTotal });
+        setCurrentStep('website');
+      }
+      return;
+    }
     try {
       const result = await api.uploadGrantDatabase(grantFile);
       setGrantStats(result);
@@ -402,12 +437,65 @@ export default function Dashboard() {
             </div>
           )}
 
-          {/* Step 2: Grant Database Upload */}
+          {/* Step 2: Grant Database — discovery + optional upload */}
           {currentStep === 'grants' && (
             <div className="card">
-              <h2 className="text-2xl font-bold mb-4">Upload Grant Database</h2>
+              <h2 className="text-2xl font-bold mb-4">Build Your Grant Database</h2>
               <p className="text-gray-400 mb-6">
-                Upload your Excel file with 5 grant categories.
+                Discover grants automatically, upload your own Excel file, or both.
+                Everything merges into one database with duplicates removed.
+              </p>
+
+              <div className="grid gap-3 mb-6">
+                <button
+                  onClick={() => runDiscovery('seed')}
+                  disabled={discoveryBusy !== null}
+                  className="btn btn-secondary w-full flex items-center justify-between"
+                >
+                  <span className="flex items-center gap-2">
+                    <Database className="w-5 h-5" />
+                    Load Starter Database
+                  </span>
+                  <span className="text-sm text-gray-400">
+                    {discoveryBusy === 'seed' ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Curated Catholic + secular grants'}
+                  </span>
+                </button>
+                <button
+                  onClick={() => runDiscovery('grants_gov')}
+                  disabled={discoveryBusy !== null}
+                  className="btn btn-secondary w-full flex items-center justify-between"
+                >
+                  <span className="flex items-center gap-2">
+                    <Globe className="w-5 h-5" />
+                    Search Grants.gov
+                  </span>
+                  <span className="text-sm text-gray-400">
+                    {discoveryBusy === 'grants_gov' ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Live federal opportunities'}
+                  </span>
+                </button>
+                <button
+                  onClick={() => runDiscovery('web_discovery')}
+                  disabled={discoveryBusy !== null}
+                  className="btn btn-secondary w-full flex items-center justify-between"
+                >
+                  <span className="flex items-center gap-2">
+                    <Search className="w-5 h-5" />
+                    AI Web Discovery
+                  </span>
+                  <span className="text-sm text-gray-400">
+                    {discoveryBusy === 'web_discovery' ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Claude searches the web (uses your API key)'}
+                  </span>
+                </button>
+              </div>
+
+              {discoveryStatus && (
+                <div className={`mb-6 p-3 rounded text-sm ${discoveryStatus.startsWith('Discovery failed') ? 'bg-red-900/30 text-red-300' : 'bg-green-900/30 text-green-300'}`}>
+                  {discoveryStatus}
+                </div>
+              )}
+
+              <p className="text-gray-500 text-sm mb-3">
+                Optional: upload your own Excel file with the 5 grant categories.
               </p>
               <div
                 className={`dropzone ${grantFile ? 'active' : ''}`}
@@ -442,10 +530,10 @@ export default function Dashboard() {
               </div>
               <button
                 onClick={handleGrantUpload}
-                disabled={!grantFile}
+                disabled={!grantFile && discoveredTotal === 0}
                 className="btn btn-primary w-full mt-6"
               >
-                Upload and Continue
+                {grantFile ? 'Upload and Continue' : `Continue with ${discoveredTotal} Discovered Grants`}
                 <ChevronRight className="w-5 h-5" />
               </button>
             </div>

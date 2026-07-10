@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import logging
 
-from routers import auth, grants, processing, profile, export
+from routers import auth, grants, processing, profile, export, discovery
 from config import settings
 
 logging.basicConfig(level=logging.INFO)
@@ -44,6 +44,7 @@ app.include_router(grants.router, prefix="/api/grants", tags=["Grants"])
 app.include_router(processing.router, prefix="/api/processing", tags=["AI Processing"])
 app.include_router(profile.router, prefix="/api/profile", tags=["Organization Profile"])
 app.include_router(export.router, prefix="/api/export", tags=["Export"])
+app.include_router(discovery.router, prefix="/api/discovery", tags=["Grant Discovery"])
 
 
 @app.get("/")
