@@ -9,6 +9,32 @@ This file contains a complete history of Claude Code sessions for this repositor
 
 ---
 
+## 2026-07-10 (evening) — Netlify Deployment Readiness
+
+### What We Built
+Made the repo deployable: frontend to Netlify, backend to Railway/Render (Netlify can't run Python servers — split matches spec section 7's hosting table).
+
+1. **Deleted the dead legacy frontend generation** (`setup/`, `context/`, `results/`, `profile/`, `auth/callback`, `providers.tsx`, `useAuth.ts`, `FileUpload.tsx`) — they referenced APIs that never existed in this codebase and blocked every production build.
+2. **Fixed the build config conflicts**: removed stale v3-style `postcss.config.js` that shadowed the Tailwind v4 config; consolidated duplicate `next.config.js`/`next.config.ts` into one (with `images.remotePatterns`).
+3. **`next build` passes for the first time** — clean routes: `/`, `/dashboard`, `/writer`. `tsc --noEmit` fully clean.
+4. **Added deploy scaffolding**: repo-root `netlify.toml` (base `frontend`, Next plugin), `backend/Procfile` (uvicorn for Railway/Render), `docs/deployment.md` (step-by-step, env vars, CORS), CORS_ORIGINS documented in `.env.example`.
+5. **Locked in Chris's policy decisions** (recorded in docs/grant-writer.md): honesty ledger = name-and-frame by default; exactly three gates, no per-section approval; plain npm (no sfw).
+
+### Current Status
+- ✅ Production frontend build green; backend 16-check pipeline test still green
+- 🚧 Deploy itself happens in Netlify/Railway dashboards (needs Chris's accounts)
+- ⚠️ In-memory storage means deployed data resets on backend restart — documented in deployment.md
+
+### Branch Info
+- Branch: `claude/grant-finder-review-0urze2`
+
+### Next Steps
+1. Deploy: Railway backend first, then Netlify frontend with NEXT_PUBLIC_API_URL
+2. Live-key end-to-end run of writer + web discovery
+3. Supabase persistence (now the biggest gap for a real deployment)
+
+---
+
 ## 2026-07-10 (later) — GrantWriter Module (Application Writer PRD v2.0)
 
 ### What We Built

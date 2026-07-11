@@ -1,0 +1,12 @@
+# Netlify deploys the Next.js frontend from /frontend.
+# The Python FastAPI backend cannot run on Netlify - deploy it to
+# Railway or Render and set NEXT_PUBLIC_API_URL to its URL.
+# See docs/deployment.md.
+
+[build]
+  base = "frontend"
+  command = "npm run build"
+  publish = ".next"
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"

@@ -85,6 +85,14 @@ on any match card in the dashboard results).
   bundle: correlation ID, state summary, AI call timeline with costs, errors.
 - `GET /api/writer/logs/recent` → in-app error/log surface.
 
+## Resolved policy decisions (were PRD open questions)
+
+- **Honesty ledger (Q6, decided by Chris):** weaknesses are named and framed
+  for the funder by default - never silently omitted.
+- **Gates (Q7, decided by Chris):** exactly the three mandated gates
+  (strategy confirmation, copy-paste-only stakeholder sends, explicit export).
+  No per-section drafting approval.
+
 ## Voice profile
 
 `POST /api/writer/voice/analyze` with writing samples extracts style
