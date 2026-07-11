@@ -9,6 +9,29 @@ This file contains a complete history of Claude Code sessions for this repositor
 
 ---
 
+## 2026-07-10 (night) — Close the Real-Wiring Gaps
+
+### What We Built
+Audit of "anything else that needs building" found the dashboard was partly theater. Fixed:
+1. **Document upload actually works now** — files selected in step 5 were never sent to the backend; document extraction (a core spec pillar: "AI catches the playground mention in your bulletin") never ran. The matching step now uploads each document, runs extraction, and shows the real extracted needs in the terminal.
+2. **Fabricated demo results removed** — on any matching error the UI used to silently display hardcoded fake grants (whose "Write Application" would 404). Now errors surface honestly in the terminal with a back-and-retry button. Same cleanup for the silent fallbacks in the API-key, grant-upload, website-scan, and questionnaire steps.
+3. **Results export buttons wired** — CSV and Markdown report download via the existing backend export endpoints (buttons previously did nothing).
+4. **Voice profile UI added** — writer page now has a "Your Voice" card: paste a real writing sample, capture the voice profile, see it reflected. Endpoint existed; UI didn't.
+
+### Current Status
+- ✅ tsc clean, `next build` green, 16-check writer pipeline test passing
+- The dashboard now does only real work — no fabricated data paths remain
+
+### Branch Info
+- Branch: `claude/grant-finder-review-0urze2`
+
+### Next Steps
+1. Deploy (docs/deployment.md), then live-key end-to-end run
+2. Supabase persistence — now clearly the biggest remaining gap
+3. Nice-to-haves: real SSE progress terminal, shortlist persistence, profile review/edit screen (spec 3.3)
+
+---
+
 ## 2026-07-10 (evening) — Netlify Deployment Readiness
 
 ### What We Built

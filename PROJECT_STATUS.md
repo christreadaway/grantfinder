@@ -12,11 +12,12 @@
 - **GrantWriter (new, complete pipeline):** "Write Application" handoff from match results → grant spec enrichment → fit/gap analysis with honesty ledger → strategy gate → stakeholder intake packets (answers enrich the shared profile) → voice-enforced evidence-backed drafting → rubric self-scoring → instruction-based refinement → export (Word/Markdown/portal-text/form-map) with hard format enforcement
 - **Logging:** rotating file logs (~/logs/grantfinder/), per-AI-call cost/token/latency logging with correlation IDs, paste-ready debug bundles
 - **Deploy-ready:** `next build` passes (dead legacy pages removed, Tailwind v4 config fixed); `netlify.toml` + `backend/Procfile` + `docs/deployment.md` in place (Netlify frontend, Railway/Render backend)
+- **Real wiring:** document upload/extraction runs during matching; no fabricated demo-data fallbacks remain; results export (CSV/Markdown) and voice-profile capture UI wired
 - Verified: 41 API routes registered; 16-check offline writer pipeline test passes; full typecheck clean
 
 ## What's Broken
-- Old PDF export endpoint is a stub; dashboard matching terminal is simulated
 - In-memory storage: deployed data resets on backend restart (Supabase pending)
+- Old PDF export endpoint is a stub (CSV/Markdown export works and is wired in the UI)
 
 ## What's In Progress
 - Writer + web-discovery prompts implemented but not yet validated with a live Claude API key
@@ -30,7 +31,7 @@
 1. Deploy: Railway backend, then Netlify frontend (see docs/deployment.md)
 2. Live-key validation of the writer pipeline and AI web discovery; then merge branch to main
 3. Persist to Supabase (grants, profiles, applications, drafts all in-memory)
-4. Voice profile UI
+4. Real SSE progress terminal + shortlist persistence + profile review screen (spec 3.3)
 
 ## Blockers
 - None

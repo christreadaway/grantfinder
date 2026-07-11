@@ -136,8 +136,12 @@ async def get_application(app_id: str, current_user: User = Depends(get_current_
     """Full application state: everything the writer UI needs in one call."""
     app = _get_application(app_id, current_user.id)
     gaps = list(gaps_db.get(app_id, {}).values())
+    profile = profiles_db.get(current_user.id)
+    voice = profile.voice_profile if profile else None
     return {
         "application": app,
+        "has_voice_profile": bool(voice and voice.get("style_guidelines")),
+        "voice_style_guidelines": (voice or {}).get("style_guidelines"),
         "grant_spec": grant_specs_db.get(app.grant_id),
         "fit_analysis": fit_analyses_db.get(app_id),
         "gaps": gaps,

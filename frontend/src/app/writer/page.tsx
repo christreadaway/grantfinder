@@ -27,6 +27,7 @@ function WriterInner() {
   const [strategyText, setStrategyText] = useState('');
   const [intakeAnswers, setIntakeAnswers] = useState<Record<string, string>>({});
   const [refineInputs, setRefineInputs] = useState<Record<string, string>>({});
+  const [voiceSample, setVoiceSample] = useState('');
 
   const refresh = useCallback(async () => {
     if (!appId) return;
@@ -298,6 +299,33 @@ function WriterInner() {
                 </div>
               ))}
             </div>
+          )}
+        </div>
+      )}
+
+      {/* Voice profile (improves drafting; optional but recommended) */}
+      {app.strategy_confirmed && (
+        <div className="card">
+          <h2 className="text-xl font-bold mb-2">Your Voice {state.has_voice_profile && <span className="text-green-400 text-sm font-normal">✓ captured</span>}</h2>
+          {state.has_voice_profile ? (
+            <p className="text-gray-400 text-sm">{state.voice_style_guidelines}</p>
+          ) : (
+            <>
+              <p className="text-gray-400 text-sm mb-2">
+                Paste 1-2 things your organization actually wrote (a newsletter intro, a pastor&apos;s letter, an about page).
+                Drafts will match your real voice instead of a generic one.
+              </p>
+              <textarea
+                value={voiceSample}
+                onChange={(e) => setVoiceSample(e.target.value)}
+                placeholder="Paste a writing sample here..."
+                className="w-full h-24 bg-black/30 border border-gray-700 rounded p-3 text-sm mb-2"
+              />
+              <button className="btn btn-secondary" disabled={busy !== null || !voiceSample.trim()}
+                onClick={() => run('voice', () => api.analyzeVoice([voiceSample]))}>
+                {busy === 'voice' ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Capture Voice'}
+              </button>
+            </>
           )}
         </div>
       )}

@@ -75,11 +75,9 @@ export default function Dashboard() {
       await api.setApiKey(apiKey);
       setApiKeySet(true);
       setCurrentStep('grants');
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to set API key:', error);
-      // Demo mode - proceed anyway
-      setApiKeySet(true);
-      setCurrentStep('grants');
+      alert(error?.response?.data?.detail || 'Could not save the API key — is the backend reachable? (Check that you are signed in.)');
     }
   };
 
@@ -121,21 +119,9 @@ export default function Dashboard() {
       const result = await api.uploadGrantDatabase(grantFile);
       setGrantStats(result);
       setCurrentStep('website');
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to upload grants:', error);
-      // Demo mode - fake stats
-      setGrantStats({
-        total_grants: 45,
-        categories: {
-          church_parish: 12,
-          catholic_school: 10,
-          mixed: 8,
-          non_catholic: 10,
-          foundations: 5,
-        },
-        foundations_count: 5,
-      });
-      setCurrentStep('website');
+      alert(error?.response?.data?.detail || 'Grant database upload failed — check the file format and that the backend is running.');
     }
   };
 
@@ -151,21 +137,9 @@ export default function Dashboard() {
       const q = await api.generateQuestionnaire();
       setQuestionnaire(q);
       setCurrentStep('questionnaire');
-    } catch (error) {
+    } catch (error: any) {
       console.error('Website scan failed:', error);
-      // Demo mode - fake questionnaire
-      setWebsiteScanned(true);
-      setQuestionnaire({
-        questions: [
-          { id: 1, question: 'Is your organization a registered 501(c)(3)?', question_type: 'boolean', required: true },
-          { id: 2, question: 'What type of organization are you?', question_type: 'select', options: ['Parish only', 'School only', 'Parish with school'], required: true },
-          { id: 3, question: 'In which state is your organization located?', question_type: 'text', required: true },
-          { id: 4, question: 'Do you have facility repair or renovation needs?', question_type: 'boolean', required: true },
-          { id: 5, question: 'Do you operate a food pantry?', question_type: 'boolean', required: true },
-        ],
-        total_questions: 5,
-      });
-      setCurrentStep('questionnaire');
+      alert(error?.response?.data?.detail || 'Website scan or questionnaire generation failed — check the URL and your API key.');
     }
   };
 
@@ -177,9 +151,9 @@ export default function Dashboard() {
     try {
       await api.submitQuestionnaire(answerArray, freeFormText);
       setCurrentStep('documents');
-    } catch (error) {
+    } catch (error: any) {
       console.error('Questionnaire submission failed:', error);
-      setCurrentStep('documents');
+      alert(error?.response?.data?.detail || 'Could not save your answers — they matter for matching, so please retry.');
     }
   };
 
@@ -203,144 +177,62 @@ export default function Dashboard() {
     setIsProcessing(true);
     setProcessingLogs([]);
 
-    addLog('info', 'Starting grant matching process...');
-
-    // Simulate processing steps
-    await new Promise(r => setTimeout(r, 500));
-    addLog('info', 'Loading organization profile...');
-
-    await new Promise(r => setTimeout(r, 800));
-    addLog('success', 'Profile loaded successfully');
-
-    addLog('info', `Processing ${grantStats?.total_grants || 45} grants from 5 categories...`);
-
-    await new Promise(r => setTimeout(r, 1000));
-    addLog('info', 'Evaluating Church/Parish Grants (Category 1)...');
-
-    await new Promise(r => setTimeout(r, 800));
-    addLog('success', 'Category 1 complete: 12 grants evaluated');
-
-    await new Promise(r => setTimeout(r, 600));
-    addLog('info', 'Evaluating Catholic School Grants (Category 2)...');
-
-    await new Promise(r => setTimeout(r, 800));
-    addLog('success', 'Category 2 complete: 10 grants evaluated');
-
-    await new Promise(r => setTimeout(r, 600));
-    addLog('info', 'Evaluating Mixed Church-School Grants (Category 3)...');
-
-    await new Promise(r => setTimeout(r, 700));
-    addLog('success', 'Category 3 complete: 8 grants evaluated');
-
-    await new Promise(r => setTimeout(r, 600));
-    addLog('info', 'Evaluating Non-Catholic Qualifying Grants (Category 4)...');
-
-    await new Promise(r => setTimeout(r, 800));
-    addLog('success', 'Category 4 complete: 10 grants evaluated');
-
-    await new Promise(r => setTimeout(r, 500));
-    addLog('info', 'Checking Catholic Foundations (Category 5)...');
-
-    await new Promise(r => setTimeout(r, 600));
-    addLog('success', 'Category 5 complete: 5 foundations analyzed');
-
-    await new Promise(r => setTimeout(r, 400));
-    addLog('info', 'Calculating probability scores...');
-
-    await new Promise(r => setTimeout(r, 1000));
-    addLog('info', 'Applying geographic filtering...');
-
-    await new Promise(r => setTimeout(r, 600));
-    addLog('success', 'Scoring complete');
-
-    addLog('info', 'Generating match explanations...');
-
-    await new Promise(r => setTimeout(r, 800));
-    addLog('success', 'Match explanations generated');
-
-    // Try to get real results or use demo data
     try {
+      // 1. Upload and extract every document for real - this is where the AI
+      // catches the "playground equipment is 30 years old" class of signals.
+      if (documents.length > 0) {
+        addLog('info', `Processing ${documents.length} document(s)...`);
+        for (const doc of documents) {
+          addLog('info', `Reading ${doc.name}...`);
+          try {
+            const extraction = await api.uploadDocument(doc);
+            const found =
+              (extraction.facility_needs?.length || 0) +
+              (extraction.program_needs?.length || 0) +
+              (extraction.security_concerns?.length || 0);
+            addLog('success', `${doc.name}: ${found} grant-relevant item(s) extracted`);
+            [...(extraction.facility_needs || []), ...(extraction.program_needs || []), ...(extraction.security_concerns || [])]
+              .slice(0, 4)
+              .forEach((item: string) => addLog('info', `  → ${item}`));
+          } catch (docError: any) {
+            addLog('warning', `${doc.name}: extraction failed (${docError?.response?.data?.detail || 'error'}) — continuing`);
+          }
+        }
+      }
+
+      // 2. Real matching run
+      addLog('info', `Scoring ${grantStats?.total_grants || 'all'} grants against your profile...`);
+      addLog('info', 'Applying geographic and deadline hard filters, then AI scoring...');
       const results = await api.matchGrants();
       setMatchResults(results);
-    } catch (error) {
-      // Demo results
-      setMatchResults({
-        session_id: 'demo-session',
-        total_grants_evaluated: 45,
-        matches: generateDemoMatches(),
-        excellent_matches: 3,
-        good_matches: 8,
-        possible_matches: 12,
-        weak_matches: 15,
-        not_eligible: 7,
-      });
+
+      addLog('success', '=== MATCHING COMPLETE ===');
+      addLog('success', `${results.total_grants_evaluated} grants evaluated: ${results.excellent_matches} excellent, ${results.good_matches} good, ${results.possible_matches} possible`);
+
+      setIsProcessing(false);
+      await new Promise(r => setTimeout(r, 800));
+      setCurrentStep('results');
+    } catch (error: any) {
+      const detail = error?.response?.data?.detail || 'Matching failed — is the backend reachable and your API key set?';
+      addLog('error', detail);
+      setIsProcessing(false);
     }
-
-    addLog('success', '=== MATCHING COMPLETE ===');
-    addLog('info', `Found 3 excellent matches, 8 good matches`);
-
-    setIsProcessing(false);
-    await new Promise(r => setTimeout(r, 1000));
-    setCurrentStep('results');
   };
 
-  const generateDemoMatches = () => {
-    return [
-      {
-        grant_id: 'g1',
-        grant_name: 'Koch Foundation - Catholic School Support',
-        funder: 'Koch Foundation',
-        amount: 'Up to $15,000',
-        deadline: 'May 1, 2026',
-        url: 'https://www.thekochfoundation.org/',
-        contact: '352-373-7491',
-        category: 'catholic_school',
-        geo_qualified: 'Yes',
-        score: 92,
-        score_tier: 'excellent',
-        score_breakdown: { eligibility_fit: 95, need_alignment: 90, capacity_signals: 88, timing: 95, completeness: 85 },
-        explanation: 'Strong alignment with Catholic education focus. Your documented need for STEM resources matches their priorities.',
-        evidence: ['Catholic school status confirmed', 'STEM program expansion mentioned in documents'],
-        is_shortlisted: false,
-      },
-      {
-        grant_id: 'g2',
-        grant_name: 'Raskob Foundation for Catholic Activities',
-        funder: 'Raskob Foundation',
-        amount: '$5,000 - $25,000',
-        deadline: 'Rolling',
-        url: 'https://www.rfca.org/',
-        contact: 'grants@rfca.org',
-        category: 'church_parish',
-        geo_qualified: 'Yes',
-        score: 88,
-        score_tier: 'excellent',
-        explanation: 'Excellent fit for parish ministry programs. Your youth ministry expansion aligns well.',
-        score_breakdown: { eligibility_fit: 90, need_alignment: 85, capacity_signals: 90, timing: 90, completeness: 80 },
-        evidence: ['501(c)(3) verified', 'Youth ministry needs documented'],
-        is_shortlisted: false,
-      },
-      {
-        grant_id: 'g3',
-        grant_name: 'FEMA Nonprofit Security Grant Program',
-        funder: 'FEMA',
-        amount: 'Up to $150,000',
-        deadline: 'June 15, 2026',
-        url: 'https://www.fema.gov/grants/preparedness/nonprofit-security',
-        contact: 'See website',
-        category: 'non_catholic',
-        geo_qualified: 'Yes',
-        score: 85,
-        score_tier: 'excellent',
-        score_breakdown: { eligibility_fit: 85, need_alignment: 80, capacity_signals: 90, timing: 85, completeness: 90 },
-        explanation: 'Security concerns documented in your profile make this a strong match.',
-        evidence: ['Security improvements needed per finance council minutes'],
-        is_shortlisted: false,
-      },
-      // Add more demo matches...
-    ];
+  const downloadResults = async (format: 'csv' | 'md') => {
+    if (!matchResults?.session_id) return;
+    try {
+      const blob = await api.exportResults(matchResults.session_id, format, true);
+      const url = URL.createObjectURL(new Blob([blob]));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `grant_matches.${format}`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (error: any) {
+      alert(error?.response?.data?.detail || 'Export failed');
+    }
   };
-
   const steps = [
     { id: 'api-key', label: 'API Key', icon: Settings },
     { id: 'grants', label: 'Grant Database', icon: Database },
@@ -752,6 +644,11 @@ export default function Dashboard() {
                   )}
                 </div>
               </div>
+              {!isProcessing && processingLogs.some(l => l.status === 'error') && (
+                <button onClick={() => setCurrentStep('documents')} className="btn btn-secondary w-full mt-4">
+                  ← Back — fix the issue and retry
+                </button>
+              )}
             </div>
           )}
 
@@ -794,13 +691,13 @@ export default function Dashboard() {
                   </div>
                 </div>
                 <div className="flex gap-4">
-                  <button className="btn btn-secondary flex-1">
+                  <button onClick={() => downloadResults('csv')} className="btn btn-secondary flex-1">
                     <Download className="w-5 h-5" />
                     Export CSV
                   </button>
-                  <button className="btn btn-primary flex-1">
+                  <button onClick={() => downloadResults('md')} className="btn btn-primary flex-1">
                     <Download className="w-5 h-5" />
-                    Export PDF
+                    Export Report (Markdown)
                   </button>
                 </div>
               </div>
