@@ -26,6 +26,9 @@ export default function Dashboard() {
   const [apiKeySet, setApiKeySet] = useState(false);
   const [grantFile, setGrantFile] = useState<File | null>(null);
   const [grantStats, setGrantStats] = useState<any>(null);
+  const [discoveredTotal, setDiscoveredTotal] = useState(0);
+  const [discoveryStatus, setDiscoveryStatus] = useState<string | null>(null);
+  const [discoveryBusy, setDiscoveryBusy] = useState<string | null>(null);
   const [churchUrl, setChurchUrl] = useState('');
   const [schoolUrl, setSchoolUrl] = useState('');
   const [websiteScanned, setWebsiteScanned] = useState(false);
@@ -72,35 +75,53 @@ export default function Dashboard() {
       await api.setApiKey(apiKey);
       setApiKeySet(true);
       setCurrentStep('grants');
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to set API key:', error);
-      // Demo mode - proceed anyway
-      setApiKeySet(true);
-      setCurrentStep('grants');
+      alert(error?.response?.data?.detail || 'Could not save the API key — is the backend reachable? (Check that you are signed in.)');
+    }
+  };
+
+  const runDiscovery = async (source: 'seed' | 'grants_gov' | 'web_discovery') => {
+    setDiscoveryBusy(source);
+    setDiscoveryStatus(null);
+    try {
+      let result;
+      if (source === 'seed') {
+        result = await api.loadStarterDatabase();
+        setDiscoveryStatus(`Starter database loaded: ${result.added} grants added (${result.total_grants} total).`);
+      } else if (source === 'grants_gov') {
+        result = await api.searchGrantsGov();
+        setDiscoveryStatus(`Grants.gov: found ${result.found}, added ${result.added} new (${result.total_grants} total).`);
+      } else {
+        result = await api.webDiscovery();
+        setDiscoveryStatus(`AI web discovery: found ${result.found}, added ${result.added} new (${result.total_grants} total).`);
+      }
+      setDiscoveredTotal(result.total_grants);
+    } catch (error: any) {
+      console.error(`Discovery (${source}) failed:`, error);
+      const detail = error?.response?.data?.detail || 'request failed — is the backend running?';
+      setDiscoveryStatus(`Discovery failed: ${detail}`);
+    } finally {
+      setDiscoveryBusy(null);
     }
   };
 
   const handleGrantUpload = async () => {
-    if (!grantFile) return;
+    // A user-uploaded Excel is now optional: discovery can fill the database.
+    if (!grantFile) {
+      if (discoveredTotal > 0) {
+        setGrantStats({ total_grants: discoveredTotal });
+        setCurrentStep('website');
+      }
+      return;
+    }
     try {
       const result = await api.uploadGrantDatabase(grantFile);
       setGrantStats(result);
       setCurrentStep('website');
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to upload grants:', error);
-      // Demo mode - fake stats
-      setGrantStats({
-        total_grants: 45,
-        categories: {
-          church_parish: 12,
-          catholic_school: 10,
-          mixed: 8,
-          non_catholic: 10,
-          foundations: 5,
-        },
-        foundations_count: 5,
-      });
-      setCurrentStep('website');
+      alert(error?.response?.data?.detail || 'Grant database upload failed — check the file format and that the backend is running.');
     }
   };
 
@@ -116,21 +137,9 @@ export default function Dashboard() {
       const q = await api.generateQuestionnaire();
       setQuestionnaire(q);
       setCurrentStep('questionnaire');
-    } catch (error) {
+    } catch (error: any) {
       console.error('Website scan failed:', error);
-      // Demo mode - fake questionnaire
-      setWebsiteScanned(true);
-      setQuestionnaire({
-        questions: [
-          { id: 1, question: 'Is your organization a registered 501(c)(3)?', question_type: 'boolean', required: true },
-          { id: 2, question: 'What type of organization are you?', question_type: 'select', options: ['Parish only', 'School only', 'Parish with school'], required: true },
-          { id: 3, question: 'In which state is your organization located?', question_type: 'text', required: true },
-          { id: 4, question: 'Do you have facility repair or renovation needs?', question_type: 'boolean', required: true },
-          { id: 5, question: 'Do you operate a food pantry?', question_type: 'boolean', required: true },
-        ],
-        total_questions: 5,
-      });
-      setCurrentStep('questionnaire');
+      alert(error?.response?.data?.detail || 'Website scan or questionnaire generation failed — check the URL and your API key.');
     }
   };
 
@@ -142,9 +151,19 @@ export default function Dashboard() {
     try {
       await api.submitQuestionnaire(answerArray, freeFormText);
       setCurrentStep('documents');
-    } catch (error) {
+    } catch (error: any) {
       console.error('Questionnaire submission failed:', error);
-      setCurrentStep('documents');
+      alert(error?.response?.data?.detail || 'Could not save your answers — they matter for matching, so please retry.');
+    }
+  };
+
+  const handleWriteApplication = async (grantId: string) => {
+    try {
+      const app = await api.createApplication(grantId);
+      router.push(`/writer?id=${app.id}`);
+    } catch (error: any) {
+      console.error('Failed to create application:', error);
+      alert(error?.response?.data?.detail || 'Could not start the application — is the backend running?');
     }
   };
 
@@ -158,144 +177,62 @@ export default function Dashboard() {
     setIsProcessing(true);
     setProcessingLogs([]);
 
-    addLog('info', 'Starting grant matching process...');
-
-    // Simulate processing steps
-    await new Promise(r => setTimeout(r, 500));
-    addLog('info', 'Loading organization profile...');
-
-    await new Promise(r => setTimeout(r, 800));
-    addLog('success', 'Profile loaded successfully');
-
-    addLog('info', `Processing ${grantStats?.total_grants || 45} grants from 5 categories...`);
-
-    await new Promise(r => setTimeout(r, 1000));
-    addLog('info', 'Evaluating Church/Parish Grants (Category 1)...');
-
-    await new Promise(r => setTimeout(r, 800));
-    addLog('success', 'Category 1 complete: 12 grants evaluated');
-
-    await new Promise(r => setTimeout(r, 600));
-    addLog('info', 'Evaluating Catholic School Grants (Category 2)...');
-
-    await new Promise(r => setTimeout(r, 800));
-    addLog('success', 'Category 2 complete: 10 grants evaluated');
-
-    await new Promise(r => setTimeout(r, 600));
-    addLog('info', 'Evaluating Mixed Church-School Grants (Category 3)...');
-
-    await new Promise(r => setTimeout(r, 700));
-    addLog('success', 'Category 3 complete: 8 grants evaluated');
-
-    await new Promise(r => setTimeout(r, 600));
-    addLog('info', 'Evaluating Non-Catholic Qualifying Grants (Category 4)...');
-
-    await new Promise(r => setTimeout(r, 800));
-    addLog('success', 'Category 4 complete: 10 grants evaluated');
-
-    await new Promise(r => setTimeout(r, 500));
-    addLog('info', 'Checking Catholic Foundations (Category 5)...');
-
-    await new Promise(r => setTimeout(r, 600));
-    addLog('success', 'Category 5 complete: 5 foundations analyzed');
-
-    await new Promise(r => setTimeout(r, 400));
-    addLog('info', 'Calculating probability scores...');
-
-    await new Promise(r => setTimeout(r, 1000));
-    addLog('info', 'Applying geographic filtering...');
-
-    await new Promise(r => setTimeout(r, 600));
-    addLog('success', 'Scoring complete');
-
-    addLog('info', 'Generating match explanations...');
-
-    await new Promise(r => setTimeout(r, 800));
-    addLog('success', 'Match explanations generated');
-
-    // Try to get real results or use demo data
     try {
+      // 1. Upload and extract every document for real - this is where the AI
+      // catches the "playground equipment is 30 years old" class of signals.
+      if (documents.length > 0) {
+        addLog('info', `Processing ${documents.length} document(s)...`);
+        for (const doc of documents) {
+          addLog('info', `Reading ${doc.name}...`);
+          try {
+            const extraction = await api.uploadDocument(doc);
+            const found =
+              (extraction.facility_needs?.length || 0) +
+              (extraction.program_needs?.length || 0) +
+              (extraction.security_concerns?.length || 0);
+            addLog('success', `${doc.name}: ${found} grant-relevant item(s) extracted`);
+            [...(extraction.facility_needs || []), ...(extraction.program_needs || []), ...(extraction.security_concerns || [])]
+              .slice(0, 4)
+              .forEach((item: string) => addLog('info', `  → ${item}`));
+          } catch (docError: any) {
+            addLog('warning', `${doc.name}: extraction failed (${docError?.response?.data?.detail || 'error'}) — continuing`);
+          }
+        }
+      }
+
+      // 2. Real matching run
+      addLog('info', `Scoring ${grantStats?.total_grants || 'all'} grants against your profile...`);
+      addLog('info', 'Applying geographic and deadline hard filters, then AI scoring...');
       const results = await api.matchGrants();
       setMatchResults(results);
-    } catch (error) {
-      // Demo results
-      setMatchResults({
-        session_id: 'demo-session',
-        total_grants_evaluated: 45,
-        matches: generateDemoMatches(),
-        excellent_matches: 3,
-        good_matches: 8,
-        possible_matches: 12,
-        weak_matches: 15,
-        not_eligible: 7,
-      });
+
+      addLog('success', '=== MATCHING COMPLETE ===');
+      addLog('success', `${results.total_grants_evaluated} grants evaluated: ${results.excellent_matches} excellent, ${results.good_matches} good, ${results.possible_matches} possible`);
+
+      setIsProcessing(false);
+      await new Promise(r => setTimeout(r, 800));
+      setCurrentStep('results');
+    } catch (error: any) {
+      const detail = error?.response?.data?.detail || 'Matching failed — is the backend reachable and your API key set?';
+      addLog('error', detail);
+      setIsProcessing(false);
     }
-
-    addLog('success', '=== MATCHING COMPLETE ===');
-    addLog('info', `Found 3 excellent matches, 8 good matches`);
-
-    setIsProcessing(false);
-    await new Promise(r => setTimeout(r, 1000));
-    setCurrentStep('results');
   };
 
-  const generateDemoMatches = () => {
-    return [
-      {
-        grant_id: 'g1',
-        grant_name: 'Koch Foundation - Catholic School Support',
-        funder: 'Koch Foundation',
-        amount: 'Up to $15,000',
-        deadline: 'May 1, 2026',
-        url: 'https://www.thekochfoundation.org/',
-        contact: '352-373-7491',
-        category: 'catholic_school',
-        geo_qualified: 'Yes',
-        score: 92,
-        score_tier: 'excellent',
-        score_breakdown: { eligibility_fit: 95, need_alignment: 90, capacity_signals: 88, timing: 95, completeness: 85 },
-        explanation: 'Strong alignment with Catholic education focus. Your documented need for STEM resources matches their priorities.',
-        evidence: ['Catholic school status confirmed', 'STEM program expansion mentioned in documents'],
-        is_shortlisted: false,
-      },
-      {
-        grant_id: 'g2',
-        grant_name: 'Raskob Foundation for Catholic Activities',
-        funder: 'Raskob Foundation',
-        amount: '$5,000 - $25,000',
-        deadline: 'Rolling',
-        url: 'https://www.rfca.org/',
-        contact: 'grants@rfca.org',
-        category: 'church_parish',
-        geo_qualified: 'Yes',
-        score: 88,
-        score_tier: 'excellent',
-        explanation: 'Excellent fit for parish ministry programs. Your youth ministry expansion aligns well.',
-        score_breakdown: { eligibility_fit: 90, need_alignment: 85, capacity_signals: 90, timing: 90, completeness: 80 },
-        evidence: ['501(c)(3) verified', 'Youth ministry needs documented'],
-        is_shortlisted: false,
-      },
-      {
-        grant_id: 'g3',
-        grant_name: 'FEMA Nonprofit Security Grant Program',
-        funder: 'FEMA',
-        amount: 'Up to $150,000',
-        deadline: 'June 15, 2026',
-        url: 'https://www.fema.gov/grants/preparedness/nonprofit-security',
-        contact: 'See website',
-        category: 'non_catholic',
-        geo_qualified: 'Yes',
-        score: 85,
-        score_tier: 'excellent',
-        score_breakdown: { eligibility_fit: 85, need_alignment: 80, capacity_signals: 90, timing: 85, completeness: 90 },
-        explanation: 'Security concerns documented in your profile make this a strong match.',
-        evidence: ['Security improvements needed per finance council minutes'],
-        is_shortlisted: false,
-      },
-      // Add more demo matches...
-    ];
+  const downloadResults = async (format: 'csv' | 'md') => {
+    if (!matchResults?.session_id) return;
+    try {
+      const blob = await api.exportResults(matchResults.session_id, format, true);
+      const url = URL.createObjectURL(new Blob([blob]));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `grant_matches.${format}`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (error: any) {
+      alert(error?.response?.data?.detail || 'Export failed');
+    }
   };
-
   const steps = [
     { id: 'api-key', label: 'API Key', icon: Settings },
     { id: 'grants', label: 'Grant Database', icon: Database },
@@ -402,12 +339,65 @@ export default function Dashboard() {
             </div>
           )}
 
-          {/* Step 2: Grant Database Upload */}
+          {/* Step 2: Grant Database — discovery + optional upload */}
           {currentStep === 'grants' && (
             <div className="card">
-              <h2 className="text-2xl font-bold mb-4">Upload Grant Database</h2>
+              <h2 className="text-2xl font-bold mb-4">Build Your Grant Database</h2>
               <p className="text-gray-400 mb-6">
-                Upload your Excel file with 5 grant categories.
+                Discover grants automatically, upload your own Excel file, or both.
+                Everything merges into one database with duplicates removed.
+              </p>
+
+              <div className="grid gap-3 mb-6">
+                <button
+                  onClick={() => runDiscovery('seed')}
+                  disabled={discoveryBusy !== null}
+                  className="btn btn-secondary w-full flex items-center justify-between"
+                >
+                  <span className="flex items-center gap-2">
+                    <Database className="w-5 h-5" />
+                    Load Starter Database
+                  </span>
+                  <span className="text-sm text-gray-400">
+                    {discoveryBusy === 'seed' ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Curated Catholic + secular grants'}
+                  </span>
+                </button>
+                <button
+                  onClick={() => runDiscovery('grants_gov')}
+                  disabled={discoveryBusy !== null}
+                  className="btn btn-secondary w-full flex items-center justify-between"
+                >
+                  <span className="flex items-center gap-2">
+                    <Globe className="w-5 h-5" />
+                    Search Grants.gov
+                  </span>
+                  <span className="text-sm text-gray-400">
+                    {discoveryBusy === 'grants_gov' ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Live federal opportunities'}
+                  </span>
+                </button>
+                <button
+                  onClick={() => runDiscovery('web_discovery')}
+                  disabled={discoveryBusy !== null}
+                  className="btn btn-secondary w-full flex items-center justify-between"
+                >
+                  <span className="flex items-center gap-2">
+                    <Search className="w-5 h-5" />
+                    AI Web Discovery
+                  </span>
+                  <span className="text-sm text-gray-400">
+                    {discoveryBusy === 'web_discovery' ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Claude searches the web (uses your API key)'}
+                  </span>
+                </button>
+              </div>
+
+              {discoveryStatus && (
+                <div className={`mb-6 p-3 rounded text-sm ${discoveryStatus.startsWith('Discovery failed') ? 'bg-red-900/30 text-red-300' : 'bg-green-900/30 text-green-300'}`}>
+                  {discoveryStatus}
+                </div>
+              )}
+
+              <p className="text-gray-500 text-sm mb-3">
+                Optional: upload your own Excel file with the 5 grant categories.
               </p>
               <div
                 className={`dropzone ${grantFile ? 'active' : ''}`}
@@ -442,10 +432,10 @@ export default function Dashboard() {
               </div>
               <button
                 onClick={handleGrantUpload}
-                disabled={!grantFile}
+                disabled={!grantFile && discoveredTotal === 0}
                 className="btn btn-primary w-full mt-6"
               >
-                Upload and Continue
+                {grantFile ? 'Upload and Continue' : `Continue with ${discoveredTotal} Discovered Grants`}
                 <ChevronRight className="w-5 h-5" />
               </button>
             </div>
@@ -654,6 +644,11 @@ export default function Dashboard() {
                   )}
                 </div>
               </div>
+              {!isProcessing && processingLogs.some(l => l.status === 'error') && (
+                <button onClick={() => setCurrentStep('documents')} className="btn btn-secondary w-full mt-4">
+                  ← Back — fix the issue and retry
+                </button>
+              )}
             </div>
           )}
 
@@ -696,13 +691,13 @@ export default function Dashboard() {
                   </div>
                 </div>
                 <div className="flex gap-4">
-                  <button className="btn btn-secondary flex-1">
+                  <button onClick={() => downloadResults('csv')} className="btn btn-secondary flex-1">
                     <Download className="w-5 h-5" />
                     Export CSV
                   </button>
-                  <button className="btn btn-primary flex-1">
+                  <button onClick={() => downloadResults('md')} className="btn btn-primary flex-1">
                     <Download className="w-5 h-5" />
-                    Export PDF
+                    Export Report (Markdown)
                   </button>
                 </div>
               </div>
@@ -745,7 +740,15 @@ export default function Dashboard() {
                     >
                       Visit Grant Website →
                     </a>
-                    <span className="text-sm text-gray-500">Contact: {match.contact}</span>
+                    <div className="flex items-center gap-4">
+                      <span className="text-sm text-gray-500">Contact: {match.contact}</span>
+                      <button
+                        onClick={() => handleWriteApplication(match.grant_id)}
+                        className="btn btn-primary text-sm"
+                      >
+                        Write Application →
+                      </button>
+                    </div>
                   </div>
                 </div>
               ))}

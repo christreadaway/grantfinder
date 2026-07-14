@@ -40,6 +40,13 @@ class Settings(BaseSettings):
 
     # AI Processing
     MAX_QUESTIONNAIRE_QUESTIONS: int = 20
+    CLAUDE_MODEL: str = "claude-sonnet-5"
+
+    # Grant Discovery
+    GRANTS_GOV_API_URL: str = "https://api.grants.gov/v1/api/search2"
+    GRANTS_GOV_MAX_RESULTS: int = 50
+    WEB_DISCOVERY_MAX_SEARCHES: int = 8
+    WEBSITE_CRAWL_MAX_PAGES: int = 6
 
     # Rate Limiting
     RATE_LIMIT_REQUESTS: int = 100  # requests per window

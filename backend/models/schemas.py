@@ -97,6 +97,9 @@ class GrantBase(BaseModel):
     geo_qualified: GeoQualified = Field(..., description="Geographic qualification")
     funder_stats: Optional[str] = Field(None, description="Optional: Annual giving, avg grant size")
     category: GrantCategory = Field(..., description="Grant category (1-5)")
+    source: str = Field("upload", description="Where this grant came from: upload | seed | grants_gov | web_discovery")
+    eligibility_notes: Optional[str] = Field(None, description="Known eligibility requirements/restrictions")
+    funds_for: List[str] = Field(default=[], description="Tags for what the grant funds, e.g. ['facilities', 'security']")
 
 
 class Grant(GrantBase):
@@ -178,6 +181,23 @@ class OrganizationProfile(BaseModel):
     has_outreach_programs: bool = False
     annual_budget: Optional[str] = None
     previous_grants: List[str] = []
+    questionnaire_answers: List[Dict[str, Any]] = []  # [{"question": ..., "answer": ...}]
+
+    # From Free-Form Text
+    free_form_notes: Optional[str] = None
+
+    # =========================================================================
+    # Writer module extension (GrantWriter PRD 4.1) - the same profile powers
+    # both matching and application drafting. Single source of truth.
+    # =========================================================================
+    voice_profile: Optional[Dict[str, Any]] = None    # {style_guidelines, samples[], banned_phrases[]}
+    evidence: List[Dict[str, Any]] = []               # {id, type, summary, source_ref, linked_programs[]}
+    team_members: List[Dict[str, Any]] = []           # {name, role, credentials, expertise, fit_notes}
+    collaborations: List[Dict[str, Any]] = []         # {partner, description, type, approx_date}
+    validators: List[Dict[str, Any]] = []             # {name, role, relationship, can_write_letter, can_be_named}
+    in_kind_resources: List[Dict[str, Any]] = []      # {description, estimated_annual_value}
+    prior_grants_detail: List[Dict[str, Any]] = []    # {funder, amount, purpose, manager, outcome}
+    financial_capacity: Optional[str] = None          # prior grants managed, subaward ability, audit history
 
     # Metadata
     sources: List[str] = []  # Document/URL sources for each extraction
@@ -320,6 +340,38 @@ class ProcessingStatus(BaseModel):
     progress: int  # 0-100
     timestamp: datetime
     details: Optional[str] = None
+
+
+# =============================================================================
+# Grant Discovery Models
+# =============================================================================
+
+class DiscoverySource(str, Enum):
+    """External sources GrantFinder can pull grants from."""
+    SEED = "seed"                    # Built-in curated Catholic grant database
+    GRANTS_GOV = "grants_gov"        # Grants.gov federal opportunities API
+    WEB_DISCOVERY = "web_discovery"  # AI web search for grants matching the profile
+
+
+class GrantsGovSearchRequest(BaseModel):
+    """Request to search Grants.gov."""
+    keywords: Optional[List[str]] = None  # Defaults derived from profile if omitted
+    max_results: Optional[int] = None
+
+
+class WebDiscoveryRequest(BaseModel):
+    """Request to run AI web discovery."""
+    focus: Optional[str] = None  # Optional extra focus, e.g. "playground equipment"
+
+
+class DiscoveryResult(BaseModel):
+    """Result of a discovery run: how many grants were found and merged."""
+    source: DiscoverySource
+    found: int                 # Grants the source returned
+    added: int                 # New grants merged into the database (after dedup)
+    duplicates: int            # Skipped because already present
+    total_grants: int          # Total grants in the user's database after merge
+    notes: List[str] = []      # Human-readable notes (e.g. search terms used)
 
 
 # =============================================================================

@@ -29,6 +29,10 @@ logger = logging.getLogger(__name__)
 # In-memory storage for processing state
 processing_sessions: dict = {}
 
+# Last generated questionnaire per user (so submitted answers can be mapped
+# back to their question text): user_id -> Questionnaire
+questionnaires_db: dict = {}
+
 
 async def get_ai_service(current_user: User = Depends(get_current_user)) -> AIService:
     """Get AI service with user's API key."""
@@ -121,6 +125,7 @@ async def generate_questionnaire(
 
     try:
         questionnaire = await ai_service.generate_questionnaire(grants)
+        questionnaires_db[current_user.id] = questionnaire
         return questionnaire
 
     except Exception as e:
@@ -149,19 +154,52 @@ async def submit_questionnaire(
 
     profile = profiles_db[current_user.id]
 
-    # Process answers and update profile
+    # Map answers back to their question text via the stored questionnaire
+    questionnaire = questionnaires_db.get(current_user.id)
+    questions_by_id = (
+        {q.id: q.question for q in questionnaire.questions} if questionnaire else {}
+    )
+
+    qa_pairs = []
     for answer in submission.answers:
-        # Map answers to profile fields based on question content
-        # This would be more sophisticated in production
-        pass
+        question_text = questions_by_id.get(answer.question_id, f"Question {answer.question_id}")
+        qa_pairs.append({"question": question_text, "answer": answer.answer})
+
+        # Map well-known questions onto structured profile fields
+        q_lower = question_text.lower()
+        answer_str = str(answer.answer).strip()
+        is_yes = answer_str.lower() in ("true", "yes", "y", "1")
+
+        if "501" in q_lower:
+            profile.is_501c3 = is_yes
+        elif "food pantry" in q_lower or "food assistance" in q_lower:
+            profile.has_food_pantry = is_yes
+        elif "school" in q_lower and "grade" not in q_lower:
+            if isinstance(answer.answer, bool) or answer_str.lower() in ("true", "false", "yes", "no"):
+                profile.has_school = is_yes
+            elif "school" in answer_str.lower():
+                profile.has_school = "only" not in answer_str.lower() or "school" in answer_str.lower()
+        elif "state" in q_lower and answer_str and len(answer_str) <= 30:
+            if not profile.state:
+                profile.state = answer_str
+        elif "budget" in q_lower and answer_str:
+            profile.annual_budget = answer_str
+        elif ("grant" in q_lower and ("past" in q_lower or "previous" in q_lower or "received" in q_lower)):
+            if answer_str and not isinstance(answer.answer, bool) and answer_str.lower() not in ("true", "false", "yes", "no"):
+                profile.previous_grants.append(answer_str)
+
+    # Every answer is kept verbatim so matching (and the future grant writer)
+    # can use the full context, not just the mapped fields.
+    profile.questionnaire_answers = qa_pairs
 
     if submission.free_form_text:
+        profile.free_form_notes = submission.free_form_text
         profile.sources.append("User free-form text")
 
     profile.sources.append("Questionnaire responses")
     profile.last_updated = datetime.utcnow()
 
-    return {"message": "Questionnaire submitted successfully"}
+    return {"message": "Questionnaire submitted successfully", "answers_recorded": len(qa_pairs)}
 
 
 @router.post("/upload-document", response_model=DocumentExtractionResult)
@@ -251,13 +289,16 @@ async def match_grants(
     - Timing (10%)
     - Completeness (5%)
     """
+    import uuid as _uuid
+    from models.schemas import Grant, GrantCategory, GrantStatus, GeoQualified
+
     grants = get_user_grants(current_user.id)
     profile = profiles_db.get(current_user.id)
 
     if not grants:
         raise HTTPException(
             status_code=400,
-            detail="No grants uploaded. Please upload grant database first."
+            detail="No grants in database. Upload a grant database or run discovery first."
         )
 
     if not profile:
@@ -266,9 +307,37 @@ async def match_grants(
             detail="No organization profile. Please complete the setup process."
         )
 
+    # Include Category 5 foundations in matching as monitorable opportunities,
+    # so they are scored and surfaced instead of sitting unused.
+    all_grants = list(grants)
+    existing_names = {g.grant_name.lower() for g in all_grants}
+    for foundation in get_user_foundations(current_user.id):
+        pseudo_name = f"{foundation.foundation_name} (Foundation)"
+        if pseudo_name.lower() in existing_names:
+            continue
+        all_grants.append(Grant(
+            id=f"grant_{_uuid.uuid4().hex[:12]}",
+            user_id=current_user.id,
+            grant_name=pseudo_name,
+            deadline=foundation.application_cycle or "Check website",
+            amount=foundation.annual_giving or "Varies",
+            funder=foundation.foundation_name,
+            description=(
+                f"Catholic grant-making foundation to monitor. Focus areas: "
+                f"{foundation.focus_areas}. {foundation.notes or ''}"
+            ).strip(),
+            contact=foundation.contact,
+            url=foundation.website,
+            status=GrantStatus.CHECK_DEADLINE,
+            geo_qualified=GeoQualified.CHECK,
+            category=GrantCategory.CATHOLIC_FOUNDATIONS,
+            source="upload",
+            created_at=datetime.utcnow(),
+        ))
+
     try:
         results = await ai_service.match_grants(
-            grants=grants,
+            grants=all_grants,
             profile=profile,
             user_id=current_user.id
         )

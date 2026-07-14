@@ -90,6 +90,30 @@ class ApiClient {
     return response.data;
   }
 
+  // Grant discovery endpoints
+  async loadStarterDatabase() {
+    const response = await this.client.post('/api/discovery/seed');
+    return response.data;
+  }
+
+  async searchGrantsGov(keywords?: string[], maxResults?: number) {
+    const response = await this.client.post('/api/discovery/grants-gov', {
+      keywords,
+      max_results: maxResults,
+    });
+    return response.data;
+  }
+
+  async webDiscovery(focus?: string) {
+    const response = await this.client.post('/api/discovery/web-search', { focus });
+    return response.data;
+  }
+
+  async getDiscoverySources() {
+    const response = await this.client.get('/api/discovery/sources');
+    return response.data;
+  }
+
   // Processing endpoints
   async scanWebsite(churchUrl?: string, schoolUrl?: string) {
     const response = await this.client.post('/api/processing/scan-website', {
@@ -133,6 +157,91 @@ class ApiClient {
 
   async matchGrants() {
     const response = await this.client.post('/api/processing/match-grants');
+    return response.data;
+  }
+
+  // Writer module endpoints
+  async createApplication(grantId: string) {
+    const response = await this.client.post('/api/writer/applications', { grant_id: grantId });
+    return response.data;
+  }
+
+  async getApplication(appId: string) {
+    const response = await this.client.get(`/api/writer/applications/${appId}`);
+    return response.data;
+  }
+
+  async enrichGrantSpec(appId: string, guidelinesText?: string) {
+    const response = await this.client.post(`/api/writer/applications/${appId}/grant-spec`, {
+      guidelines_text: guidelinesText || null,
+    });
+    return response.data;
+  }
+
+  async analyzeFit(appId: string) {
+    const response = await this.client.post(`/api/writer/applications/${appId}/analyze`);
+    return response.data;
+  }
+
+  async confirmStrategy(appId: string, strategy?: string) {
+    const response = await this.client.post(`/api/writer/applications/${appId}/confirm-strategy`, {
+      strategy: strategy || null,
+    });
+    return response.data;
+  }
+
+  async generateIntake(appId: string) {
+    const response = await this.client.post(`/api/writer/applications/${appId}/intake/generate`);
+    return response.data;
+  }
+
+  async answerIntake(appId: string, requestId: string, responseText: string, isConfirmedGap: boolean) {
+    const response = await this.client.put(
+      `/api/writer/applications/${appId}/intake/${requestId}/answer`,
+      { response: responseText, is_confirmed_gap: isConfirmedGap },
+    );
+    return response.data;
+  }
+
+  async waiveGap(appId: string, gapId: string, reason?: string) {
+    const response = await this.client.put(
+      `/api/writer/applications/${appId}/gaps/${gapId}/waive`,
+      { reason: reason || null },
+    );
+    return response.data;
+  }
+
+  async draftSections(appId: string, sectionId?: string) {
+    const response = await this.client.post(`/api/writer/applications/${appId}/draft`, {
+      section_id: sectionId || null,
+    });
+    return response.data;
+  }
+
+  async scoreApplication(appId: string) {
+    const response = await this.client.post(`/api/writer/applications/${appId}/score`);
+    return response.data;
+  }
+
+  async refineSection(appId: string, sectionId: string, instruction: string) {
+    const response = await this.client.post(
+      `/api/writer/applications/${appId}/sections/${sectionId}/refine`,
+      { instruction },
+    );
+    return response.data;
+  }
+
+  async exportApplication(appId: string, format: 'docx' | 'md' | 'txt' | 'form_map') {
+    const response = await this.client.post(
+      `/api/writer/applications/${appId}/export`,
+      { format },
+      { responseType: 'blob' },
+    );
+    return response;
+  }
+
+  async analyzeVoice(samples: string[]) {
+    const response = await this.client.post('/api/writer/voice/analyze', { samples });
     return response.data;
   }
 
