@@ -116,6 +116,14 @@ export async function requireProfile(userId: string, message?: string): Promise<
 // Match results
 // =============================================================================
 
+export const matchesPrefix = (userId: string) => `matches/${keyPart(userId)}/`;
+
+/** The user's match session ids, oldest first (session ids sort by time). */
+export async function listMatchSessionIds(userId: string): Promise<string[]> {
+  const prefix = matchesPrefix(userId);
+  return (await kv().list(prefix)).map((key) => key.slice(prefix.length)).filter((id) => id && !id.includes('/'));
+}
+
 export async function saveMatchResults(results: MatchResults): Promise<void> {
   await kv().set(matchKey(results.user_id, results.session_id), results);
 }

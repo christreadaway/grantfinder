@@ -3,10 +3,24 @@
 import { Suspense, useCallback, useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
-  AlertCircle, CheckCircle, ChevronLeft, Copy, Download, FileText,
+  AlertCircle, Bug, CheckCircle, ChevronLeft, Copy, Download, FileText,
   Loader2, Pencil, Send, Target, Wand2,
 } from 'lucide-react';
-import api from '@/lib/api';
+import api, { onJobProgress } from '@/lib/api';
+
+/** What each busy label means to a person watching the screen. */
+const BUSY_LABELS: Record<string, string> = {
+  spec: 'Reading the grant requirements',
+  analyze: 'Comparing your profile to what the funder scores',
+  strategy: 'Saving your strategy',
+  waive: 'Updating the gap',
+  intake: 'Writing stakeholder requests',
+  answer: 'Saving the answer to your profile',
+  voice: 'Learning your voice',
+  draft: 'Drafting (a few minutes for a full application)',
+  refine: 'Refining the section',
+  score: 'Scoring the draft against the rubric',
+};
 
 const RATING_COLORS: Record<string, string> = {
   strong: 'text-green-400 border-green-700',
@@ -28,6 +42,11 @@ function WriterInner() {
   const [intakeAnswers, setIntakeAnswers] = useState<Record<string, string>>({});
   const [refineInputs, setRefineInputs] = useState<Record<string, string>>({});
   const [voiceSample, setVoiceSample] = useState('');
+  const [jobProgress, setJobProgress] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  // Live status lines from background jobs ("Drafting section 2 of 6: Need")
+  useEffect(() => onJobProgress((info) => setJobProgress(info.progress)), []);
 
   const refresh = useCallback(async () => {
     if (!appId) return;
@@ -51,13 +70,28 @@ function WriterInner() {
   const run = async (label: string, fn: () => Promise<any>) => {
     setBusy(label);
     setError(null);
+    setJobProgress(null);
     try {
       await fn();
-      await refresh();
     } catch (e: any) {
-      setError(e?.response?.data?.detail || `${label} failed`);
+      console.error(`[GrantFinder] writer step "${label}" failed:`, e);
+      setError(e?.response?.data?.detail || e?.message || `${label} failed`);
     } finally {
+      // Refresh either way: a long step that stops early still saves what it finished.
+      await refresh();
       setBusy(null);
+      setJobProgress(null);
+    }
+  };
+
+  const copyDebugBundle = async () => {
+    setNotice(null);
+    try {
+      const bundle = await api.getApplicationDebugBundle(appId!);
+      await navigator.clipboard.writeText(bundle);
+      setNotice('Debug bundle copied. Paste it into Claude Code.');
+    } catch (e: any) {
+      setNotice(`Could not copy the debug bundle: ${e?.response?.data?.detail || e?.message || 'unknown error'}`);
     }
   };
 
@@ -115,9 +149,15 @@ function WriterInner() {
     <div className="min-h-screen p-6 max-w-5xl mx-auto space-y-6">
       {/* Header */}
       <div className="card">
-        <button onClick={() => router.push('/dashboard')} className="text-sm text-gray-500 hover:underline flex items-center gap-1 mb-3">
-          <ChevronLeft className="w-4 h-4" /> Back to dashboard
-        </button>
+        <div className="flex items-center justify-between mb-3">
+          <button onClick={() => router.push('/dashboard')} className="text-sm text-gray-500 hover:underline flex items-center gap-1">
+            <ChevronLeft className="w-4 h-4" /> Back to dashboard
+          </button>
+          <button onClick={copyDebugBundle} className="text-sm text-gray-500 hover:text-white flex items-center gap-1"
+            title="Copy this application's AI call log and errors to paste into Claude Code">
+            <Bug className="w-4 h-4" /> Copy debug bundle
+          </button>
+        </div>
         <div className="flex items-start justify-between">
           <div>
             <h1 className="text-2xl font-bold">{app.grant_name}</h1>
@@ -134,8 +174,19 @@ function WriterInner() {
         </div>
       </div>
 
+      {busy && (
+        <div className="sticky top-2 z-10 p-3 rounded bg-[var(--terminal-bg)] border border-gray-800 text-sm flex items-center gap-2" role="status">
+          <Loader2 className="w-4 h-4 animate-spin text-[var(--primary)]" />
+          <span>{BUSY_LABELS[busy] || 'Working'}...{jobProgress ? ` ${jobProgress}` : ''}</span>
+        </div>
+      )}
+
+      {notice && (
+        <div className="p-3 rounded bg-green-900/30 text-green-300 text-sm">{notice}</div>
+      )}
+
       {error && (
-        <div className="p-3 rounded bg-red-900/30 text-red-300 text-sm">{error}</div>
+        <div className="p-3 rounded bg-red-900/30 text-red-300 text-sm" role="alert">{error}</div>
       )}
 
       {/* Stage 1: Grant Spec */}

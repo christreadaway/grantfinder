@@ -24,6 +24,46 @@ function tryParse(text: string): { ok: true; value: unknown } | { ok: false } {
   }
 }
 
+/**
+ * Escape raw line breaks and tabs inside JSON strings (models sometimes write
+ * multi-paragraph text without escaping). Only call on text that starts at a
+ * JSON value, so the in-string tracking starts in the right state.
+ */
+function escapeControlCharsInStrings(text: string): string {
+  let out = '';
+  let inString = false;
+  let escaped = false;
+  for (const ch of text) {
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      else if (ch === '\n') {
+        out += '\\n';
+        continue;
+      } else if (ch === '\r') {
+        out += '\\r';
+        continue;
+      } else if (ch === '\t') {
+        out += '\\t';
+        continue;
+      }
+    } else if (ch === '"') {
+      inString = true;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+/** Parse, and if that fails, parse again with raw control characters escaped. */
+function tryParseRepaired(text: string): { ok: true; value: unknown } | { ok: false } {
+  const direct = tryParse(text);
+  if (direct.ok) return direct;
+  const repaired = escapeControlCharsInStrings(text);
+  return repaired === text ? direct : tryParse(repaired);
+}
+
 /** End index (inclusive) of the balanced container opening at `start`, or -1. */
 function balancedEnd(text: string, start: number): number {
   const stack: string[] = [];
@@ -51,12 +91,12 @@ export function extractJson<T = unknown>(text: string | null | undefined, kind: 
   if (!text) return null;
   const trimmed = text.trim();
 
-  const whole = tryParse(trimmed);
+  const whole = /^[[{]/.test(trimmed) ? tryParseRepaired(trimmed) : tryParse(trimmed);
   if (whole.ok && matchesKind(whole.value, kind)) return whole.value as T;
 
   const fence = /```(?:json|JSON)?\s*([\s\S]*?)```/g;
   for (let match = fence.exec(text); match; match = fence.exec(text)) {
-    const parsed = tryParse(match[1].trim());
+    const parsed = tryParseRepaired(match[1].trim());
     if (parsed.ok && matchesKind(parsed.value, kind)) return parsed.value as T;
   }
 
@@ -70,7 +110,7 @@ export function extractJson<T = unknown>(text: string | null | undefined, kind: 
     attempts++;
     const end = balancedEnd(text, i);
     if (end === -1) continue;
-    const parsed = tryParse(text.slice(i, end + 1));
+    const parsed = tryParseRepaired(text.slice(i, end + 1));
     if (parsed.ok && matchesKind(parsed.value, kind)) {
       const length = end + 1 - i;
       if (!best || length > best.length) best = { value: parsed.value, length };

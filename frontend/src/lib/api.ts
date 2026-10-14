@@ -1,10 +1,59 @@
 /**
- * API client for GrantFinder AI backend
+ * API client for the GrantFinder engine.
+ *
+ * The engine is part of this same site (Next.js routes at /api/*), so every
+ * call is same-origin: no API URL to configure, no CORS.
+ *
+ * Long AI steps run as background jobs: the engine answers 202 {job_id} and
+ * this client polls GET /api/jobs/{id} until the job finishes, then hands the
+ * page the job's result as if the call had answered directly. Screens keep
+ * reading response.data and error.response.data.detail exactly as before.
+ * Pages can show live progress with onJobProgress().
  */
-import axios, { AxiosInstance } from 'axios';
+import axios, { AxiosError, AxiosInstance, AxiosResponse } from 'axios';
 
-// A trailing slash would turn every path into "//api/...", which the backend rejects.
-export const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000').replace(/\/+$/, '');
+/** Same-origin: the engine lives at /api on this site. */
+export const API_BASE_URL = '';
+
+export interface JobProgress {
+  jobId: string;
+  kind: string;
+  status: 'queued' | 'running' | 'done' | 'failed';
+  progress: string | null;
+}
+
+type ProgressListener = (info: JobProgress) => void;
+const progressListeners = new Set<ProgressListener>();
+
+/** Subscribe to background-job progress; returns an unsubscribe function. */
+export function onJobProgress(listener: ProgressListener): () => void {
+  progressListeners.add(listener);
+  return () => {
+    progressListeners.delete(listener);
+  };
+}
+
+function emitProgress(info: JobProgress) {
+  progressListeners.forEach((listener) => {
+    try {
+      listener(info);
+    } catch {
+      // A broken listener must never break the request.
+    }
+  });
+}
+
+/** An error shaped like an axios error, so pages can read error.response.data.detail. */
+function apiError(status: number, detail: string): Error & { response: { status: number; data: { detail: string } } } {
+  const error = new Error(detail) as Error & { response: { status: number; data: { detail: string } } };
+  error.response = { status, data: { detail } };
+  return error;
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Netlify stops background work at 15 minutes; give polling a little longer. */
+const JOB_POLL_LIMIT_MS = 17 * 60 * 1000;
 
 class ApiClient {
   private client: AxiosInstance;
@@ -26,12 +75,22 @@ class ApiClient {
       return config;
     });
 
-    // Sessions live in the backend's memory, so a restart or redeploy ends them.
-    // Any later auth failure sends the user back to sign in with an explanation
-    // instead of leaving every button failing.
+    // Background jobs: turn 202 {job_id} into the finished result.
+    this.client.interceptors.response.use(async (response: AxiosResponse) => {
+      const data = response.data as { job_id?: string; kind?: string } | undefined;
+      if (response.status === 202 && data?.job_id && response.config.responseType !== 'blob') {
+        const result = await this.waitForJob(data.job_id, data.kind || 'job');
+        return { ...response, status: 200, statusText: 'OK', data: result };
+      }
+      return response;
+    });
+
+    // A session can end (expired, or signed in on another device and the
+    // server was reset). Any later auth failure sends the user back to sign in
+    // with an explanation instead of leaving every button failing.
     this.client.interceptors.response.use(
       (response) => response,
-      (error) => {
+      (error: AxiosError<{ detail?: string }>) => {
         const status = error?.response?.status;
         const url: string = error?.config?.url || '';
         const missingToken = status === 403 && error?.response?.data?.detail === 'Not authenticated';
@@ -45,6 +104,44 @@ class ApiClient {
         return Promise.reject(error);
       },
     );
+  }
+
+  /** Poll a background job until it is done (returns its result) or failed (throws its detail). */
+  private async waitForJob(jobId: string, kind: string): Promise<unknown> {
+    const started = Date.now();
+    let delay = 1000;
+    let networkFailures = 0;
+    console.info(`[GrantFinder] ${kind} started (job ${jobId})`);
+    emitProgress({ jobId, kind, status: 'queued', progress: 'Starting...' });
+    for (;;) {
+      if (Date.now() - started > JOB_POLL_LIMIT_MS) {
+        throw apiError(504, 'This step is taking much longer than expected. Reload the page in a minute; if it is still not done, use "Copy debug report" and paste it into Claude Code.');
+      }
+      await sleep(delay);
+      delay = Math.min(3000, delay + 250);
+      let job: { status: JobProgress['status']; progress: string | null; result?: unknown; error?: { status: number; detail: string } | null };
+      try {
+        job = (await this.client.get(`/api/jobs/${jobId}`, { timeout: 20000 })).data;
+        networkFailures = 0;
+      } catch (error) {
+        const status = (error as AxiosError)?.response?.status;
+        if (status === 401 || status === 404) throw error;
+        networkFailures += 1;
+        console.warn(`[GrantFinder] Checking ${kind} failed (${networkFailures}/6); retrying.`, error);
+        if (networkFailures >= 6) throw error;
+        continue;
+      }
+      emitProgress({ jobId, kind, status: job.status, progress: job.progress });
+      if (job.status === 'done') {
+        console.info(`[GrantFinder] ${kind} finished in ${Math.round((Date.now() - started) / 1000)}s (job ${jobId})`);
+        return job.result;
+      }
+      if (job.status === 'failed') {
+        const detail = job.error?.detail || 'This step failed. Use "Copy debug report" for details.';
+        console.error(`[GrantFinder] ${kind} failed (job ${jobId}): ${detail}`);
+        throw apiError(job.error?.status || 500, detail);
+      }
+    }
   }
 
   setToken(token: string) {
@@ -113,7 +210,7 @@ class ApiClient {
 
   async getGrants(category?: string) {
     const params = category ? { category } : {};
-    const response = await this.client.get('/api/grants/', { params });
+    const response = await this.client.get('/api/grants', { params });
     return response.data;
   }
 
@@ -149,8 +246,8 @@ class ApiClient {
   // Processing endpoints
   async scanWebsite(churchUrl?: string, schoolUrl?: string) {
     const response = await this.client.post('/api/processing/scan-website', {
-      church_url: churchUrl,
-      school_url: schoolUrl,
+      church_url: churchUrl || null,
+      school_url: schoolUrl || null,
     });
     return response.data;
   }
@@ -177,9 +274,15 @@ class ApiClient {
     return response.data;
   }
 
+  /** The saved organization profile, or null when there isn't one yet. */
   async getProfile() {
-    const response = await this.client.get('/api/processing/profile');
-    return response.data;
+    try {
+      const response = await this.client.get('/api/processing/profile');
+      return response.data;
+    } catch (error) {
+      if ((error as AxiosError)?.response?.status === 404) return null;
+      throw error;
+    }
   }
 
   async updateProfile(profile: any) {
@@ -192,9 +295,25 @@ class ApiClient {
     return response.data;
   }
 
+  /** The newest saved match results, or null when matching hasn't run yet. */
+  async getLatestMatchResults() {
+    try {
+      const response = await this.client.get('/api/processing/match-results/latest');
+      return response.data;
+    } catch (error) {
+      if ((error as AxiosError)?.response?.status === 404) return null;
+      throw error;
+    }
+  }
+
   // Writer module endpoints
   async createApplication(grantId: string) {
     const response = await this.client.post('/api/writer/applications', { grant_id: grantId });
+    return response.data;
+  }
+
+  async listApplications() {
+    const response = await this.client.get('/api/writer/applications');
     return response.data;
   }
 
@@ -277,14 +396,27 @@ class ApiClient {
     return response.data;
   }
 
+  /** One application's debug bundle (markdown for Claude Code). */
+  async getApplicationDebugBundle(appId: string): Promise<string> {
+    const response = await this.client.get(`/api/writer/applications/${appId}/debug-bundle`);
+    return response.data?.bundle_markdown ?? JSON.stringify(response.data, null, 2);
+  }
+
   // Export endpoints
   async exportResults(sessionId: string, format: 'csv' | 'md' | 'pdf', includeAll: boolean = false) {
-    const response = await this.client.post('/api/export/', {
+    const response = await this.client.post('/api/export', {
       session_id: sessionId,
       format,
       include_all_matches: includeAll,
     }, { responseType: 'blob' });
     return response.data;
+  }
+
+  // Debugging
+  /** Paste-ready markdown: settings, recent steps, errors, AI calls. No secrets. */
+  async getDebugReport(): Promise<string> {
+    const response = await this.client.get('/api/debug/report', { responseType: 'text' });
+    return typeof response.data === 'string' ? response.data : JSON.stringify(response.data, null, 2);
   }
 }
 

@@ -1,0 +1,1038 @@
+/**
+ * Processing, profile, and matching: website scan, questionnaire, document
+ * upload, profile endpoints, grant matching, match results, shortlist.
+ *
+ *   cd ~/grantfinder/frontend && npx tsx ../tests/engine/processing.test.mts
+ *
+ * VERBOSE=1 shows engine logs. A fake parish website is served from a local
+ * server (GRANTFINDER_ALLOW_LOCAL_FETCH=1 lets the engine read it).
+ */
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import http from 'node:http';
+import { createRequire } from 'node:module';
+import type { AddressInfo } from 'node:net';
+import path from 'node:path';
+
+import { api, call, check, finish, guest, repoRoot, saveKey, setupEnv, startMock } from './helpers.mts';
+
+setupEnv('processing', { GRANTFINDER_ALLOW_LOCAL_FETCH: '1' });
+const mock = await startMock();
+
+const repo = await import('../../frontend/src/server/repo.ts');
+const store = await import('../../frontend/src/server/store.ts');
+const jobs = await import('../../frontend/src/server/jobs.ts');
+const ai = await import('../../frontend/src/server/services/ai.ts');
+
+// The docx package lives in frontend/node_modules.
+const frontendRequire = createRequire(path.join(repoRoot, 'frontend', 'package.json'));
+const { Document, Packer, Paragraph } = frontendRequire('docx');
+
+const FIXTURES = path.join(repoRoot, 'tests', 'engine', 'fixtures', 'processing');
+const API_KEY_MISSING = 'Claude API key not set. Please add your API key first.';
+const NO_MATCH_RESULTS = 'No match results yet. Run matching first.';
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Json = any;
+
+async function userIdOf(token: string): Promise<string> {
+  return (await api('GET', '/api/auth/me', { token })).data.id;
+}
+
+function fileForm(filename: string, content: string | Uint8Array, field = 'file'): FormData {
+  const form = new FormData();
+  form.append(field, new Blob([content]), filename);
+  return form;
+}
+
+const upload = (token: string, filename: string, content: string | Uint8Array) =>
+  api('POST', '/api/processing/upload-document', { token, form: fileForm(filename, content) });
+const uploadAndWait = (token: string, filename: string, content: string | Uint8Array) =>
+  call('POST', '/api/processing/upload-document', { token, form: fileForm(filename, content) });
+
+async function prompts(promptId: string): Promise<string[]> {
+  return (await mock.requests()).filter((r) => r.prompt_id === promptId).map((r) => r.prompt);
+}
+
+async function profileOf(token: string): Promise<Json> {
+  return (await api('GET', '/api/processing/profile', { token })).data;
+}
+
+/** Poll a job the way the website does (GET /api/jobs/{id}) until it is done or failed. */
+async function waitForJob(token: string, jobId: string, timeoutMs = 90000): Promise<Json> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const poll = await api('GET', `/api/jobs/${jobId}`, { token });
+    if (poll.data?.status === 'done' || poll.data?.status === 'failed') return poll.data;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`job ${jobId} did not finish in ${timeoutMs}ms`);
+}
+
+async function storedJob(userId: string, jobId: string | undefined): Promise<Json> {
+  return jobId ? store.kv().get(jobs.jobKey(userId, jobId)) : null;
+}
+
+/** A one-page PDF with real text (built by hand, correct xref offsets). */
+function makePdf(lines: string[]): Uint8Array {
+  const esc = (s: string) => s.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
+  const stream = ['BT', '/F1 12 Tf', '14 TL', '72 720 Td', ...lines.map((line) => `(${esc(line)}) Tj T*`), 'ET'].join('\n');
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>',
+    `<< /Length ${Buffer.byteLength(stream, 'latin1')} >>\nstream\n${stream}\nendstream`,
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+  ];
+  let out = '%PDF-1.4\n';
+  const offsets: number[] = [];
+  objects.forEach((body, index) => {
+    offsets.push(Buffer.byteLength(out, 'latin1'));
+    out += `${index + 1} 0 obj\n${body}\nendobj\n`;
+  });
+  const xref = Buffer.byteLength(out, 'latin1');
+  out += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  for (const offset of offsets) out += `${String(offset).padStart(10, '0')} 00000 n \n`;
+  out += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return new Uint8Array(Buffer.from(out, 'latin1'));
+}
+
+async function makeDocx(paragraphs: string[]): Promise<Uint8Array> {
+  const doc = new Document({ sections: [{ children: paragraphs.map((text) => new Paragraph(text)) }] });
+  return new Uint8Array(await Packer.toBuffer(doc));
+}
+
+function grant(userId: string, id: string, name: string, extra: Record<string, unknown> = {}) {
+  return {
+    id,
+    user_id: userId,
+    grant_name: name,
+    deadline: '2099-06-30',
+    amount: 'Up to $25,000',
+    funder: `${name} Funder`,
+    description: `Supports ${name.toLowerCase()} for Catholic parishes and schools.`,
+    contact: 'grants@example.org',
+    url: `https://example.org/${id}`,
+    status: 'OPEN',
+    geo_qualified: 'Yes',
+    funder_stats: null,
+    category: 'church_parish',
+    source: 'seed',
+    eligibility_notes: null,
+    funds_for: ['facilities'],
+    created_at: new Date().toISOString(),
+    ...extra,
+  };
+}
+
+/** Fixed ids: tests/mock-claude/fixtures/processing.json scores these. */
+function testGrants(userId: string) {
+  return [
+    grant(userId, 'grant_pt_01', 'Parish Hall Roof Repair Fund'),
+    grant(userId, 'grant_pt_02', 'School STEM Lab Grant', { deadline: 'Rolling', status: 'Rolling', category: 'catholic_school' }),
+    grant(userId, 'grant_pt_03', 'Texas Parish Security Grant', { geo_qualified: 'Yes - TX Only' }),
+    grant(userId, 'grant_pt_04', 'Closed Capital Campaign Grant', { status: 'CLOSED' }),
+    grant(userId, 'grant_pt_05', 'Expired Library Books Grant', { deadline: '2020-01-15' }),
+    grant(userId, 'grant_pt_06', 'Out-of-Area Community Grant', { geo_qualified: 'No' }),
+    grant(userId, 'grant_pt_07', 'Annual Catholic Education Grant', { deadline: 'Annual: October 15', category: 'catholic_school' }),
+    grant(userId, 'grant_pt_08', 'Food Pantry Expansion Grant', { category: 'non_catholic' }),
+    grant(userId, 'grant_pt_09', 'Large Hospital Equipment Grant', { category: 'non_catholic' }),
+    grant(userId, 'grant_pt_10', 'Youth Ministry Retreat Grant'),
+    grant(userId, 'grant_pt_11', 'Playground Safety Grant', { category: 'mixed' }),
+    grant(userId, 'grant_pt_12', 'Diocesan Youth Formation Grant'),
+    grant(userId, 'grant_pt_13', 'Organ Restoration Grant'),
+    grant(userId, 'grant_pt_14', 'Security Camera Grant'),
+  ];
+}
+
+function testFoundation(userId: string) {
+  return {
+    id: 'fdn_pt_01',
+    user_id: userId,
+    foundation_name: 'Example Catholic Foundation',
+    application_cycle: 'Annual: March 1',
+    focus_areas: 'Catholic education, parish facilities',
+    location: 'Texas',
+    contact: 'info@example.org',
+    website: 'https://example.org/foundation',
+    annual_giving: '$2M',
+    notes: 'Invitation preferred',
+    created_at: new Date().toISOString(),
+  };
+}
+
+const byId = (results: Json, id: string): Json => results.matches.find((m: Json) => m.grant_id === id);
+
+// ---------------------------------------------------------------------------
+// Fake parish website
+// ---------------------------------------------------------------------------
+
+const SITE_PAGES: Record<string, string> = {
+  '/': 'site-home.html',
+  '/about-us': 'site-about.html',
+  '/school': 'site-school.html',
+  '/school/admissions': 'site-admissions.html',
+  '/ministries': 'site-ministries.html',
+  '/news/bulletin': 'site-bulletin.html',
+};
+const siteHits: string[] = [];
+const site = http.createServer((req, res) => {
+  const pathname = new URL(req.url ?? '/', 'http://site.test').pathname.replace(/\/+$/, '') || '/';
+  siteHits.push(pathname);
+  if (pathname.startsWith('/blocked')) {
+    res.writeHead(403, { 'content-type': 'text/html' });
+    res.end('<html><body><h1>Access denied</h1><p>Automated access is not allowed.</p></body></html>');
+    return;
+  }
+  const file = SITE_PAGES[pathname];
+  if (!file) {
+    res.writeHead(404, { 'content-type': 'text/plain' });
+    res.end('Not found');
+    return;
+  }
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+  res.end(fs.readFileSync(path.join(FIXTURES, file)));
+});
+await new Promise<void>((resolve) => site.listen(0, '127.0.0.1', resolve));
+const siteUrl = `http://127.0.0.1:${(site.address() as AddressInfo).port}`;
+
+async function closedPort(): Promise<number> {
+  const server = http.createServer();
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as AddressInfo).port;
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return port;
+}
+
+// ===========================================================================
+// 1. Sign-in and the Claude key are checked before any work
+// ===========================================================================
+
+const tokenA = await guest();
+const userA = await userIdOf(tokenA);
+
+const unauth = await Promise.all([
+  api('POST', '/api/processing/scan-website', { json: { church_url: siteUrl } }),
+  api('POST', '/api/processing/generate-questionnaire'),
+  api('POST', '/api/processing/submit-questionnaire', { json: { answers: [] } }),
+  api('POST', '/api/processing/upload-document', { form: fileForm('a.txt', 'hello') }),
+  api('GET', '/api/processing/profile'),
+  api('PUT', '/api/processing/profile', { json: {} }),
+  api('POST', '/api/processing/match-grants'),
+  api('GET', '/api/processing/match-results/latest'),
+  api('GET', '/api/processing/match-results/x'),
+  api('POST', '/api/processing/shortlist/x'),
+  api('GET', '/api/profile'),
+  api('PUT', '/api/profile', { json: {} }),
+  api('DELETE', '/api/profile'),
+  api('POST', '/api/profile/reset'),
+]);
+check('every processing/profile route needs sign-in (401)', unauth.every((r) => r.status === 401), unauth.map((r) => r.status));
+
+const noKey = await Promise.all([
+  api('POST', '/api/processing/scan-website', { token: tokenA, json: { church_url: siteUrl } }),
+  api('POST', '/api/processing/generate-questionnaire', { token: tokenA }),
+  api('POST', '/api/processing/upload-document', { token: tokenA, form: fileForm('notes.txt', 'Roof leaks.') }),
+  api('POST', '/api/processing/match-grants', { token: tokenA }),
+]);
+check(
+  'scan, questionnaire, upload, match without a Claude key -> 400 with the Python message, no job',
+  noKey.every((r) => r.status === 400 && r.data.detail === API_KEY_MISSING),
+  noKey.map((r) => [r.status, r.data]),
+);
+
+await saveKey(tokenA);
+
+// ===========================================================================
+// 2. Profile before setup
+// ===========================================================================
+
+const noProfile = await api('GET', '/api/processing/profile', { token: tokenA });
+check(
+  'GET /api/processing/profile with no profile -> 404 Python wording',
+  noProfile.status === 404 && noProfile.data.detail === 'No profile found. Please complete the setup process.',
+  noProfile.data,
+);
+const template = await api('GET', '/api/profile', { token: tokenA });
+check(
+  'GET /api/profile with no profile -> empty template with every field',
+  template.status === 200 && template.data.organization_type === 'parish' && template.data.organization_name === '' &&
+    template.data.user_id === userA && Array.isArray(template.data.facility_needs) && Array.isArray(template.data.evidence) &&
+    template.data.is_501c3 === true && template.data.voice_profile === null,
+  template.data,
+);
+
+// ===========================================================================
+// 3. Website scan
+// ===========================================================================
+
+const scanNoUrl = await api('POST', '/api/processing/scan-website', { token: tokenA, json: { church_url: '', school_url: null } });
+check('scan with no URL -> 400 Python wording', scanNoUrl.status === 400 && scanNoUrl.data.detail === 'At least one website URL is required', scanNoUrl.data);
+
+const scanBadUrl = await api('POST', '/api/processing/scan-website', { token: tokenA, json: { church_url: 'not a website' } });
+check('scan with a non-address -> 400 explaining the format', scanBadUrl.status === 400 && /doesn't look like a website address/.test(scanBadUrl.data.detail), scanBadUrl.data);
+
+const scanBadType = await api('POST', '/api/processing/scan-website', { token: tokenA, json: { church_url: 42 } });
+check('scan with a non-text URL -> 422', scanBadType.status === 422, scanBadType.data);
+
+await mock.reset();
+const scan = await call('POST', '/api/processing/scan-website', { token: tokenA, json: { church_url: siteUrl, school_url: `${siteUrl}/school` } });
+check(
+  'scan reads the parish site and returns WebsiteScanResult',
+  scan.status === 200 && scan.data.organization_basics?.name === 'St. Example Catholic Parish' &&
+    scan.data.leadership?.pastor === 'Rev. [Staff Name]' && scan.data.school_info?.student_count === 240 &&
+    Array.isArray(scan.data.facilities) && scan.data.facilities.includes('Parish hall') &&
+    scan.data.current_initiatives?.length === 3 && scan.data.extracted_text_length > 500,
+  scan.data,
+);
+check(
+  'scan result has exactly the Python fields',
+  JSON.stringify(Object.keys(scan.data ?? {}).sort()) ===
+    JSON.stringify(['current_initiatives', 'extracted_text_length', 'facilities', 'leadership', 'organization_basics', 'school_info']),
+  Object.keys(scan.data ?? {}),
+);
+check(
+  'crawler followed the grant-relevant internal pages (about, school, ministries, bulletin, admissions), not contact',
+  ['/', '/about-us', '/school', '/ministries', '/news/bulletin', '/school/admissions'].every((p) => siteHits.includes(p)) && !siteHits.includes('/contact'),
+  siteHits,
+);
+const scanPrompts = await prompts('website_scan_v1');
+check(
+  'scan prompt (website_scan_v1) has both sites, sub-page text, and no script/footer text',
+  scanPrompts.length === 1 && scanPrompts[0].includes(`=== CHURCH WEBSITE (${siteUrl}) ===`) &&
+    scanPrompts[0].includes(`=== SCHOOL WEBSITE (${siteUrl}/school) ===`) && scanPrompts[0].includes('food pantry serves 120 families') &&
+    scanPrompts[0].includes('playground equipment is 30 years old') && !scanPrompts[0].includes('SCRIPT_TEXT_SHOULD_NOT_APPEAR') &&
+    !scanPrompts[0].includes('FOOTER_TEXT_SHOULD_NOT_APPEAR') && scanPrompts[0].includes('Return ONLY the JSON object, no other text.'),
+  scanPrompts[0]?.slice(0, 400),
+);
+const scannedProfile = await profileOf(tokenA);
+check(
+  'scan saved the profile (name, city, state, diocese, leaders, school, URLs, initiatives, source)',
+  scannedProfile.organization_name === 'St. Example Catholic Parish' && scannedProfile.city === 'Exampleville' &&
+    scannedProfile.state === 'TX' && scannedProfile.diocese === 'Diocese of Example' && scannedProfile.pastor_name === 'Rev. [Staff Name]' &&
+    scannedProfile.principal_name === '[Staff Name]' && scannedProfile.has_school === true && scannedProfile.student_count === 240 &&
+    scannedProfile.website_url === siteUrl && scannedProfile.school_website_url === `${siteUrl}/school` &&
+    scannedProfile.current_initiatives.length === 3 && scannedProfile.sources.some((s: string) => s.startsWith('Website scan: ')),
+  scannedProfile,
+);
+const scanJob = await storedJob(userA, scan.jobId);
+check('scan job input holds only the URLs (never the API key)', scanJob && !JSON.stringify(scanJob.input).includes('sk-ant-') && scanJob.kind === 'processing.scan_website', scanJob?.input);
+
+const blocked = await call('POST', '/api/processing/scan-website', { token: tokenA, json: { church_url: `${siteUrl}/blocked` } });
+check(
+  'scan of a site that blocks bots (HTTP 403) fails with the URL, the reason, and what to do instead',
+  blocked.status === 400 && blocked.data.detail.includes(`${siteUrl}/blocked`) && /HTTP 403/.test(blocked.data.detail) &&
+    /blocks automated reading/.test(blocked.data.detail) && /upload documents/.test(blocked.data.detail) && /free-form notes/.test(blocked.data.detail),
+  blocked.data,
+);
+
+const deadUrl = `http://127.0.0.1:${await closedPort()}`;
+const unreachable = await call('POST', '/api/processing/scan-website', { token: tokenA, json: { church_url: deadUrl, school_url: `${siteUrl}/blocked/school` } });
+check(
+  'scan of unreachable + blocked URLs names each URL with its reason',
+  unreachable.status === 400 && unreachable.data.detail.includes(deadUrl) && /couldn't connect/.test(unreachable.data.detail) &&
+    unreachable.data.detail.includes(`${siteUrl}/blocked/school`) && /either website/.test(unreachable.data.detail),
+  unreachable.data,
+);
+
+await mock.reset();
+const partial = await call('POST', '/api/processing/scan-website', { token: tokenA, json: { church_url: siteUrl, school_url: `${siteUrl}/blocked` } });
+const partialPrompt = (await prompts('website_scan_v1'))[0] ?? '';
+check(
+  'partial success: one site blocked, the other read -> scan still completes with what was read',
+  partial.status === 200 && partial.data.organization_basics?.name === 'St. Example Catholic Parish' &&
+    partialPrompt.includes('=== CHURCH WEBSITE') && !partialPrompt.includes('=== SCHOOL WEBSITE'),
+  partial.data,
+);
+
+await mock.fail('website_scan_v1', 529, 'overloaded_error', 3);
+const scanOverloaded = await call('POST', '/api/processing/scan-website', { token: tokenA, json: { church_url: siteUrl } });
+check(
+  'scan when Claude stays overloaded -> clear retry message (no silent empty result)',
+  scanOverloaded.status === 503 && scanOverloaded.data.detail === 'Website scan failed: Claude is overloaded right now. Wait a minute and try again.',
+  scanOverloaded.data,
+);
+
+const tokenB = await guest();
+await saveKey(tokenB, 'sk-ant-nocredit-1');
+const scanNoCredit = await call('POST', '/api/processing/scan-website', { token: tokenB, json: { church_url: siteUrl } });
+check(
+  'scan with an out-of-credit key -> job fails with the billing message (fatal, no fallback)',
+  scanNoCredit.status === 400 && /out of API credits/.test(scanNoCredit.data.detail),
+  scanNoCredit.data,
+);
+const profileB = await api('GET', '/api/processing/profile', { token: tokenB });
+check('failed scan saved nothing', profileB.status === 404, profileB.data);
+
+// ===========================================================================
+// 4. Questionnaire
+// ===========================================================================
+
+const qNoGrants = await api('POST', '/api/processing/generate-questionnaire', { token: tokenA });
+check(
+  'questionnaire with no grants -> 400 Python wording',
+  qNoGrants.status === 400 && qNoGrants.data.detail === 'No grants uploaded. Please upload grant database first.',
+  qNoGrants.data,
+);
+
+await repo.saveGrants(userA, testGrants(userA) as Json);
+await repo.saveFoundations(userA, [testFoundation(userA)] as Json);
+
+await mock.reset();
+const questionnaire = await call('POST', '/api/processing/generate-questionnaire', { token: tokenA });
+const questions: Json[] = questionnaire.data?.questions ?? [];
+check(
+  'questionnaire job returns {questions, total_questions} parsed from a fenced answer',
+  questionnaire.status === 200 && questions.length === 10 && questionnaire.data.total_questions === 10,
+  questionnaire.data,
+);
+check(
+  'every question has the fields the dashboard reads',
+  questions.every((q) => Number.isInteger(q.id) && typeof q.question === 'string' && ['boolean', 'text', 'select', 'multiselect'].includes(q.question_type) &&
+    typeof q.required === 'boolean' && Array.isArray(q.grant_relevance) && (q.options === null || Array.isArray(q.options))) &&
+    questions.filter((q) => q.question_type === 'select').every((q) => q.options.length > 0),
+  questions,
+);
+const qPrompt = (await prompts('questionnaire_v1'))[0] ?? '';
+check(
+  'questionnaire prompt summarizes the grants (name, funder, geography)',
+  qPrompt.includes('"name": "Parish Hall Roof Repair Fund"') && qPrompt.includes('"geo_qualified": "Yes - TX Only"') &&
+    qPrompt.includes('EXACTLY 20 or fewer questions'),
+  qPrompt.slice(0, 300),
+);
+const storedQ: Json = await store.kv().get(`questionnaires/${store.keyPart(userA)}`);
+check('questionnaire saved per user for answer mapping', storedQ?.questions?.length === 10 && storedQ.source === 'ai', storedQ);
+
+const submitBad = await Promise.all([
+  api('POST', '/api/processing/submit-questionnaire', { token: tokenA, json: {} }),
+  api('POST', '/api/processing/submit-questionnaire', { token: tokenA, json: { answers: 'yes' } }),
+  api('POST', '/api/processing/submit-questionnaire', { token: tokenA, json: { answers: [{ question_id: 'abc', answer: true }] } }),
+  api('POST', '/api/processing/submit-questionnaire', { token: tokenA, json: { answers: [{ question_id: 1 }] } }),
+  api('POST', '/api/processing/submit-questionnaire', { token: tokenA, json: { answers: [], free_form_text: 5 } }),
+]);
+check(
+  'submit-questionnaire validation -> 422 with readable text',
+  submitBad.every((r) => r.status === 422 && typeof r.data.detail === 'string') && /question_id must be a whole number/.test(submitBad[2].data.detail) &&
+    /answer is required/.test(submitBad[3].data.detail),
+  submitBad.map((r) => [r.status, r.data]),
+);
+
+const submitted = await api('POST', '/api/processing/submit-questionnaire', {
+  token: tokenA,
+  json: {
+    answers: [
+      { question_id: 1, answer: true },
+      { question_id: 2, answer: 'Parish with school' },
+      { question_id: 3, answer: 'Texas' },
+      { question_id: 4, answer: true },
+      { question_id: 5, answer: '$500,000-$1M' },
+      { question_id: 6, answer: 'Diocesan capital grant for HVAC (2023)' },
+      { question_id: 7, answer: ['Roof', 'Playground'] },
+      { question_id: '9', answer: 'true' },
+      { question_id: 8, answer: false },
+      { question_id: 99, answer: 'extra detail' },
+    ],
+    free_form_text: 'We need a new roof on the parish hall before winter.',
+  },
+});
+check(
+  'submit-questionnaire answers synchronously with the Python body',
+  submitted.status === 200 && submitted.data.message === 'Questionnaire submitted successfully' && submitted.data.answers_recorded === 10,
+  submitted.data,
+);
+const answeredProfile = await profileOf(tokenA);
+const qa: Json[] = answeredProfile.questionnaire_answers ?? [];
+check(
+  'answers are mapped onto profile fields',
+  answeredProfile.is_501c3 === true && answeredProfile.has_food_pantry === true && answeredProfile.annual_budget === '$500,000-$1M' &&
+    answeredProfile.previous_grants.includes('Diocesan capital grant for HVAC (2023)') && answeredProfile.organization_type === 'both' &&
+    answeredProfile.state === 'TX' && answeredProfile.free_form_notes === 'We need a new roof on the parish hall before winter.',
+  answeredProfile,
+);
+check(
+  '"security concerns at your church or school" answered No does not unset has_school (Python bug)',
+  answeredProfile.has_school === true,
+  answeredProfile.has_school,
+);
+check(
+  'every answer kept verbatim with its question text (unknown ids as "Question N")',
+  qa.length === 10 && qa[0].question === questions[0].question && qa[0].answer === true &&
+    qa.some((p) => p.question === 'Question 99' && p.answer === 'extra detail') &&
+    answeredProfile.sources.includes('Questionnaire responses') && answeredProfile.sources.includes('User free-form text'),
+  qa,
+);
+// Resubmitting does not duplicate previous grants or sources.
+await api('POST', '/api/processing/submit-questionnaire', {
+  token: tokenA,
+  json: { answers: [{ question_id: 6, answer: 'Diocesan capital grant for HVAC (2023)' }], free_form_text: 'We need a new roof on the parish hall before winter.' },
+});
+const resubmitted = await profileOf(tokenA);
+check(
+  'resubmitting does not duplicate previous grants or sources',
+  resubmitted.previous_grants.filter((g: string) => g === 'Diocesan capital grant for HVAC (2023)').length === 1 &&
+    resubmitted.sources.filter((s: string) => s === 'Questionnaire responses').length === 1,
+  resubmitted,
+);
+
+// State mapping: only a real US state becomes profile.state (Python stored "True" from a yes/no question).
+const tokenG = await guest();
+const userG = await userIdOf(tokenG);
+await api('PUT', '/api/processing/profile', { token: tokenG, json: { organization_name: 'Test Parish', organization_type: 'both', city: 'Exampleville', state: '', has_school: true } });
+const qText = (id: number, question: string, questionType = 'boolean') => ({ id, question, question_type: questionType, options: null, required: true, grant_relevance: [] });
+await store.kv().set(`questionnaires/${store.keyPart(userG)}`, {
+  questions: [
+    qText(1, 'Do you own real estate besides the church?'),
+    qText(2, 'In which state is your organization located?', 'text'),
+    qText(3, 'Is your school accredited?'),
+    qText(4, 'Has your school received grants in the past? List them.', 'text'),
+  ],
+  total_questions: 4,
+  created_at: new Date().toISOString(),
+  source: 'ai',
+});
+const submitG = await api('POST', '/api/processing/submit-questionnaire', {
+  token: tokenG,
+  json: {
+    answers: [
+      { question_id: 1, answer: true },
+      { question_id: 2, answer: 'Texas, USA' },
+      { question_id: 3, answer: false },
+      { question_id: 4, answer: 'Diocesan technology grant (2024)' },
+    ],
+  },
+});
+const profileG = await profileOf(tokenG);
+check(
+  'submit works without a Claude key; state comes from the state answer ("Texas, USA" -> TX), not a yes/no answer',
+  submitG.status === 200 && profileG.state === 'TX',
+  [submitG.data, profileG.state],
+);
+check('"Is your school accredited?" answered No does not unset has_school', profileG.has_school === true, profileG.has_school);
+check(
+  'a school question about past grants reaches previous_grants (the Python stopped at the word "school")',
+  profileG.previous_grants.includes('Diocesan technology grant (2024)'),
+  profileG.previous_grants,
+);
+
+// Fallback questionnaire for non-fatal errors only.
+await mock.fail('questionnaire_v1', 529, 'overloaded_error', 3);
+const qOverloaded = await call('POST', '/api/processing/generate-questionnaire', { token: tokenA });
+check(
+  'Claude overloaded -> the standard 8-question questionnaire (Python fallback)',
+  qOverloaded.status === 200 && qOverloaded.data.total_questions === 8 &&
+    qOverloaded.data.questions[0].question === 'Is your organization a registered 501(c)(3) nonprofit?',
+  qOverloaded.data,
+);
+const storedDefault: Json = await store.kv().get(`questionnaires/${store.keyPart(userA)}`);
+check('fallback questionnaire is the one saved for answer mapping', storedDefault?.source === 'default' && storedDefault.questions.length === 8, storedDefault?.source);
+
+await mock.fail('questionnaire_v1', 401, 'authentication_error', 1);
+const qFatal = await call('POST', '/api/processing/generate-questionnaire', { token: tokenA });
+check(
+  'bad API key during questionnaire -> job fails with the key message, no fallback questionnaire',
+  qFatal.status === 400 && /rejected your Claude API key/.test(qFatal.data.detail),
+  qFatal.data,
+);
+
+await mock.fixtures({ questionnaire_v1: 'Sorry, I cannot produce that right now.' });
+const qUnreadable = await call('POST', '/api/processing/generate-questionnaire', { token: tokenA });
+check('unreadable answer -> standard questionnaire', qUnreadable.status === 200 && qUnreadable.data.total_questions === 8, qUnreadable.data);
+
+const many = Array.from({ length: 25 }, (_, i) => ({
+  id: i === 4 ? 3 : i === 6 ? String(i + 1) : i + 1,
+  question: i === 9 ? '' : `Question number ${i + 1}?`,
+  question_type: i === 0 ? 'yes_no' : i === 1 ? 'select' : i === 2 ? 'Multiple Choice' : 'text',
+  options: i === 2 ? ['A', 'B'] : null,
+  required: i % 2 === 0,
+  grant_relevance: [],
+}));
+await mock.fixtures({ questionnaire_v1: JSON.stringify(many) });
+const qMany = await call('POST', '/api/processing/generate-questionnaire', { token: tokenA });
+const manyQs: Json[] = qMany.data?.questions ?? [];
+check(
+  'more than 20 questions -> capped at 20, unique integer ids, types normalized, blank questions dropped',
+  qMany.status === 200 && manyQs.length === 20 && qMany.data.total_questions === 20 &&
+    new Set(manyQs.map((q) => q.id)).size === 20 && manyQs.every((q) => Number.isInteger(q.id)) &&
+    manyQs[0].question_type === 'boolean' && manyQs[1].question_type === 'text' && manyQs[2].question_type === 'select' &&
+    !manyQs.some((q) => q.question === ''),
+  manyQs.slice(0, 5),
+);
+await mock.reset();
+
+// ===========================================================================
+// 5. Document upload
+// ===========================================================================
+
+const tokenC = await guest();
+const userC = await userIdOf(tokenC);
+await saveKey(tokenC);
+
+const badType = await upload(tokenC, 'malware.exe', 'MZ');
+check('upload .exe -> 400 Python wording', badType.status === 400 && badType.data.detail === 'Invalid file type. Allowed: .pdf, .docx, .txt', badType.data);
+const noExt = await upload(tokenC, 'README', 'text');
+check('upload without an extension -> 400', noExt.status === 400 && noExt.data.detail === 'Invalid file type. Allowed: .pdf, .docx, .txt', noExt.data);
+const tooBig = await upload(tokenC, 'big.txt', new Uint8Array(10 * 1024 * 1024 + 1).fill(97));
+check('upload over 10 MB -> 413 naming the limit', tooBig.status === 413 && /too large/.test(tooBig.data.detail) && /The limit is 10 MB/.test(tooBig.data.detail), tooBig.data);
+const emptyFile = await upload(tokenC, 'empty.txt', '');
+check('empty file -> 400 before any job', emptyFile.status === 400 && /empty/.test(emptyFile.data.detail), emptyFile.data);
+const blankFile = await upload(tokenC, 'blank.txt', '   \n \n  ');
+check('whitespace-only file -> 400 "No readable text"', blankFile.status === 400 && /No readable text found in "blank.txt"/.test(blankFile.data.detail), blankFile.data);
+const wrongField = await api('POST', '/api/processing/upload-document', { token: tokenC, form: fileForm('a.txt', 'hello', 'document') });
+check('multipart without a "file" field -> 422', wrongField.status === 422 && /No file was uploaded/.test(wrongField.data.detail), wrongField.data);
+const brokenPdf = await upload(tokenC, 'broken.pdf', 'this is not a pdf');
+check('damaged PDF -> 400 with what to do', brokenPdf.status === 400 && /Couldn't read "broken.pdf" as a PDF/.test(brokenPdf.data.detail), brokenPdf.data);
+const brokenDocx = await upload(tokenC, 'broken.docx', 'not a zip file');
+check('fake .docx -> 400 with what to do', brokenDocx.status === 400 && /Word document/.test(brokenDocx.data.detail), brokenDocx.data);
+const scannedPdf = await upload(tokenC, 'scan.pdf', makePdf([]));
+check('PDF with no text layer -> 400 mentioning scanned images', scannedPdf.status === 400 && /scanned image/.test(scannedPdf.data.detail), scannedPdf.data);
+check('no profile was created by rejected uploads', (await api('GET', '/api/processing/profile', { token: tokenC })).status === 404);
+
+await mock.reset();
+const bulletin = fs.readFileSync(path.join(FIXTURES, 'bulletin.txt'), 'utf8');
+const txt = await uploadAndWait(tokenC, 'bulletin.txt', bulletin);
+check(
+  'txt upload -> DocumentExtractionResult with every field',
+  txt.status === 200 && /^[0-9a-f-]{36}$/.test(txt.data.document_id) && txt.data.filename === 'bulletin.txt' &&
+    txt.data.extracted_text_length === bulletin.trim().length && txt.data.facility_needs.length === 2 && txt.data.program_needs.length === 2 &&
+    txt.data.security_concerns.length === 1 && txt.data.other_signals.length === 2 &&
+    JSON.stringify(Object.keys(txt.data).sort()) ===
+      JSON.stringify(['document_id', 'extracted_text_length', 'facility_needs', 'filename', 'other_signals', 'program_needs', 'security_concerns']),
+  txt.data,
+);
+const docPrompt = (await prompts('document_signals_v1'))[0] ?? '';
+check('document prompt (document_signals_v1) has the filename and text', docPrompt.includes('DOCUMENT: bulletin.txt') && docPrompt.includes('parish hall roof leaks during heavy rain'), docPrompt.slice(0, 300));
+
+const docProfile = await profileOf(tokenC);
+const evidence: Json[] = docProfile.evidence ?? [];
+check(
+  'upload with no profile yet creates the minimal profile and keeps the signals (Python dropped them)',
+  docProfile.organization_type === 'parish' && docProfile.organization_name === '' && docProfile.facility_needs.length === 2 &&
+    docProfile.program_needs.length === 2 && docProfile.security_concerns.length === 1 && docProfile.sources.includes('Document: bulletin.txt'),
+  docProfile,
+);
+check(
+  'every extracted item became profile evidence for the GrantWriter',
+  evidence.length === 7 && evidence.every((e) => /^ev_[0-9a-f]{10}$/.test(e.id) && e.type === 'document' && e.source_ref === 'Document: bulletin.txt' &&
+    Array.isArray(e.linked_programs) && e.linked_programs.length === 0 && typeof e.summary === 'string') &&
+    evidence.some((e) => e.summary === 'School enrollment grew 12% over the last two years') && new Set(evidence.map((e) => e.id)).size === 7,
+  evidence,
+);
+const txtJob = await storedJob(userC, txt.jobId);
+check(
+  'document job input: id, filename, text (no API key)',
+  txtJob?.kind === 'processing.upload_document' && txtJob.input.filename === 'bulletin.txt' && txtJob.input.text.includes('roof') && !JSON.stringify(txtJob.input).includes('sk-ant-'),
+  txtJob?.input,
+);
+
+const again = await uploadAndWait(tokenC, 'bulletin.txt', bulletin);
+const againProfile = await profileOf(tokenC);
+check(
+  'uploading the same document twice does not duplicate needs, evidence, or sources',
+  again.status === 200 && againProfile.facility_needs.length === 2 && againProfile.program_needs.length === 2 &&
+    againProfile.security_concerns.length === 1 && againProfile.evidence.length === 7 &&
+    againProfile.sources.filter((s: string) => s === 'Document: bulletin.txt').length === 1,
+  againProfile,
+);
+
+await mock.reset();
+const docx = await uploadAndWait(tokenC, 'parish-report.docx', await makeDocx(['Annual report: the boiler is 40 years old.', 'We plan to add an after-school robotics club.']));
+const docxPrompt = (await prompts('document_signals_v1'))[0] ?? '';
+check(
+  '.docx upload: text extracted (mammoth) and sent to Claude',
+  docx.status === 200 && docx.data.filename === 'parish-report.docx' && docxPrompt.includes('the boiler is 40 years old') && docxPrompt.includes('robotics club'),
+  [docx.data, docxPrompt.slice(0, 200)],
+);
+check('.docx source recorded', (await profileOf(tokenC)).sources.includes('Document: parish-report.docx'));
+
+await mock.reset();
+await mock.fixtures({
+  document_signals_v1: 'Here is what I found:\n```json\n{"facility_needs": ["Gym roof leaks over the stage"], "program_needs": [], "security_concerns": [], "other_signals": ["Finance council approved a 10% local match"]}\n```',
+});
+const pdf = await uploadAndWait(tokenC, 'minutes.pdf', makePdf(['Parish Finance Council minutes', 'The gym roof leaks over the stage.']));
+const pdfPrompt = (await prompts('document_signals_v1'))[0] ?? '';
+const pdfProfile = await profileOf(tokenC);
+check(
+  '.pdf upload: text extracted and new signals added to needs and evidence',
+  pdf.status === 200 && pdfPrompt.includes('The gym roof leaks over the stage.') && pdfProfile.facility_needs.length === 3 &&
+    pdfProfile.evidence.length === 9 && pdfProfile.evidence.some((e: Json) => e.summary === 'Finance council approved a 10% local match' && e.source_ref === 'Document: minutes.pdf'),
+  [pdf.data, pdfProfile.evidence.length],
+);
+await mock.reset();
+
+const longText = `START_MARKER ${'Parish hall roof repairs are needed. '.repeat(900)} MARKER_BEYOND_LIMIT`;
+const longDoc = await uploadAndWait(tokenC, 'long.txt', longText);
+const longPrompt = (await prompts('document_signals_v1'))[0] ?? '';
+check(
+  'long document: full length reported, only the first 30,000 characters sent (as in the Python)',
+  longDoc.status === 200 && longDoc.data.extracted_text_length === longText.length && longText.length > 30000 &&
+    longPrompt.includes('START_MARKER') && !longPrompt.includes('MARKER_BEYOND_LIMIT'),
+  longDoc.data,
+);
+
+const evidenceBefore = (await profileOf(tokenC)).evidence.length;
+await mock.fail('document_signals_v1', 401, 'authentication_error', 1);
+const docFatal = await uploadAndWait(tokenC, 'other.txt', 'The sanctuary carpet is worn through.');
+check('bad API key during document job -> job fails with the key message', docFatal.status === 400 && /rejected your Claude API key/.test(docFatal.data.detail), docFatal.data);
+await mock.fail('document_signals_v1', 529, 'overloaded_error', 3);
+const docBusy = await uploadAndWait(tokenC, 'other.txt', 'The sanctuary carpet is worn through.');
+check(
+  'Claude overloaded during document job -> clear retry message (not "0 items found")',
+  docBusy.status === 503 && docBusy.data.detail === 'Document processing failed: Claude is overloaded right now. Wait a minute and try again.',
+  docBusy.data,
+);
+check('failed document jobs changed nothing', (await profileOf(tokenC)).evidence.length === evidenceBefore);
+
+// ===========================================================================
+// 6. Matching prerequisites
+// ===========================================================================
+
+const tokenD = await guest();
+const userD = await userIdOf(tokenD);
+await saveKey(tokenD);
+const matchNoGrants = await api('POST', '/api/processing/match-grants', { token: tokenD });
+check(
+  'match with no grants -> 400 Python wording',
+  matchNoGrants.status === 400 && matchNoGrants.data.detail === 'No grants in database. Upload a grant database or run discovery first.',
+  matchNoGrants.data,
+);
+await repo.saveGrants(userD, testGrants(userD) as Json);
+const matchNoProfile = await api('POST', '/api/processing/match-grants', { token: tokenD });
+check(
+  'match with grants but no profile -> 400 Python wording',
+  matchNoProfile.status === 400 && matchNoProfile.data.detail === 'No organization profile. Please complete the setup process.',
+  matchNoProfile.data,
+);
+
+const latestNone = await api('GET', '/api/processing/match-results/latest', { token: tokenA });
+check('latest match results before any run -> 404', latestNone.status === 404 && latestNone.data.detail === NO_MATCH_RESULTS, latestNone.data);
+
+// ===========================================================================
+// 7. Matching (profile in TX)
+// ===========================================================================
+
+await mock.reset();
+const matchStart = await api('POST', '/api/processing/match-grants', { token: tokenA });
+check(
+  'match-grants answers 202 {job_id, status, kind} at once',
+  matchStart.status === 202 && matchStart.data.kind === 'processing.match_grants' && /^job_/.test(matchStart.data.job_id) && matchStart.data.status === 'queued',
+  matchStart.data,
+);
+const matchPolled = await waitForJob(tokenA, matchStart.data.job_id);
+check('polling GET /api/jobs/{id} ends "done" with the results', matchPolled.status === 'done' && matchPolled.error === null && matchPolled.result?.session_id, matchPolled.status);
+const match = { status: matchPolled.status === 'done' ? 200 : 500, data: matchPolled.result, jobId: matchStart.data.job_id as string };
+const results: Json = match.data;
+check(
+  'match results shape and tier counts (15 grants incl. 1 foundation)',
+  match.status === 200 && /^match_/.test(results.session_id) && results.user_id === userA && results.profile_id === userA &&
+    results.total_grants_evaluated === 15 && results.matches.length === 15 && results.excellent_matches === 3 && results.good_matches === 3 &&
+    results.possible_matches === 4 && results.weak_matches === 1 && results.not_eligible === 4,
+  { ...results, matches: results?.matches?.map((m: Json) => [m.grant_id, m.score]) },
+);
+check(
+  'matches sorted by score, every field the dashboard and export read present',
+  results.matches.every((m: Json, i: number) => i === 0 || results.matches[i - 1].score >= m.score) &&
+    results.matches.every((m: Json) =>
+      typeof m.grant_id === 'string' && typeof m.grant_name === 'string' && typeof m.funder === 'string' && typeof m.amount === 'string' &&
+      typeof m.deadline === 'string' && typeof m.url === 'string' && typeof m.contact === 'string' && typeof m.category === 'string' &&
+      typeof m.geo_qualified === 'string' && Number.isInteger(m.score) && ['excellent', 'good', 'possible', 'weak', 'not_eligible'].includes(m.score_tier) &&
+      typeof m.explanation === 'string' && Array.isArray(m.evidence) && m.is_shortlisted === false &&
+      ['eligibility_fit', 'need_alignment', 'capacity_signals', 'timing', 'completeness'].every((k) => typeof m.score_breakdown?.[k] === 'number')),
+  results.matches[0],
+);
+check(
+  '90-day expiry',
+  Math.round((Date.parse(results.expires_at) - Date.parse(results.created_at)) / 86400000) === 90,
+  [results.created_at, results.expires_at],
+);
+check(
+  'hard filters: CLOSED, deadline passed, geography "No" -> 0 / not eligible with the Python reasons',
+  byId(results, 'grant_pt_04').score === 0 && byId(results, 'grant_pt_04').explanation === 'This grant is marked CLOSED in the database.' &&
+    byId(results, 'grant_pt_05').explanation === "Deadline passed (2020-01-15). Check the funder's website for the next cycle." &&
+    byId(results, 'grant_pt_06').explanation === "This grant's geographic restriction excludes your organization per the grant database." &&
+    byId(results, 'grant_pt_06').score_tier === 'not_eligible' && byId(results, 'grant_pt_06').score_breakdown.completeness === 100,
+  [byId(results, 'grant_pt_04'), byId(results, 'grant_pt_05')],
+);
+check(
+  'Texas-only grant is scored for a Texas parish; "Annual: October 15" is not treated as expired',
+  byId(results, 'grant_pt_03').score === 88 && byId(results, 'grant_pt_03').score_tier === 'excellent' && byId(results, 'grant_pt_07').score === 61,
+  [byId(results, 'grant_pt_03'), byId(results, 'grant_pt_07')],
+);
+check(
+  'AI scores parsed: "78%" -> 78, 105 -> 100, missing score -> weighted breakdown (78), name in grant_id matched, first duplicate wins',
+  byId(results, 'grant_pt_02').score === 78 && byId(results, 'grant_pt_02').score_tier === 'good' && byId(results, 'grant_pt_10').score === 100 &&
+    byId(results, 'grant_pt_11').score === 78 && byId(results, 'grant_pt_12').score === 55 && byId(results, 'grant_pt_14').score === 70 &&
+    byId(results, 'grant_pt_01').score === 92 && byId(results, 'grant_pt_01').evidence[0] === 'Capital campaign to replace the parish hall roof' &&
+    byId(results, 'grant_pt_09').score_tier === 'not_eligible' && byId(results, 'grant_pt_08').score_tier === 'weak',
+  results.matches.map((m: Json) => [m.grant_id, m.score, m.score_tier]),
+);
+check(
+  'coverage guarantee: a grant the answer skipped is listed and says plainly it was not AI-scored',
+  byId(results, 'grant_pt_13')?.score === 50 && byId(results, 'grant_pt_13').explanation === "Not AI-scored: Claude's answer skipped this grant. Re-run matching for a real score.",
+  byId(results, 'grant_pt_13'),
+);
+const fdn = results.matches.find((m: Json) => m.grant_name === 'Example Catholic Foundation (Foundation)');
+check(
+  'Category 5 foundation joins matching as a "(Foundation)" grant with a stable id',
+  fdn && fdn.category === 'foundations' && fdn.score === 64 && /^grant_[0-9a-f]{12}$/.test(fdn.grant_id) && fdn.deadline === 'Annual: March 1' && fdn.amount === '$2M',
+  fdn,
+);
+const resolvedFoundation = fdn ? await ai.getGrantOrFoundation(userA, fdn.grant_id) : null;
+const resolvedGrant = await ai.getGrantOrFoundation(userA, 'grant_pt_01');
+check(
+  'getGrantOrFoundation resolves foundation matches (for the writer) and plain grants; unknown ids -> null',
+  resolvedFoundation?.grant_name === 'Example Catholic Foundation (Foundation)' && resolvedFoundation.category === 'foundations' &&
+    resolvedGrant?.grant_name === 'Parish Hall Roof Repair Fund' && (await ai.getGrantOrFoundation(userA, 'grant_000000000000')) === null,
+  [resolvedFoundation?.grant_name, resolvedGrant?.grant_name],
+);
+const matchPrompts = await prompts('grant_match_batch_v1');
+check(
+  'grants scored in batches of 10 (2 calls for 12 grants); filtered grants never sent to Claude',
+  matchPrompts.length === 2 && matchPrompts.every((p) => p.includes("TODAY'S DATE: ") && p.includes('ORGANIZATION PROFILE:')) &&
+    matchPrompts.some((p) => p.includes('"id": "grant_pt_01"')) && !matchPrompts.some((p) => p.includes('grant_pt_04') || p.includes('grant_pt_05') || p.includes('grant_pt_06')),
+  matchPrompts.map((p) => p.length),
+);
+const matchJob = await storedJob(userA, match.jobId);
+check('match job notes record the filter counts', (matchJob?.notes ?? []).some((n: string) => n.includes('3 ruled out by hard filters, 12 sent to Claude')), matchJob?.notes);
+
+const fetched = await api('GET', `/api/processing/match-results/${results.session_id}`, { token: tokenA });
+check('GET match-results/{session_id} returns the saved results', fetched.status === 200 && fetched.data.session_id === results.session_id && fetched.data.matches.length === 15, fetched.data?.session_id);
+const latest = await api('GET', '/api/processing/match-results/latest', { token: tokenA });
+check('GET match-results/latest returns the newest results', latest.status === 200 && latest.data.session_id === results.session_id, latest.data?.session_id);
+const unknownSession = await api('GET', '/api/processing/match-results/match_nope', { token: tokenA });
+check('unknown session -> 404 Session not found', unknownSession.status === 404 && unknownSession.data.detail === 'Session not found', unknownSession.data);
+const otherUser = await api('GET', `/api/processing/match-results/${results.session_id}`, { token: tokenD });
+check("another user's session -> 404", otherUser.status === 404, otherUser.data);
+
+// ===========================================================================
+// 8. Matching outside Texas, injected answers, failures
+// ===========================================================================
+
+const current = await profileOf(tokenA);
+const toLouisiana = await api('PUT', '/api/processing/profile', { token: tokenA, json: { ...current, state: 'Louisiana' } });
+check('a full profile from GET round-trips through PUT', toLouisiana.status === 200 && toLouisiana.data.state === 'Louisiana' && toLouisiana.data.evidence.length === current.evidence.length, toLouisiana.data);
+await mock.reset();
+const laMatch = await call('POST', '/api/processing/match-grants', { token: tokenA });
+check(
+  'Texas-only grant for a Louisiana parish -> not eligible with the Python reason, no AI call for it',
+  laMatch.status === 200 && byId(laMatch.data, 'grant_pt_03').score === 0 &&
+    byId(laMatch.data, 'grant_pt_03').explanation === 'Geographic restriction: this grant is limited to Texas organizations, and your organization is in Louisiana.' &&
+    laMatch.data.not_eligible === 5 && !(await prompts('grant_match_batch_v1')).some((p) => p.includes('grant_pt_03')),
+  byId(laMatch.data, 'grant_pt_03'),
+);
+const latest2 = await api('GET', '/api/processing/match-results/latest', { token: tokenA });
+check('latest now points at the newer run', latest2.data?.session_id === laMatch.data.session_id && laMatch.data.session_id !== results.session_id, latest2.data?.session_id);
+
+// Fixture injected at runtime with whatever ids the grants have.
+const tokenE = await guest();
+const userE = await userIdOf(tokenE);
+await saveKey(tokenE);
+const randomGrants = ['A', 'B', 'C'].map((letter) => grant(userE, crypto.randomUUID(), `Random Id Grant ${letter}`));
+await repo.saveGrants(userE, randomGrants as Json);
+await api('PUT', '/api/processing/profile', { token: tokenE, json: { organization_name: 'Test Parish', organization_type: 'parish', city: 'Exampleville', state: 'TX' } });
+await mock.fixtures({
+  grant_match_batch_v1: JSON.stringify(randomGrants.map((g, index) => ({
+    grant_id: g.id,
+    score: [91, 73, 40][index],
+    score_breakdown: { eligibility_fit: 90, need_alignment: 80, capacity_signals: 70, timing: 60, completeness: 50 },
+    explanation: `Injected score for ${g.grant_name}`,
+    evidence: ['Injected evidence'],
+  }))),
+});
+const injected = await call('POST', '/api/processing/match-grants', { token: tokenE });
+check(
+  'runtime-injected answer with random grant ids is matched by id',
+  injected.status === 200 && byId(injected.data, randomGrants[0].id).score === 91 && byId(injected.data, randomGrants[1].id).score_tier === 'good' &&
+    byId(injected.data, randomGrants[2].id).score_tier === 'weak' && injected.data.excellent_matches === 1,
+  injected.data?.matches?.map((m: Json) => [m.grant_name, m.score]),
+);
+await mock.reset();
+
+const beforeFailures = (await api('GET', '/api/processing/match-results/latest', { token: tokenA })).data.session_id;
+await mock.fail('grant_match_batch_v1', 529, 'overloaded_error', 10);
+const busy = await call('POST', '/api/processing/match-grants', { token: tokenA });
+const unscored = busy.data?.matches?.filter((m: Json) => m.score_tier !== 'not_eligible') ?? [];
+check(
+  'Claude overloaded during matching -> job still finishes; every unscored grant says so plainly',
+  busy.status === 200 && unscored.length === 11 &&
+    unscored.every((m: Json) => m.explanation === 'Not AI-scored: Claude was unavailable (overloaded). Re-run matching for a real score.' &&
+      m.score === 50 && m.score_tier === 'possible' && m.evidence.length === 0) &&
+    busy.data.not_eligible === 4 && byId(busy.data, 'grant_pt_04').explanation === 'This grant is marked CLOSED in the database.',
+  busy.data?.matches?.slice(0, 2),
+);
+await mock.reset();
+
+const beforeFatal = (await api('GET', '/api/processing/match-results/latest', { token: tokenA })).data.session_id;
+await mock.fail('grant_match_batch_v1', 401, 'authentication_error', 5);
+const fatal = await call('POST', '/api/processing/match-grants', { token: tokenA });
+const afterFatal = (await api('GET', '/api/processing/match-results/latest', { token: tokenA })).data.session_id;
+check(
+  'bad API key during matching -> job fails with the key message; no fallback results saved',
+  fatal.status === 400 && /rejected your Claude API key/.test(fatal.data.detail) && afterFatal === beforeFatal && beforeFatal !== beforeFailures,
+  [fatal.data, beforeFatal, afterFatal],
+);
+await mock.reset();
+
+await mock.fixtures({
+  grant_match_batch_v1: {
+    text: '[\n  {"grant_id": "grant_pt_01", "score": 90, "score_breakdown": {"eligibility_fit": 90, "need_alignment": 90, "capacity_signals": 90, "timing": 90, "completeness": 90}, "explanation": "Roof fits.", "evidence": ["Roof"]},\n  {"grant_id": "grant_pt_02", "score": 7',
+    stop_reason: 'max_tokens',
+  },
+});
+const truncated = await call('POST', '/api/processing/match-grants', { token: tokenA });
+check(
+  'answer cut off at max_tokens -> complete items still used, the rest honestly marked',
+  truncated.status === 200 && byId(truncated.data, 'grant_pt_01').score === 90 &&
+    byId(truncated.data, 'grant_pt_02').explanation.startsWith('Not AI-scored:'),
+  [byId(truncated.data, 'grant_pt_01'), byId(truncated.data, 'grant_pt_02')],
+);
+await mock.fixtures({ grant_match_batch_v1: 'I am sorry, but I cannot score these grants.' });
+const unreadable = await call('POST', '/api/processing/match-grants', { token: tokenA });
+check(
+  'unreadable answer -> grants marked "Not AI-scored: Claude\'s answer could not be read"',
+  unreadable.status === 200 &&
+    unreadable.data.matches.filter((m: Json) => m.score_tier !== 'not_eligible').every((m: Json) => m.explanation === "Not AI-scored: Claude's answer could not be read. Re-run matching for a real score."),
+  unreadable.data?.matches?.[0],
+);
+await mock.reset();
+
+// ===========================================================================
+// 9. Shortlist
+// ===========================================================================
+
+const sessionId = results.session_id;
+const add = await api('POST', `/api/processing/shortlist/grant_pt_01?session_id=${sessionId}`, { token: tokenA });
+const afterAdd = await api('GET', `/api/processing/match-results/${sessionId}`, { token: tokenA });
+check(
+  'shortlist a grant in a session -> {grant_id, shortlisted} and it is saved',
+  add.status === 200 && add.data.grant_id === 'grant_pt_01' && add.data.shortlisted === true &&
+    byId(afterAdd.data, 'grant_pt_01').is_shortlisted === true && byId(afterAdd.data, 'grant_pt_02').is_shortlisted === false,
+  [add.data, byId(afterAdd.data, 'grant_pt_01')],
+);
+const remove = await api('POST', `/api/processing/shortlist/grant_pt_01?session_id=${sessionId}&shortlist=false`, { token: tokenA });
+const afterRemove = await api('GET', `/api/processing/match-results/${sessionId}`, { token: tokenA });
+check('shortlist=false removes it', remove.status === 200 && remove.data.shortlisted === false && byId(afterRemove.data, 'grant_pt_01').is_shortlisted === false, remove.data);
+const toLatest = await api('POST', '/api/processing/shortlist/grant_pt_02', { token: tokenA });
+const latestAfter = await api('GET', '/api/processing/match-results/latest', { token: tokenA });
+check(
+  'shortlist without a session id applies to the newest results',
+  toLatest.status === 200 && toLatest.data.shortlisted === true && byId(latestAfter.data, 'grant_pt_02').is_shortlisted === true,
+  toLatest.data,
+);
+const badGrant = await api('POST', `/api/processing/shortlist/grant_nope?session_id=${sessionId}`, { token: tokenA });
+const badSession = await api('POST', '/api/processing/shortlist/grant_pt_01?session_id=match_nope', { token: tokenA });
+const badFlag = await api('POST', `/api/processing/shortlist/grant_pt_01?session_id=${sessionId}&shortlist=maybe`, { token: tokenA });
+const noResults = await api('POST', '/api/processing/shortlist/grant_pt_01', { token: tokenC });
+check(
+  'shortlist errors: unknown grant 404, unknown session 404, bad flag 422, no results yet 404',
+  badGrant.status === 404 && badGrant.data.detail === 'Grant not found in these match results' &&
+    badSession.status === 404 && badSession.data.detail === 'Session not found' && badFlag.status === 422 &&
+    noResults.status === 404 && noResults.data.detail === NO_MATCH_RESULTS,
+  [badGrant.data, badSession.data, badFlag.data, noResults.data],
+);
+
+// ===========================================================================
+// 10. Profile endpoints
+// ===========================================================================
+
+const tokenF = await guest();
+const userF = await userIdOf(tokenF);
+const missingFields = await api('PUT', '/api/processing/profile', { token: tokenF, json: { organization_name: 'X' } });
+check(
+  'PUT profile missing required fields -> 422 naming them',
+  missingFields.status === 422 && missingFields.data.detail === 'Profile not saved: missing required fields: organization_type, city, state.',
+  missingFields.data,
+);
+const badTypes = await api('PUT', '/api/processing/profile', {
+  token: tokenF,
+  json: { organization_name: 'X', organization_type: 'parish', city: 'Y', state: 'TX', student_count: 'lots', has_school: 'maybe', facility_needs: [{ a: 1 }], evidence: 'text' },
+});
+check(
+  'PUT profile with wrong types -> 422 listing each problem',
+  badTypes.status === 422 && /student_count must be a whole number/.test(badTypes.data.detail) && /has_school must be true or false/.test(badTypes.data.detail) &&
+    /facility_needs must be a list of text/.test(badTypes.data.detail) && /evidence must be a list of objects/.test(badTypes.data.detail),
+  badTypes.data,
+);
+check('rejected PUT saved nothing', (await api('GET', '/api/processing/profile', { token: tokenF })).status === 404);
+
+const hand = await api('PUT', '/api/processing/profile', {
+  token: tokenF,
+  json: { organization_name: 'St. Example Parish', organization_type: 'parish', city: 'Exampleville', state: 'TX', student_count: '240', has_school: 'yes', facility_needs: 'Roof replacement\nNew HVAC\n' },
+});
+check(
+  'hand-entered basics (no lists) -> 200 with every list defaulted',
+  hand.status === 200 && hand.data.user_id === userF && hand.data.organization_name === 'St. Example Parish' && hand.data.student_count === 240 &&
+    hand.data.has_school === true && JSON.stringify(hand.data.facility_needs) === JSON.stringify(['Roof replacement', 'New HVAC']) &&
+    Array.isArray(hand.data.program_needs) && hand.data.program_needs.length === 0 && Array.isArray(hand.data.evidence) &&
+    hand.data.is_501c3 === true && typeof hand.data.last_updated === 'string',
+  hand.data,
+);
+check('GET /api/processing/profile shows the hand-entered profile', (await profileOf(tokenF)).organization_name === 'St. Example Parish');
+
+await api('PUT', '/api/processing/profile', {
+  token: tokenF,
+  json: {
+    organization_name: 'St. Example Parish', organization_type: 'parish', city: 'Exampleville', state: 'TX',
+    evidence: [{ id: 'ev_manual', type: 'note', summary: 'Roof leaks', source_ref: 'Pastor', linked_programs: [] }],
+    voice_profile: { style_guidelines: 'Warm and plain' },
+    sources: ['Website scan: https://example.org'],
+  },
+});
+const basicsOnly = await api('PUT', '/api/processing/profile', { token: tokenF, json: { organization_name: 'St. Example Parish', organization_type: 'both', city: 'Newtown', state: 'TX' } });
+check(
+  'PUT with only the basics keeps evidence, voice profile, and sources saved earlier',
+  basicsOnly.status === 200 && basicsOnly.data.city === 'Newtown' && basicsOnly.data.organization_type === 'both' && basicsOnly.data.evidence.length === 1 &&
+    basicsOnly.data.voice_profile?.style_guidelines === 'Warm and plain' && basicsOnly.data.sources[0] === 'Website scan: https://example.org' &&
+    basicsOnly.data.facility_needs.length === 2,
+  basicsOnly.data,
+);
+
+const edit1 = await api('PUT', '/api/profile', { token: tokenF, json: { organization_name: 'St. Example Parish', organization_type: 'both', city: 'Newtown', state: 'TX', sources: [] } });
+const edit2 = await api('PUT', '/api/profile', { token: tokenF, json: { organization_name: 'St. Example Parish', organization_type: 'both', city: 'Newtown', state: 'TX' } });
+check(
+  'PUT /api/profile keeps AI sources when none are sent and notes "User edit" once',
+  edit1.status === 200 && edit2.status === 200 &&
+    JSON.stringify(edit2.data.sources) === JSON.stringify(['Website scan: https://example.org', 'User edit']),
+  edit2.data.sources,
+);
+const editBad = await api('PUT', '/api/profile', { token: tokenF, json: { city: 'Nowhere' } });
+check('PUT /api/profile validates like the processing PUT', editBad.status === 422 && /missing required fields/.test(editBad.data.detail), editBad.data);
+
+const reset = await api('POST', '/api/profile/reset', { token: tokenF });
+const afterReset = await api('GET', '/api/processing/profile', { token: tokenF });
+check(
+  'POST /api/profile/reset -> {"message": "Profile reset"} and an empty saved profile',
+  reset.status === 200 && reset.data.message === 'Profile reset' && afterReset.status === 200 && afterReset.data.organization_name === '' &&
+    afterReset.data.evidence.length === 0 && afterReset.data.voice_profile === null && afterReset.data.sources.length === 0,
+  [reset.data, afterReset.data],
+);
+const deleted = await api('DELETE', '/api/profile', { token: tokenF });
+const afterDelete = await api('GET', '/api/processing/profile', { token: tokenF });
+const templateAfter = await api('GET', '/api/profile', { token: tokenF });
+check(
+  'DELETE /api/profile -> {"message": "Profile deleted"}; processing GET 404, /api/profile template',
+  deleted.status === 200 && deleted.data.message === 'Profile deleted' && afterDelete.status === 404 && templateAfter.data.organization_name === '',
+  [deleted.data, afterDelete.status],
+);
+const firstEdit = await api('PUT', '/api/profile', { token: tokenF, json: { organization_name: 'Fresh', organization_type: 'parish', city: 'A', state: 'TX' } });
+check('PUT /api/profile on a new profile adds no "User edit" source (as in the Python)', firstEdit.status === 200 && firstEdit.data.sources.length === 0, firstEdit.data.sources);
+const deletedAgain = await api('DELETE', '/api/profile', { token: tokenF });
+check('DELETE twice is fine', deletedAgain.status === 200);
+
+// ===========================================================================
+// 11. Nothing secret leaks into the debug report
+// ===========================================================================
+
+const report = await api('GET', '/api/debug/report', { token: tokenA });
+check(
+  'debug report lists processing jobs and never contains the saved API key',
+  report.status === 200 && report.text.includes('processing.match_grants') && !report.text.includes('sk-ant-test-key'),
+  report.text.slice(0, 200),
+);
+
+site.close();
+mock.stop();
+finish();

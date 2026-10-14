@@ -5,9 +5,9 @@ import { useRouter } from 'next/navigation';
 import {
   Search, Upload, Globe, FileText, MessageSquare, Play,
   CheckCircle, AlertCircle, Loader2, ChevronRight, Settings,
-  LogOut, Database, BarChart3, Download
+  LogOut, Database, BarChart3, Download, Bug, PenLine,
 } from 'lucide-react';
-import api from '@/lib/api';
+import api, { onJobProgress } from '@/lib/api';
 import { useStore } from '@/lib/store';
 
 type SetupStep = 'api-key' | 'grants' | 'website' | 'questionnaire' | 'documents' | 'processing' | 'results';
@@ -17,6 +17,21 @@ interface ProcessingLog {
   status: 'info' | 'success' | 'warning' | 'error';
   message: string;
 }
+
+interface OrgBasics {
+  organization_name: string;
+  organization_type: string;
+  city: string;
+  state: string;
+  diocese: string;
+  student_count: string;
+}
+
+/** Netlify accepts uploads up to about 4 MB; checking here gives a clear message instantly. */
+const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
+
+const errorDetail = (error: any, fallback: string): string =>
+  error?.response?.data?.detail || error?.message || fallback;
 
 export default function Dashboard() {
   const router = useRouter();
@@ -38,7 +53,19 @@ export default function Dashboard() {
   const [documents, setDocuments] = useState<File[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingLogs, setProcessingLogs] = useState<ProcessingLog[]>([]);
+  // Long steps run as background jobs; show which one and its latest status line.
+  const [busy, setBusy] = useState<string | null>(null);
+  const [jobProgress, setJobProgress] = useState<string | null>(null);
+  const [stepError, setStepError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [applications, setApplications] = useState<any[]>([]);
+  const [profileExists, setProfileExists] = useState(false);
+  const [showBasics, setShowBasics] = useState(false);
+  const [basics, setBasics] = useState<OrgBasics>({
+    organization_name: '', organization_type: 'both', city: '', state: '', diocese: '', student_count: '',
+  });
   const terminalRef = useRef<HTMLDivElement>(null);
+  const resumedFor = useRef<string | null>(null);
 
   // Every engine call needs a session, so visitors without one go to sign-in
   useEffect(() => {
@@ -57,6 +84,47 @@ export default function Dashboard() {
     }
   }, [user, setUser, router]);
 
+  // Live status lines from background jobs ("Scoring grants 11-15 of 40")
+  useEffect(() => onJobProgress((info) => setJobProgress(info.progress)), []);
+
+  // Pick up where the user left off: saved key, grants, profile, results, applications.
+  useEffect(() => {
+    if (!user || resumedFor.current === user.id) return;
+    resumedFor.current = user.id;
+    (async () => {
+      const [stats, profile, apps, latest] = await Promise.all([
+        api.getGrantStats().catch(() => null),
+        api.getProfile().catch(() => null),
+        api.listApplications().catch(() => []),
+        api.getLatestMatchResults().catch(() => null),
+      ]);
+      if (stats?.total_grants) {
+        setDiscoveredTotal(stats.total_grants);
+        setGrantStats(stats);
+      }
+      if (profile) {
+        setProfileExists(true);
+        setBasics({
+          organization_name: profile.organization_name || '',
+          organization_type: profile.organization_type || 'both',
+          city: profile.city || '',
+          state: profile.state || '',
+          diocese: profile.diocese || '',
+          student_count: profile.student_count ? String(profile.student_count) : '',
+        });
+        if (profile.website_url) setChurchUrl(profile.website_url);
+        if (profile.school_website_url) setSchoolUrl(profile.school_website_url);
+        if (profile.free_form_notes) setFreeFormText(profile.free_form_notes);
+      }
+      setApplications(Array.isArray(apps) ? apps : []);
+      if (latest && !matchResults) setMatchResults(latest);
+      if (user.claude_api_key_set) {
+        setApiKeySet(true);
+        setCurrentStep((step) => (step === 'api-key' ? (stats?.total_grants ? 'website' : 'grants') : step));
+      }
+    })();
+  }, [user, matchResults, setMatchResults]);
+
   // Auto-scroll terminal
   useEffect(() => {
     if (terminalRef.current) {
@@ -69,24 +137,65 @@ export default function Dashboard() {
     setProcessingLogs(prev => [...prev, { timestamp, status, message }]);
   };
 
-  const handleApiKeySubmit = async () => {
-    if (!apiKey.startsWith('sk-ant-')) {
-      alert('Invalid API key format. Claude API keys start with "sk-ant-"');
-      return;
-    }
+  /** Run one user action with a busy label; failures show inline instead of alert boxes. */
+  const runBusy = async (label: string, fn: () => Promise<void>) => {
+    setBusy(label);
+    setJobProgress(null);
+    setStepError(null);
     try {
-      await api.setApiKey(apiKey);
-      setApiKeySet(true);
-      setCurrentStep('grants');
+      await fn();
     } catch (error: any) {
-      console.error('Failed to set API key:', error);
-      alert(error?.response?.data?.detail || 'Could not save the API key — is the backend reachable? (Check that you are signed in.)');
+      console.error(`[GrantFinder] ${label} failed:`, error);
+      setStepError(errorDetail(error, `${label} failed. Use "Copy debug report" and paste it into Claude Code.`));
+    } finally {
+      setBusy(null);
+      setJobProgress(null);
     }
   };
+
+  const goTo = (step: SetupStep) => {
+    setStepError(null);
+    setCurrentStep(step);
+  };
+
+  const copyDebugReport = async () => {
+    setNotice(null);
+    try {
+      const report = await api.getDebugReport();
+      try {
+        await navigator.clipboard.writeText(report);
+        setNotice('Debug report copied. Paste it into Claude Code.');
+      } catch {
+        // Clipboard blocked: download it instead.
+        const url = URL.createObjectURL(new Blob([report], { type: 'text/markdown' }));
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'grantfinder-debug-report.md';
+        a.click();
+        URL.revokeObjectURL(url);
+        setNotice('Debug report downloaded (grantfinder-debug-report.md). Paste it into Claude Code.');
+      }
+    } catch (error: any) {
+      setNotice(`Could not get the debug report: ${errorDetail(error, 'unknown error')}`);
+    }
+  };
+
+  const handleApiKeySubmit = () =>
+    runBusy('Saving your API key', async () => {
+      if (!apiKey.trim().startsWith('sk-ant-')) {
+        throw new Error('Invalid API key format. Claude API keys start with "sk-ant-"');
+      }
+      const result = await api.setApiKey(apiKey.trim());
+      setApiKeySet(true);
+      setApiKey('');
+      if (result?.warning) setNotice(result.warning);
+      goTo(discoveredTotal > 0 ? 'website' : 'grants');
+    });
 
   const runDiscovery = async (source: 'seed' | 'grants_gov' | 'web_discovery') => {
     setDiscoveryBusy(source);
     setDiscoveryStatus(null);
+    setJobProgress(null);
     try {
       let result;
       if (source === 'seed') {
@@ -102,83 +211,122 @@ export default function Dashboard() {
       setDiscoveredTotal(result.total_grants);
     } catch (error: any) {
       console.error(`Discovery (${source}) failed:`, error);
-      const detail = error?.response?.data?.detail || 'request failed — is the backend running?';
-      setDiscoveryStatus(`Discovery failed: ${detail}`);
+      setDiscoveryStatus(`Discovery failed: ${errorDetail(error, 'request failed')}`);
     } finally {
       setDiscoveryBusy(null);
+      setJobProgress(null);
     }
   };
 
-  const handleGrantUpload = async () => {
-    // A user-uploaded Excel is now optional: discovery can fill the database.
-    if (!grantFile) {
-      if (discoveredTotal > 0) {
-        setGrantStats({ total_grants: discoveredTotal });
-        setCurrentStep('website');
+  const handleGrantUpload = () =>
+    runBusy('Uploading your grant database', async () => {
+      // A user-uploaded Excel is optional: discovery can fill the database.
+      if (!grantFile) {
+        if (discoveredTotal > 0) {
+          setGrantStats((prev: any) => ({ ...(prev || {}), total_grants: discoveredTotal }));
+          goTo('website');
+        }
+        return;
       }
-      return;
-    }
-    try {
+      if (grantFile.size > MAX_UPLOAD_BYTES) {
+        throw new Error(`${grantFile.name} is larger than 4 MB. Remove extra sheets or images and try again.`);
+      }
       const result = await api.uploadGrantDatabase(grantFile);
       setGrantStats(result);
-      setCurrentStep('website');
-    } catch (error: any) {
-      console.error('Failed to upload grants:', error);
-      alert(error?.response?.data?.detail || 'Grant database upload failed — check the file format and that the backend is running.');
-    }
+      setDiscoveredTotal(result.total_grants);
+      goTo('website');
+    });
+
+  const loadQuestionnaire = async () => {
+    const q = await api.generateQuestionnaire();
+    setQuestionnaire(q);
+    goTo('questionnaire');
   };
 
-  const handleWebsiteScan = async () => {
-    if (!churchUrl && !schoolUrl) {
-      alert('Please enter at least one website URL');
-      return;
-    }
-    try {
-      await api.scanWebsite(churchUrl, schoolUrl);
+  const handleWebsiteScan = () =>
+    runBusy('Scanning your website', async () => {
+      if (!churchUrl && !schoolUrl) {
+        throw new Error('Please enter at least one website URL');
+      }
+      try {
+        await api.scanWebsite(churchUrl, schoolUrl);
+      } catch (error: any) {
+        setShowBasics(true);
+        throw new Error(
+          `${errorDetail(error, 'Website scan failed.')} You can enter your organization's basics below instead, or skip this step.`,
+        );
+      }
       setWebsiteScanned(true);
-      // Generate questionnaire
-      const q = await api.generateQuestionnaire();
-      setQuestionnaire(q);
-      setCurrentStep('questionnaire');
-    } catch (error: any) {
-      console.error('Website scan failed:', error);
-      alert(error?.response?.data?.detail || 'Website scan or questionnaire generation failed — check the URL and your API key.');
-    }
-  };
+      setProfileExists(true);
+      setBusy('Writing your questions');
+      await loadQuestionnaire();
+    });
 
-  const handleQuestionnaireSubmit = async () => {
-    const answerArray = Object.entries(answers).map(([id, answer]) => ({
-      question_id: parseInt(id),
-      answer,
-    }));
-    try {
+  const skipWebsiteScan = () => runBusy('Writing your questions', loadQuestionnaire);
+
+  const saveBasics = () =>
+    runBusy('Saving your organization basics', async () => {
+      if (!basics.organization_name.trim() || !basics.state.trim()) {
+        throw new Error('Please enter at least the organization name and state.');
+      }
+      const existing = await api.getProfile();
+      const base = existing || { user_id: user?.id, organization_type: 'parish', city: '', state: '', sources: [] };
+      const sources: string[] = Array.isArray(base.sources) ? base.sources : [];
+      const studentCount = parseInt(basics.student_count, 10);
+      await api.updateProfile({
+        ...base,
+        organization_name: basics.organization_name.trim(),
+        organization_type: basics.organization_type,
+        city: basics.city.trim(),
+        state: basics.state.trim(),
+        diocese: basics.diocese.trim() || null,
+        student_count: Number.isFinite(studentCount) ? studentCount : base.student_count ?? null,
+        has_school: basics.organization_type !== 'parish' ? true : Boolean(base.has_school),
+        website_url: churchUrl || base.website_url || null,
+        school_website_url: schoolUrl || base.school_website_url || null,
+        sources: sources.includes('Entered by hand') ? sources : [...sources, 'Entered by hand'],
+      });
+      setProfileExists(true);
+      setShowBasics(false);
+      setBusy('Writing your questions');
+      await loadQuestionnaire();
+    });
+
+  const handleQuestionnaireSubmit = () =>
+    runBusy('Saving your answers', async () => {
+      const answerArray = Object.entries(answers).map(([id, answer]) => ({
+        question_id: parseInt(id),
+        answer,
+      }));
       await api.submitQuestionnaire(answerArray, freeFormText);
-      setCurrentStep('documents');
-    } catch (error: any) {
-      console.error('Questionnaire submission failed:', error);
-      alert(error?.response?.data?.detail || 'Could not save your answers — they matter for matching, so please retry.');
-    }
-  };
+      setProfileExists(true);
+      goTo('documents');
+    });
 
-  const handleWriteApplication = async (grantId: string) => {
-    try {
+  const handleWriteApplication = (grantId: string) =>
+    runBusy('Opening the application writer', async () => {
       const app = await api.createApplication(grantId);
       router.push(`/writer?id=${app.id}`);
-    } catch (error: any) {
-      console.error('Failed to create application:', error);
-      alert(error?.response?.data?.detail || 'Could not start the application — is the backend running?');
-    }
-  };
+    });
 
   const handleDocumentUpload = (files: FileList | null) => {
     if (!files) return;
-    setDocuments(prev => [...prev, ...Array.from(files)]);
+    const accepted: File[] = [];
+    const rejected: string[] = [];
+    Array.from(files).forEach((file) => {
+      if (file.size > MAX_UPLOAD_BYTES) rejected.push(`${file.name} is larger than 4 MB`);
+      else if (!/\.(pdf|docx|txt)$/i.test(file.name)) rejected.push(`${file.name} is not a PDF, DOCX, or TXT file`);
+      else accepted.push(file);
+    });
+    setStepError(rejected.length ? `Skipped: ${rejected.join('; ')}. Split or shorten large files and add them again.` : null);
+    setDocuments(prev => [...prev, ...accepted]);
   };
 
   const runMatching = async () => {
     setCurrentStep('processing');
     setIsProcessing(true);
     setProcessingLogs([]);
+    setStepError(null);
 
     try {
       // 1. Upload and extract every document for real - this is where the AI
@@ -198,13 +346,15 @@ export default function Dashboard() {
               .slice(0, 4)
               .forEach((item: string) => addLog('info', `  → ${item}`));
           } catch (docError: any) {
-            addLog('warning', `${doc.name}: extraction failed (${docError?.response?.data?.detail || 'error'}) — continuing`);
+            addLog('warning', `${doc.name}: extraction failed (${errorDetail(docError, 'error')}) — continuing`);
           }
         }
+        setDocuments([]);
+        setProfileExists(true);
       }
 
       // 2. Real matching run
-      addLog('info', `Scoring ${grantStats?.total_grants || 'all'} grants against your profile...`);
+      addLog('info', `Scoring ${grantStats?.total_grants || discoveredTotal || 'all'} grants against your profile...`);
       addLog('info', 'Applying geographic and deadline hard filters, then AI scoring...');
       const results = await api.matchGrants();
       setMatchResults(results);
@@ -216,8 +366,7 @@ export default function Dashboard() {
       await new Promise(r => setTimeout(r, 800));
       setCurrentStep('results');
     } catch (error: any) {
-      const detail = error?.response?.data?.detail || 'Matching failed — is the backend reachable and your API key set?';
-      addLog('error', detail);
+      addLog('error', errorDetail(error, 'Matching failed. Check that your API key is saved, then retry.'));
       setIsProcessing(false);
     }
   };
@@ -233,9 +382,14 @@ export default function Dashboard() {
       a.click();
       URL.revokeObjectURL(url);
     } catch (error: any) {
-      alert(error?.response?.data?.detail || 'Export failed');
+      let detail = 'Export failed';
+      try {
+        detail = JSON.parse(await error.response.data.text()).detail || detail;
+      } catch { /* keep default */ }
+      setStepError(detail);
     }
   };
+
   const steps = [
     { id: 'api-key', label: 'API Key', icon: Settings },
     { id: 'grants', label: 'Grant Database', icon: Database },
@@ -247,6 +401,23 @@ export default function Dashboard() {
   ];
 
   const currentStepIndex = steps.findIndex(s => s.id === currentStep);
+
+  /** Steps the user may jump to: everything after the key is saved, results once they exist. */
+  const canVisit = (id: string) => {
+    if (busy || isProcessing) return false;
+    if (id === 'api-key') return true;
+    if (!apiKeySet) return false;
+    if (id === 'processing') return false;
+    if (id === 'results') return Boolean(matchResults);
+    return true;
+  };
+
+  const busyBanner = busy && (
+    <div className="mt-4 p-3 rounded bg-[var(--terminal-bg)] text-sm flex items-center gap-2" role="status">
+      <Loader2 className="w-4 h-4 animate-spin text-[var(--primary)]" />
+      <span>{busy}...{jobProgress ? ` ${jobProgress}` : ''}</span>
+    </div>
+  );
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -260,14 +431,24 @@ export default function Dashboard() {
             <span className="text-xl font-bold">GrantFinder AI</span>
           </div>
           <div className="flex items-center gap-4">
+            <button
+              onClick={copyDebugReport}
+              className="text-sm text-gray-500 hover:text-white flex items-center gap-1"
+              title="Copy a report of recent steps and errors to paste into Claude Code"
+            >
+              <Bug className="w-4 h-4" />
+              <span className="hidden md:inline">Copy debug report</span>
+            </button>
             <span className="text-sm text-gray-500">{user?.name || user?.email || ''}</span>
             <button
               onClick={() => {
                 api.clearToken();
                 setUser(null);
+                setMatchResults(null);
                 router.push('/');
               }}
               className="text-gray-500 hover:text-white"
+              aria-label="Sign out"
             >
               <LogOut className="w-5 h-5" />
             </button>
@@ -275,7 +456,7 @@ export default function Dashboard() {
         </div>
       </header>
 
-      {/* Progress Steps */}
+      {/* Progress Steps (click any available step to jump there) */}
       <div className="border-b border-[var(--card-border)] py-4">
         <div className="max-w-4xl mx-auto px-4">
           <div className="flex items-center justify-between">
@@ -283,20 +464,27 @@ export default function Dashboard() {
               const Icon = step.icon;
               const isActive = step.id === currentStep;
               const isComplete = index < currentStepIndex;
+              const visitable = canVisit(step.id) && !isActive;
               return (
                 <div key={step.id} className="flex items-center">
-                  <div className={`
-                    flex items-center gap-2 px-3 py-2 rounded-lg
-                    ${isActive ? 'bg-[var(--primary)] text-white' : ''}
-                    ${isComplete ? 'text-[var(--accent)]' : 'text-gray-500'}
-                  `}>
+                  <button
+                    type="button"
+                    disabled={!visitable}
+                    onClick={() => goTo(step.id as SetupStep)}
+                    className={`
+                      flex items-center gap-2 px-3 py-2 rounded-lg
+                      ${isActive ? 'bg-[var(--primary)] text-white' : ''}
+                      ${isComplete ? 'text-[var(--accent)]' : 'text-gray-500'}
+                      ${visitable ? 'hover:bg-gray-800 cursor-pointer' : 'cursor-default'}
+                    `}
+                  >
                     {isComplete ? (
                       <CheckCircle className="w-5 h-5" />
                     ) : (
                       <Icon className="w-5 h-5" />
                     )}
                     <span className="text-sm font-medium hidden md:inline">{step.label}</span>
-                  </div>
+                  </button>
                   {index < steps.length - 1 && (
                     <ChevronRight className="w-4 h-4 text-gray-600 mx-2" />
                   )}
@@ -310,6 +498,43 @@ export default function Dashboard() {
       {/* Main Content */}
       <main className="flex-1 py-8">
         <div className="max-w-3xl mx-auto px-4">
+          {notice && (
+            <div className="mb-4 p-3 rounded bg-green-900/30 text-green-300 text-sm flex justify-between gap-4">
+              <span>{notice}</span>
+              <button onClick={() => setNotice(null)} className="text-green-200" aria-label="Dismiss">×</button>
+            </div>
+          )}
+
+          {stepError && currentStep !== 'processing' && (
+            <div className="mb-4 p-3 rounded bg-red-900/30 text-red-300 text-sm flex items-start gap-2" role="alert">
+              <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+              <span>{stepError}</span>
+            </div>
+          )}
+
+          {/* Saved applications: the fastest way back into the writer */}
+          {applications.length > 0 && currentStep !== 'processing' && (
+            <div className="card mb-6">
+              <h2 className="text-lg font-bold mb-3 flex items-center gap-2">
+                <PenLine className="w-5 h-5" /> Your applications
+              </h2>
+              <div className="space-y-2">
+                {applications.map((app: any) => (
+                  <div key={app.id} className="flex items-center justify-between gap-4 text-sm">
+                    <div>
+                      <span className="font-medium">{app.grant_name}</span>
+                      <span className="text-gray-500"> · {app.funder} · {app.status}</span>
+                      {app.urgent && <span className="text-red-400"> · deadline soon</span>}
+                    </div>
+                    <button onClick={() => router.push(`/writer?id=${app.id}`)} className="btn btn-secondary text-sm">
+                      Open →
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Step 1: API Key */}
           {currentStep === 'api-key' && (
             <div className="card">
@@ -318,6 +543,11 @@ export default function Dashboard() {
                 GrantFinder uses Claude AI to analyze your documents and match grants.
                 Your API key is encrypted and never shared.
               </p>
+              {apiKeySet && (
+                <p className="text-sm text-[var(--accent)] mb-4">
+                  ✓ A key is already saved. Enter a new one only to replace it.
+                </p>
+              )}
               <input
                 type="password"
                 value={apiKey}
@@ -327,15 +557,20 @@ export default function Dashboard() {
               />
               <button
                 onClick={handleApiKeySubmit}
-                disabled={!apiKey}
+                disabled={!apiKey || Boolean(busy)}
                 className="btn btn-primary w-full"
               >
-                Continue
+                {busy ? 'Checking key...' : 'Continue'}
                 <ChevronRight className="w-5 h-5" />
               </button>
+              {apiKeySet && (
+                <button onClick={() => goTo(discoveredTotal > 0 ? 'website' : 'grants')} className="btn btn-secondary w-full mt-3">
+                  Keep my saved key
+                </button>
+              )}
               <p className="text-sm text-gray-500 mt-4 text-center">
                 Get your API key at{' '}
-                <a href="https://console.anthropic.com/" className="text-[var(--primary)]" target="_blank">
+                <a href="https://console.anthropic.com/" className="text-[var(--primary)]" target="_blank" rel="noopener noreferrer">
                   console.anthropic.com
                 </a>
               </p>
@@ -393,6 +628,16 @@ export default function Dashboard() {
                 </button>
               </div>
 
+              {discoveryBusy && (
+                <div className="mb-6 p-3 rounded bg-[var(--terminal-bg)] text-sm flex items-center gap-2" role="status">
+                  <Loader2 className="w-4 h-4 animate-spin text-[var(--primary)]" />
+                  <span>
+                    {discoveryBusy === 'web_discovery' ? 'Claude is searching the web (this can take a few minutes)' : 'Working'}
+                    ...{jobProgress ? ` ${jobProgress}` : ''}
+                  </span>
+                </div>
+              )}
+
               {discoveryStatus && (
                 <div className={`mb-6 p-3 rounded text-sm ${discoveryStatus.startsWith('Discovery failed') ? 'bg-red-900/30 text-red-300' : 'bg-green-900/30 text-green-300'}`}>
                   {discoveryStatus}
@@ -435,16 +680,17 @@ export default function Dashboard() {
               </div>
               <button
                 onClick={handleGrantUpload}
-                disabled={!grantFile && discoveredTotal === 0}
+                disabled={(!grantFile && discoveredTotal === 0) || Boolean(busy) || discoveryBusy !== null}
                 className="btn btn-primary w-full mt-6"
               >
                 {grantFile ? 'Upload and Continue' : `Continue with ${discoveredTotal} Discovered Grants`}
                 <ChevronRight className="w-5 h-5" />
               </button>
+              {busyBanner}
             </div>
           )}
 
-          {/* Step 3: Website URLs */}
+          {/* Step 3: Website URLs (or the basics by hand) */}
           {currentStep === 'website' && (
             <div className="card">
               <h2 className="text-2xl font-bold mb-4">Enter Website URLs</h2>
@@ -452,10 +698,10 @@ export default function Dashboard() {
                 AI will scan your website(s) to understand your organization.
               </p>
 
-              {grantStats && (
+              {(grantStats?.total_grants || discoveredTotal) > 0 && (
                 <div className="bg-[var(--terminal-bg)] p-4 rounded-lg mb-6">
                   <p className="text-sm text-[var(--terminal-green)]">
-                    ✓ Loaded {grantStats.total_grants} grants across 5 categories
+                    ✓ {grantStats?.total_grants || discoveredTotal} grants in your database
                   </p>
                 </div>
               )}
@@ -467,7 +713,7 @@ export default function Dashboard() {
                     type="url"
                     value={churchUrl}
                     onChange={(e) => setChurchUrl(e.target.value)}
-                    placeholder="https://sttheresa.org"
+                    placeholder="https://yourparish.org"
                     className="input"
                   />
                 </div>
@@ -477,23 +723,103 @@ export default function Dashboard() {
                     type="url"
                     value={schoolUrl}
                     onChange={(e) => setSchoolUrl(e.target.value)}
-                    placeholder="https://sttheresaschool.org"
+                    placeholder="https://yourschool.org"
                     className="input"
                   />
                 </div>
               </div>
               <button
                 onClick={handleWebsiteScan}
-                disabled={!churchUrl && !schoolUrl}
+                disabled={(!churchUrl && !schoolUrl) || Boolean(busy)}
                 className="btn btn-primary w-full mt-6"
               >
                 Scan Website
                 <ChevronRight className="w-5 h-5" />
               </button>
+              {websiteScanned && !busy && (
+                <p className="text-sm text-[var(--accent)] mt-3">✓ Website scanned and added to your profile.</p>
+              )}
+
+              <div className="mt-6 pt-6 border-t border-[var(--card-border)]">
+                <p className="text-sm text-gray-400 mb-3">
+                  Some parish sites block automated reading. You can type the basics instead, or skip
+                  straight to the questions{profileExists ? ' (your saved profile is kept)' : ''}.
+                </p>
+                <div className="flex gap-3">
+                  <button onClick={() => setShowBasics((v) => !v)} disabled={Boolean(busy)} className="btn btn-secondary flex-1">
+                    {showBasics ? 'Hide the basics form' : 'Enter the basics by hand'}
+                  </button>
+                  <button onClick={skipWebsiteScan} disabled={Boolean(busy)} className="btn btn-secondary flex-1">
+                    Skip to questions
+                  </button>
+                </div>
+                {showBasics && (
+                  <div className="mt-4 grid gap-3 md:grid-cols-2">
+                    <div className="md:col-span-2">
+                      <label className="block text-sm font-medium mb-1">Organization name *</label>
+                      <input className="input" value={basics.organization_name}
+                        onChange={(e) => setBasics({ ...basics, organization_name: e.target.value })}
+                        placeholder="[Parish Name] Catholic Church and School" />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Type</label>
+                      <select className="input" value={basics.organization_type}
+                        onChange={(e) => setBasics({ ...basics, organization_type: e.target.value })}>
+                        <option value="both">Parish and school</option>
+                        <option value="school">School</option>
+                        <option value="parish">Parish</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Diocese</label>
+                      <input className="input" value={basics.diocese}
+                        onChange={(e) => setBasics({ ...basics, diocese: e.target.value })} />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium mb-1">City</label>
+                      <input className="input" value={basics.city}
+                        onChange={(e) => setBasics({ ...basics, city: e.target.value })} />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium mb-1">State *</label>
+                      <input className="input" value={basics.state} placeholder="TX"
+                        onChange={(e) => setBasics({ ...basics, state: e.target.value })} />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Number of students</label>
+                      <input className="input" inputMode="numeric" value={basics.student_count}
+                        onChange={(e) => setBasics({ ...basics, student_count: e.target.value })} />
+                    </div>
+                    <div className="md:col-span-2">
+                      <button onClick={saveBasics} disabled={Boolean(busy)} className="btn btn-primary w-full">
+                        Save basics and continue
+                        <ChevronRight className="w-5 h-5" />
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+              {busyBanner}
             </div>
           )}
 
           {/* Step 4: Questionnaire */}
+          {currentStep === 'questionnaire' && !questionnaire && (
+            <div className="card">
+              <h2 className="text-2xl font-bold mb-4">Answer a Few Questions</h2>
+              <p className="text-gray-400 mb-6">
+                Claude writes up to 20 questions based on the grants in your database.
+              </p>
+              <button onClick={skipWebsiteScan} disabled={Boolean(busy)} className="btn btn-primary w-full">
+                Write my questions
+                <ChevronRight className="w-5 h-5" />
+              </button>
+              <button onClick={() => goTo('documents')} disabled={Boolean(busy)} className="btn btn-secondary w-full mt-3">
+                Skip to documents
+              </button>
+              {busyBanner}
+            </div>
+          )}
           {currentStep === 'questionnaire' && questionnaire && (
             <div className="card">
               <h2 className="text-2xl font-bold mb-4">Answer a Few Questions</h2>
@@ -523,7 +849,7 @@ export default function Dashboard() {
                         </button>
                       </div>
                     )}
-                    {q.question_type === 'text' && (
+                    {(q.question_type === 'text' || !['boolean', 'select', 'multiselect'].includes(q.question_type)) && (
                       <input
                         type="text"
                         value={answers[q.id] || ''}
@@ -543,6 +869,27 @@ export default function Dashboard() {
                         ))}
                       </select>
                     )}
+                    {q.question_type === 'multiselect' && (
+                      <div className="flex flex-wrap gap-3">
+                        {(q.options || []).map((opt: string) => {
+                          const selected: string[] = Array.isArray(answers[q.id]) ? answers[q.id] : [];
+                          const checked = selected.includes(opt);
+                          return (
+                            <label key={opt} className="flex items-center gap-2 text-sm">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => setAnswers(prev => ({
+                                  ...prev,
+                                  [q.id]: checked ? selected.filter((o) => o !== opt) : [...selected, opt],
+                                }))}
+                              />
+                              {opt}
+                            </label>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 ))}
                 <div>
@@ -559,11 +906,13 @@ export default function Dashboard() {
               </div>
               <button
                 onClick={handleQuestionnaireSubmit}
+                disabled={Boolean(busy)}
                 className="btn btn-primary w-full mt-6"
               >
                 Continue
                 <ChevronRight className="w-5 h-5" />
               </button>
+              {busyBanner}
             </div>
           )}
 
@@ -572,7 +921,8 @@ export default function Dashboard() {
             <div className="card">
               <h2 className="text-2xl font-bold mb-4">Upload Documents (Optional)</h2>
               <p className="text-gray-400 mb-6">
-                Upload bulletins, meeting minutes, or other documents for deeper analysis.
+                Upload bulletins, meeting minutes, prior grant reports, or other documents for deeper
+                analysis. What Claude finds is added to your profile, and the application writer can cite it.
               </p>
               <div
                 className="dropzone"
@@ -583,7 +933,7 @@ export default function Dashboard() {
                 }}
               >
                 <FileText className="w-12 h-12 text-gray-500 mx-auto mb-4" />
-                <p className="mb-2">Drag and drop PDF, DOCX, or TXT files</p>
+                <p className="mb-2">Drag and drop PDF, DOCX, or TXT files (up to 4 MB each)</p>
                 <input
                   type="file"
                   accept=".pdf,.docx,.txt"
@@ -608,6 +958,7 @@ export default function Dashboard() {
               )}
               <button
                 onClick={runMatching}
+                disabled={Boolean(busy)}
                 className="btn btn-primary w-full mt-6"
               >
                 {documents.length > 0 ? 'Process Documents & Find Matches' : 'Skip & Find Matches'}
@@ -643,12 +994,13 @@ export default function Dashboard() {
                   {isProcessing && (
                     <div className="terminal-line">
                       <Loader2 className="w-4 h-4 animate-spin text-[var(--primary)]" />
+                      {jobProgress && <span className="text-gray-400">{jobProgress}</span>}
                     </div>
                   )}
                 </div>
               </div>
               {!isProcessing && processingLogs.some(l => l.status === 'error') && (
-                <button onClick={() => setCurrentStep('documents')} className="btn btn-secondary w-full mt-4">
+                <button onClick={() => goTo('documents')} className="btn btn-secondary w-full mt-4">
                   ← Back — fix the issue and retry
                 </button>
               )}
@@ -656,6 +1008,13 @@ export default function Dashboard() {
           )}
 
           {/* Step 7: Results */}
+          {currentStep === 'results' && !matchResults && (
+            <div className="card">
+              <h2 className="text-2xl font-bold mb-4">Match Results</h2>
+              <p className="text-gray-400 mb-4">No results yet. Run matching from the Documents step.</p>
+              <button onClick={() => goTo('documents')} className="btn btn-primary w-full">Go to Documents</button>
+            </div>
+          )}
           {currentStep === 'results' && matchResults && (
             <div className="space-y-6">
               {/* Summary */}
@@ -703,6 +1062,7 @@ export default function Dashboard() {
                     Export Report (Markdown)
                   </button>
                 </div>
+                {busyBanner}
               </div>
 
               {/* Match List */}
@@ -729,7 +1089,7 @@ export default function Dashboard() {
                     <div>
                       <span className="text-gray-500">Category:</span>
                       <span className="ml-2 font-medium capitalize">
-                        {match.category.replace('_', ' ')}
+                        {String(match.category || '').replace('_', ' ')}
                       </span>
                     </div>
                   </div>
@@ -747,6 +1107,7 @@ export default function Dashboard() {
                       <span className="text-sm text-gray-500">Contact: {match.contact}</span>
                       <button
                         onClick={() => handleWriteApplication(match.grant_id)}
+                        disabled={Boolean(busy)}
                         className="btn btn-primary text-sm"
                       >
                         Write Application →

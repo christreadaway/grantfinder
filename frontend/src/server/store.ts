@@ -56,13 +56,33 @@ export function keyPart(value: string): string {
 // Netlify Blobs
 // =============================================================================
 
+/**
+ * The fetch the Blobs client uses: it reads each response completely before
+ * handing it over. Inside Netlify's function runtime, cancelling an unread
+ * response body (which the Blobs client does on every 404, i.e. every lookup
+ * of a key that doesn't exist yet) never settles, so without this the first
+ * sign-in on a fresh site would hang until the function timed out.
+ * Next.js's patched fetch is bypassed too: storage calls must never be cached.
+ */
+const blobsFetch: typeof fetch = async (input, init) => {
+  const base = (globalThis.fetch as typeof fetch & { _nextOriginalFetch?: typeof fetch })._nextOriginalFetch ?? globalThis.fetch;
+  const response = await base(input, init);
+  const bodyless = [204, 205, 304].includes(response.status) || String(init?.method || '').toUpperCase() === 'HEAD';
+  const body = bodyless ? null : await response.arrayBuffer();
+  return new Response(body && body.byteLength ? body : null, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+};
+
 class BlobsKV implements KV {
   readonly kind = 'blobs' as const;
   private store: BlobStore;
 
   constructor() {
     try {
-      this.store = getStore({ name: 'grantfinder', consistency: 'strong' });
+      this.store = getStore({ name: 'grantfinder', consistency: 'strong', fetch: blobsFetch });
     } catch (error) {
       throw new ConfigError(
         `Netlify Blobs is not available to this function (${(error as Error).message}). ` +
@@ -79,9 +99,18 @@ class BlobsKV implements KV {
 
   async getVersioned<T>(key: string): Promise<Versioned<T>> {
     assertKey(key);
-    const result = await this.store.getWithMetadata(key, { type: 'json' });
-    if (!result) return { value: null, etag: null };
-    return { value: (result.data ?? null) as T | null, etag: result.etag ?? null };
+    const first = await this.store.getWithMetadata(key, { type: 'json' });
+    if (!first) return { value: null, etag: null };
+    if (first.etag) return { value: (first.data ?? null) as T | null, etag: first.etag };
+    // Some Blobs servers (Netlify's local sandbox) send no ETag on reads, but
+    // listings carry one. List BEFORE re-reading, so the tag is never newer
+    // than the value: if the record changes in between, the conditional
+    // write simply fails and update() retries.
+    const { blobs } = await this.store.list({ prefix: key });
+    const etag = blobs.find((blob) => blob.key === key)?.etag ?? null;
+    const second = await this.store.getWithMetadata(key, { type: 'json' });
+    if (!second) return { value: null, etag: null };
+    return { value: (second.data ?? null) as T | null, etag: second.etag ?? etag };
   }
 
   async set(key: string, value: unknown): Promise<void> {

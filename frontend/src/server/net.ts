@@ -37,48 +37,66 @@ function isBlockedAddress(address: string): boolean {
   return true;
 }
 
-/** http(s) to a public host only. DNS failure counts as unsafe. */
-export async function isSafeUrl(url: string): Promise<boolean> {
+export type UrlProblem = 'unparseable' | 'scheme' | 'localhost' | 'private_ip' | 'dns_failed';
+
+/**
+ * Is this an http(s) address of a public website? Returns the reason when
+ * not, so callers can tell a typo ("no such website") from a blocked address.
+ */
+export async function checkUrl(url: string): Promise<{ ok: true } | { ok: false; reason: UrlProblem }> {
+  const blocked = (reason: UrlProblem, extra: Record<string, unknown> = {}) => {
+    logger.warn('url_blocked', { url, reason, ...extra });
+    return { ok: false as const, reason };
+  };
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
-    logger.warn('url_blocked', { url, reason: 'unparseable' });
-    return false;
+    return blocked('unparseable');
   }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    logger.warn('url_blocked', { url, reason: 'scheme' });
-    return false;
-  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return blocked('scheme');
   // Tests serve a fake parish website on localhost. Needs BOTH switches, so a
   // production deploy can never turn SSRF protection off by accident.
   if (process.env.GRANTFINDER_TEST_MODE === '1' && process.env.GRANTFINDER_ALLOW_LOCAL_FETCH === '1') {
-    return true;
+    return { ok: true };
   }
   const host = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
-  if (!host || host === 'localhost' || host.endsWith('.localhost') || host === '0.0.0.0') {
-    logger.warn('url_blocked', { url, reason: 'localhost' });
-    return false;
-  }
+  if (!host || host === 'localhost' || host.endsWith('.localhost') || host === '0.0.0.0') return blocked('localhost');
   if (net.isIP(host)) {
-    if (isBlockedAddress(host)) {
-      logger.warn('url_blocked', { url, reason: 'private_ip' });
-      return false;
-    }
-    return true;
+    return isBlockedAddress(host) ? blocked('private_ip') : { ok: true };
   }
   try {
     const addresses = await dns.lookup(host, { all: true });
     for (const { address } of addresses) {
-      if (isBlockedAddress(address)) {
-        logger.warn('url_blocked', { url, reason: 'resolves_private', address });
-        return false;
-      }
+      if (isBlockedAddress(address)) return blocked('private_ip', { address });
     }
-    return addresses.length > 0;
+    return addresses.length > 0 ? { ok: true } : blocked('dns_failed');
   } catch {
-    logger.warn('url_blocked', { url, reason: 'dns_failed' });
-    return false;
+    return blocked('dns_failed');
+  }
+}
+
+/** http(s) to a public host only. DNS failure counts as unsafe. */
+export async function isSafeUrl(url: string): Promise<boolean> {
+  return (await checkUrl(url)).ok;
+}
+
+function urlProblemMessage(reason: UrlProblem, url: string): string {
+  let host = url;
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    // keep the raw text
+  }
+  switch (reason) {
+    case 'dns_failed':
+      return `Couldn't find a website at ${host} (check the address for typos)`;
+    case 'unparseable':
+      return `"${url}" is not a website address`;
+    case 'scheme':
+      return `Only http:// and https:// addresses can be read (got ${url})`;
+    default:
+      return `Blocked: ${host} is a private or local address`;
   }
 }
 
@@ -160,8 +178,9 @@ export async function fetchPage(url: string, options: { maxChars?: number; timeo
   let current = url;
   try {
     for (let hop = 0; hop <= 5; hop++) {
-      if (!(await isSafeUrl(current))) {
-        return { url, finalUrl: current, ok: false, status: null, text: '', links: [], error: `Blocked unsafe address: ${current}` };
+      const check = await checkUrl(current);
+      if (!check.ok) {
+        return { url, finalUrl: current, ok: false, status: null, text: '', links: [], error: urlProblemMessage(check.reason, current) };
       }
       const response = await fetch(current, { headers: BROWSER_HEADERS, redirect: 'manual', signal: deadline });
       if (response.status >= 300 && response.status < 400) {
@@ -202,7 +221,10 @@ export async function fetchPage(url: string, options: { maxChars?: number; timeo
     }
     return { url, finalUrl: current, ok: false, status: null, text: '', links: [], error: 'Too many redirects' };
   } catch (error) {
-    const message = (error as Error).name === 'TimeoutError' ? 'Timed out after 30 seconds' : (error as Error).message;
+    const cause = (error as { cause?: { code?: string } }).cause?.code;
+    const message = (error as Error).name === 'TimeoutError'
+      ? 'Timed out after 30 seconds'
+      : `${(error as Error).message}${cause ? ` (${cause})` : ''}`;
     logger.warn('fetch_page_failed', { url: current, error: message });
     return { url, finalUrl: current, ok: false, status: null, text: '', links: [], error: message };
   }

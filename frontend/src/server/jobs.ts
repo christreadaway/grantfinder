@@ -317,7 +317,7 @@ function withStaleCheck(job: Job): Job {
       status: 'failed',
       error: {
         status: 504,
-        detail: 'This step ran out of time (the background worker stops after 15 minutes). Try again; for drafting, draft one section at a time.',
+        detail: 'This step ran out of time (the background worker stops after 15 minutes). Try again: finished drafts were saved, and drafting again does the missing sections first.',
       },
     };
   }

@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { GoogleOAuthProvider, GoogleLogin } from '@react-oauth/google';
 import { Search, FileText, BarChart3, Download, ChevronRight } from 'lucide-react';
-import api, { API_BASE_URL } from '@/lib/api';
+import api from '@/lib/api';
 import { useStore } from '@/lib/store';
 
 const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || '';
@@ -26,12 +26,10 @@ export default function Home() {
   const [notice, setNotice] = useState<string | null>(null);
   const [signInError, setSignInError] = useState<string | null>(null);
   const [guestBusy, setGuestBusy] = useState(false);
-  const [siteOrigin, setSiteOrigin] = useState('');
 
   useEffect(() => {
-    setSiteOrigin(window.location.origin);
     if (new URLSearchParams(window.location.search).get('expired') === '1') {
-      setNotice('Your session ended, usually because the GrantFinder engine restarted. Please sign in again.');
+      setNotice('Your session ended. Please sign in again; your saved work is still here.');
     }
 
     // Check for existing token
@@ -45,12 +43,12 @@ export default function Home() {
       });
     }
 
-    // Ask the backend which sign-in methods it offers. Failure here almost
-    // always means NEXT_PUBLIC_API_URL is wrong or the backend is down.
+    // Ask the engine (this site's /api) which sign-in methods it offers.
+    // Failure here means the site's functions are not running or misconfigured.
     api.getAuthOptions()
       .then((options) => setEngine({ state: 'ready', google: options.google, guest: options.guest }))
       .catch((error) => {
-        console.error(`[GrantFinder] Cannot reach the engine at ${API_BASE_URL}:`, error);
+        console.error('[GrantFinder] The engine at /api/auth/options did not answer:', error);
         setEngine({ state: 'unreachable' });
       });
   }, [router, setUser]);
@@ -82,8 +80,7 @@ export default function Home() {
     }
   };
 
-  // The Google button needs the client ID on both sides: Netlify (to show it)
-  // and the backend (to verify the sign-in).
+  // NEXT_PUBLIC_GOOGLE_CLIENT_ID serves both the button and the engine's check.
   const showGoogle = Boolean(GOOGLE_CLIENT_ID) && engine.state === 'ready' && engine.google;
   const showGuest = engine.state === 'ready' && engine.guest;
 
@@ -105,8 +102,8 @@ export default function Home() {
     },
     {
       icon: <Download className="w-6 h-6" />,
-      title: 'Export Results',
-      description: 'Download your ranked matches as PDF, CSV, or Markdown',
+      title: 'Write and Export',
+      description: 'Draft the application with AI, then download it for Word or the funder portal',
     },
   ];
 
@@ -150,9 +147,9 @@ export default function Home() {
                 <div className="card max-w-lg text-left text-sm">
                   <p className="font-semibold text-red-400 mb-1">Can&apos;t reach the GrantFinder engine</p>
                   <p className="text-gray-400">
-                    This page tried {API_BASE_URL} and got no answer. If you run this site, check
-                    NEXT_PUBLIC_API_URL in Netlify, that the backend service is running, and that
-                    CORS_ORIGINS on the backend includes {siteOrigin || 'this site’s address'}. Then reload.
+                    This site&apos;s engine (/api) didn&apos;t answer. If you run this site: in Netlify,
+                    open Logs, then Functions, and look for the error; check that SECRET_KEY is set
+                    under Site configuration, then Environment variables; then redeploy and reload.
                   </p>
                 </div>
               )}
@@ -184,15 +181,16 @@ export default function Home() {
                   <p className="font-semibold mb-1">Sign-in isn&apos;t set up yet</p>
                   <p className="text-gray-400">
                     If you run this site, add your Google OAuth client ID as NEXT_PUBLIC_GOOGLE_CLIENT_ID
-                    in Netlify and GOOGLE_CLIENT_ID on the backend. To try the app first, set
-                    ALLOW_GUEST_LOGIN=true on the backend.
+                    in Netlify and redeploy. To try the app first, set ALLOW_GUEST_LOGIN=true in Netlify
+                    and redeploy.
                   </p>
                 </div>
               )}
 
-              {engine.state === 'ready' && GOOGLE_CLIENT_ID && !engine.google && (
+              {engine.state === 'ready' && engine.google && !GOOGLE_CLIENT_ID && (
                 <p className="text-sm text-amber-400 max-w-md">
-                  Google sign-in is only half set up: add GOOGLE_CLIENT_ID on the backend.
+                  Google sign-in is only half set up: add NEXT_PUBLIC_GOOGLE_CLIENT_ID in Netlify (same
+                  value as GOOGLE_CLIENT_ID) and redeploy.
                 </p>
               )}
 
