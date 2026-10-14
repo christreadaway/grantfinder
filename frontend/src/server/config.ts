@@ -92,7 +92,7 @@ export function secretKey(): string {
   const configured = raw('SECRET_KEY');
   if (configured) {
     if (configured.length < 32) {
-      throw new ConfigError('SECRET_KEY must be at least 32 characters. Generate a new one (see docs/deployment.md, Step 1).');
+      throw new ConfigError('SECRET_KEY must be at least 32 characters. Generate a new one (see docs/deployment.md, Step 2).');
     }
     return configured;
   }

@@ -75,15 +75,29 @@ class ApiClient {
       return config;
     });
 
-    // Background jobs: turn 202 {job_id} into the finished result.
-    this.client.interceptors.response.use(async (response: AxiosResponse) => {
-      const data = response.data as { job_id?: string; kind?: string } | undefined;
-      if (response.status === 202 && data?.job_id && response.config.responseType !== 'blob') {
-        const result = await this.waitForJob(data.job_id, data.kind || 'job');
-        return { ...response, status: 200, statusText: 'OK', data: result };
-      }
-      return response;
-    });
+    // Background jobs: turn 202 {job_id} into the finished result. A 409 that
+    // says the same step is already running (a double click, or a click after
+    // reloading mid-step) waits for that run instead of failing or paying twice.
+    this.client.interceptors.response.use(
+      async (response: AxiosResponse) => {
+        const data = response.data as { job_id?: string; kind?: string } | undefined;
+        if (response.status === 202 && data?.job_id && response.config.responseType !== 'blob') {
+          const result = await this.waitForJob(data.job_id, data.kind || 'job');
+          return { ...response, status: 200, statusText: 'OK', data: result };
+        }
+        return response;
+      },
+      async (error: AxiosError<{ job_id?: string; kind?: string; running?: boolean }>) => {
+        const data = error?.response?.data;
+        if (error?.response?.status === 409 && data?.running && data.job_id && error.config?.responseType !== 'blob') {
+          console.info(`[GrantFinder] ${data.kind || 'step'} is already running (job ${data.job_id}); waiting for it.`);
+          emitProgress({ jobId: data.job_id, kind: data.kind || 'job', status: 'running', progress: 'Already running from an earlier click; waiting for it to finish...' });
+          const result = await this.waitForJob(data.job_id, data.kind || 'job');
+          return { data: result, status: 200, statusText: 'OK', headers: {}, config: error.config } as AxiosResponse;
+        }
+        return Promise.reject(error);
+      },
+    );
 
     // A session can end (expired, or signed in on another device and the
     // server was reset). Any later auth failure sends the user back to sign in
@@ -107,7 +121,7 @@ class ApiClient {
   }
 
   /** Poll a background job until it is done (returns its result) or failed (throws its detail). */
-  private async waitForJob(jobId: string, kind: string): Promise<unknown> {
+  async waitForJob(jobId: string, kind: string): Promise<unknown> {
     const started = Date.now();
     let delay = 1000;
     let networkFailures = 0;
@@ -362,9 +376,11 @@ class ApiClient {
     return response.data;
   }
 
-  async draftSections(appId: string, sectionId?: string) {
+  /** Draft all sections, one section, or (onlyMissing) just the sections with no draft yet. */
+  async draftSections(appId: string, sectionId?: string, onlyMissing = false) {
     const response = await this.client.post(`/api/writer/applications/${appId}/draft`, {
       section_id: sectionId || null,
+      only_missing: onlyMissing,
     });
     return response.data;
   }
@@ -410,6 +426,12 @@ class ApiClient {
       include_all_matches: includeAll,
     }, { responseType: 'blob' });
     return response.data;
+  }
+
+  /** Recent background steps (newest first), e.g. to pick up one still running after a reload. */
+  async listJobs(): Promise<Array<{ id: string; kind: string; status: JobProgress['status']; application_id: string | null; progress: string | null }>> {
+    const response = await this.client.get('/api/jobs');
+    return response.data?.jobs ?? [];
   }
 
   // Debugging

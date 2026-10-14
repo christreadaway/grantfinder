@@ -27,7 +27,7 @@ import {
   generateIntakePackets,
   loadApplication,
   loadWriterProfile,
-  orderDrafts,
+  draftsVsSpec,
   refineSection,
   scoreDraft,
   WRITER_MESSAGES,
@@ -228,16 +228,22 @@ async function draftJob(ctx: JobContext): Promise<unknown> {
   assertDraftAllowed(app, gaps);
 
   const onlySection = asString(input(ctx).section_id);
+  const onlyMissing = (input(ctx) as { only_missing?: unknown }).only_missing === true;
+  // Earlier drafts, so a redraft keeps the replaced text in the section's history.
+  const priorDrafts = new Map((await listSectionDrafts(ctx.userId, app.id)).map((draft) => [draft.section_id, draft]));
   let targets = spec.required_sections;
   if (onlySection) {
     targets = spec.required_sections.filter((section) => section.id === onlySection);
     if (!targets.length) throw new HttpError(404, WRITER_MESSAGES.draftSectionNotInSpec);
+  } else if (onlyMissing) {
+    targets = spec.required_sections.filter((section) => !priorDrafts.has(section.id));
+    if (!targets.length) return { sections: [], note: 'Every required section already has a draft.' };
   }
   const analysis = await getFitAnalysis(ctx.userId, app.id);
   const confirmedGaps = gaps.filter((gap) => gap.status === 'confirmed_gap');
 
   // Sections that have no draft yet go first, so a run cut short still fills the holes.
-  const existing = new Set((await listSectionDrafts(ctx.userId, app.id)).map((draft) => draft.section_id));
+  const existing = new Set(priorDrafts.keys());
   const queue = [...targets.filter((s) => !existing.has(s.id)), ...targets.filter((s) => existing.has(s.id))];
 
   const run = runFor(ctx, await ctx.claude());
@@ -254,6 +260,11 @@ async function draftJob(ctx: JobContext): Promise<unknown> {
   const draftOne = async (section: RequiredSection): Promise<void> => {
     try {
       const draft = await draftSection(run, app, section, spec, profile, analysis, confirmedGaps);
+      const prior = priorDrafts.get(section.id);
+      if (prior?.current_draft) {
+        // Keep what this replaces (including refinements), newest last, capped.
+        draft.versions = [...(prior.versions ?? []), prior.current_draft, ...draft.versions].slice(-12);
+      }
       await saveSectionDraft(ctx.userId, draft);
       drafted.set(section.id, draft);
       ctx.note(
@@ -348,7 +359,8 @@ async function draftJob(ctx: JobContext): Promise<unknown> {
 async function scoreJob(ctx: JobContext): Promise<unknown> {
   const app = await loadApplication(ctx.userId, appIdOf(ctx));
   const spec = await getGrantSpec(ctx.userId, app.grant_id);
-  const drafts = orderDrafts(await listSectionDrafts(ctx.userId, app.id), spec);
+  // Only sections the current requirements ask for are scored.
+  const drafts = spec ? draftsVsSpec(await listSectionDrafts(ctx.userId, app.id), spec).current : [];
   if (!spec || !drafts.length) throw new HttpError(400, WRITER_MESSAGES.draftFirst);
 
   await ctx.progress('Scoring the draft against the rubric...');

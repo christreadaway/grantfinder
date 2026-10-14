@@ -32,8 +32,8 @@ export function jsonResponse(data: unknown, status = 200, headers: Record<string
   });
 }
 
-export function errorResponse(status: number, detail: string, requestId?: string): Response {
-  return jsonResponse({ detail }, status, requestId ? { 'x-request-id': requestId } : {});
+export function errorResponse(status: number, detail: string, requestId?: string, extra?: Record<string, unknown>): Response {
+  return jsonResponse({ ...(extra ?? {}), detail }, status, requestId ? { 'x-request-id': requestId } : {});
 }
 
 /** A file download (CSV, Markdown, Word...). */

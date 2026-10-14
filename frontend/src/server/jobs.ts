@@ -35,6 +35,8 @@ export interface Job {
   error_debug: string | null;
   progress: string | null;
   application_id: string | null;
+  /** Jobs sharing this key never run twice at once (e.g. drafting one application). */
+  exclusive_key?: string | null;
   correlation_id: string;
   ai_calls: AICallLog[];
   notes: string[];
@@ -120,11 +122,43 @@ export function verifyJobSignature(userId: string, jobId: string, signature: str
 // Creating and dispatching
 // =============================================================================
 
+export interface JobOptions {
+  applicationId?: string | null;
+  correlationId?: string | null;
+  /**
+   * Refuse to start while a job with the same key is queued or running.
+   * Defaults to kind + application, so a double click (or a click after a
+   * reload) attaches to the running step instead of paying for it twice.
+   * Pass null to allow parallel jobs (e.g. several document uploads).
+   */
+  exclusiveKey?: string | null;
+}
+
+/** Job ids embed their creation time (job_YYYYMMDDTHHMMSSZ_xxxx). */
+function jobIdTime(jobId: string): number {
+  const match = /^job_(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z_/.exec(jobId);
+  return match ? Date.UTC(+match[1], +match[2] - 1, +match[3], +match[4], +match[5], +match[6]) : 0;
+}
+
+/** A queued or running job with this exclusive key, if any (only recent jobs are read). */
+export async function findActiveJob(userId: string, exclusiveKey: string): Promise<Job | null> {
+  const since = Date.now() - JOB_MAX_RUNTIME_MS - 2 * 60_000;
+  const prefix = jobsPrefix(userId);
+  const recentKeys = (await kv().list(prefix)).filter((key) => jobIdTime(key.slice(prefix.length)) >= since).slice(-20);
+  const jobs = await Promise.all(recentKeys.map((key) => kv().get<Job>(key)));
+  for (const job of jobs.reverse()) {
+    if (!job || job.exclusive_key !== exclusiveKey) continue;
+    const checked = withStaleCheck(job);
+    if (checked.status === 'queued' || checked.status === 'running') return checked;
+  }
+  return null;
+}
+
 export async function createJob(
   userId: string,
   kind: string,
   input: unknown,
-  options: { applicationId?: string | null; correlationId?: string | null } = {},
+  options: JobOptions = {},
 ): Promise<Job> {
   const now = new Date().toISOString();
   const job: Job = {
@@ -138,6 +172,7 @@ export async function createJob(
     error_debug: null,
     progress: 'Waiting to start...',
     application_id: options.applicationId ?? null,
+    exclusive_key: options.exclusiveKey ?? null,
     correlation_id: options.correlationId || newCorrelationId(),
     ai_calls: [],
     notes: [],
@@ -169,7 +204,9 @@ export async function dispatchJob(job: Job, origin: string): Promise<void> {
     }, 0);
     return;
   }
-  const base = (process.env.GRANTFINDER_JOBS_ORIGIN || origin).replace(/\/+$/, '');
+  // The deploy's own address (Netlify sets DEPLOY_URL/URL for functions), never
+  // the request's Host header, so a crafted Host can't redirect this call.
+  const base = (process.env.GRANTFINDER_JOBS_ORIGIN || process.env.DEPLOY_URL || process.env.URL || origin).replace(/\/+$/, '');
   const url = `${base}${BACKGROUND_FUNCTION_PATH}`;
   try {
     const response = await fetch(url, {
@@ -204,10 +241,23 @@ export async function startJob(
   ctx: RequestContext,
   kind: string,
   input: unknown,
-  options: { applicationId?: string | null; correlationId?: string | null } = {},
+  options: JobOptions = {},
 ): Promise<Response> {
   const user = await ctx.user();
-  const job = await createJob(user.id, kind, input, options);
+  const exclusiveKey = options.exclusiveKey === undefined ? `${kind}:${options.applicationId ?? '-'}` : options.exclusiveKey;
+  if (exclusiveKey) {
+    const active = await findActiveJob(user.id, exclusiveKey);
+    if (active) {
+      const minutes = Math.max(0, Math.round((Date.now() - Date.parse(active.created_at)) / 60000));
+      logger.info('job_already_running', { job_id: active.id, kind, user_id: user.id });
+      throw new HttpError(
+        409,
+        `This step is already running (started ${minutes === 0 ? 'less than a minute' : `${minutes} minute${minutes === 1 ? '' : 's'}`} ago). It will finish on its own; the page updates when it does.`,
+        { job_id: active.id, kind: active.kind, running: true },
+      );
+    }
+  }
+  const job = await createJob(user.id, kind, input, { ...options, exclusiveKey });
   await dispatchJob(job, ctx.origin);
   return jsonResponse({ job_id: job.id, status: job.status, kind }, 202);
 }
@@ -236,6 +286,7 @@ export async function runJob(userId: string, jobId: string): Promise<void> {
   const notes: string[] = [];
   let lastProgressWrite = 0;
   let pendingProgress: string | null = null;
+  let progressTimer: ReturnType<typeof setTimeout> | null = null;
   const t0 = Date.now();
 
   const flush = async (progress: string | null) => {
@@ -265,12 +316,24 @@ export async function runJob(userId: string, jobId: string): Promise<void> {
     progress: async (message: string) => {
       pendingProgress = message;
       logger.info('job_progress', { job_id: jobId, kind: claimed.kind, message });
-      if (Date.now() - lastProgressWrite < 1500) return;
-      lastProgressWrite = Date.now();
-      try {
-        await flush(message);
-      } catch (error) {
-        logger.warn('job_progress_write_failed', { job_id: jobId, error: (error as Error).message });
+      const writeLatest = async () => {
+        lastProgressWrite = Date.now();
+        try {
+          await flush(pendingProgress);
+        } catch (error) {
+          logger.warn('job_progress_write_failed', { job_id: jobId, error: (error as Error).message });
+        }
+      };
+      const wait = 1500 - (Date.now() - lastProgressWrite);
+      if (wait <= 0) {
+        await writeLatest();
+      } else if (!progressTimer) {
+        // Throttled: write the newest line once the window passes, so quick
+        // successive updates ("Scoring grants 11-20...") are not lost.
+        progressTimer = setTimeout(() => {
+          progressTimer = null;
+          void writeLatest();
+        }, wait);
       }
     },
     note: (line: string) => {
@@ -283,6 +346,7 @@ export async function runJob(userId: string, jobId: string): Promise<void> {
   try {
     if (!handler) throw new Error(`No handler registered for job kind "${claimed.kind}"`);
     const result = await handler(ctx);
+    if (progressTimer) clearTimeout(progressTimer);
     const finishedAt = new Date().toISOString();
     await update<Job>(key, (job) => {
       if (!job || job.claim !== claim) return undefined;
@@ -301,6 +365,7 @@ export async function runJob(userId: string, jobId: string): Promise<void> {
     const cost = aiCalls.reduce((sum, call) => sum + call.cost_estimate_usd, 0);
     logger.info('job_done', { job_id: jobId, kind: claimed.kind, ms: Date.now() - t0, ai_calls: aiCalls.length, cost_usd: Number(cost.toFixed(4)) });
   } catch (error) {
+    if (progressTimer) clearTimeout(progressTimer);
     const { status, detail } = toHttpError(error, jobId);
     const raw = error instanceof Error ? `${error.name}: ${error.message}\n${(error.stack || '').split('\n').slice(1, 8).join('\n')}` : String(error);
     const friendly = status >= 500 && !(error instanceof HttpError) && detail.startsWith('Something went wrong')

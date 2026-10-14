@@ -25,6 +25,7 @@ interface GoogleTokenInfo {
   sub?: string;
   aud?: string;
   email?: string;
+  email_verified?: string | boolean;
   name?: string;
   picture?: string;
   exp?: string;
@@ -51,6 +52,9 @@ async function verifyGoogleCredential(credential: string): Promise<GoogleTokenIn
     throw new HttpError(401, 'Invalid token audience');
   }
   if (!info.sub) throw new HttpError(401, 'Invalid Google credential');
+  if (String(info.email_verified) !== 'true') {
+    throw new HttpError(401, 'This Google account’s email address is not verified. Verify it with Google, then sign in again.');
+  }
   return info;
 }
 
@@ -117,6 +121,12 @@ export function registerAuthRoutes(router: Router): void {
     const apiKey = String(body.api_key ?? '').trim();
     if (!apiKey.startsWith('sk-ant-')) {
       throw new HttpError(400, "Invalid API key format. Claude API keys start with 'sk-ant-'");
+    }
+    if (!/^sk-ant-[A-Za-z0-9_-]{8,}$/.test(apiKey)) {
+      throw new HttpError(
+        400,
+        'That key has spaces, line breaks, or hidden characters in it. Copy it again from console.anthropic.com (use the copy button) and paste it here.',
+      );
     }
     const check = await verifyApiKey(apiKey);
     if (check.result === 'invalid') throw new HttpError(400, check.detail || 'Anthropic rejected this API key.');

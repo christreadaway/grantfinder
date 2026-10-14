@@ -94,7 +94,16 @@ function apiErrorType(error: InstanceType<typeof Anthropic.APIError>): string {
   return body?.error?.type || '';
 }
 
+/** Remove anything that looks like an API key (some client errors quote the header). */
+const redact = (text: string) => text.replace(/sk-ant-[^\s"',)]+/g, 'sk-ant-[redacted]');
+
 export function translateClaudeError(error: unknown, model: string): ClaudeError {
+  const translated = translateClaudeErrorRaw(error, model);
+  const detail = redact(translated.detail);
+  return detail === translated.detail ? translated : new ClaudeError(translated.kind, translated.status, detail, translated.fatal);
+}
+
+function translateClaudeErrorRaw(error: unknown, model: string): ClaudeError {
   if (error instanceof ClaudeError) return error;
   if (error instanceof Anthropic.AuthenticationError) {
     return new ClaudeError(
@@ -276,7 +285,8 @@ export async function verifyApiKey(apiKey: string): Promise<{ result: 'ok' | 'in
     if (error instanceof Anthropic.PermissionDeniedError) {
       return { result: 'invalid', detail: 'Anthropic says this API key is not allowed to make requests. Check the key in the Anthropic Console.' };
     }
-    logger.warn('api_key_verify_unavailable', { error: (error as Error).message });
-    return { result: 'unverified', detail: (error as Error).message };
+    const message = redact((error as Error).message || String(error));
+    logger.warn('api_key_verify_unavailable', { error: message });
+    return { result: 'unverified', detail: message };
   }
 }

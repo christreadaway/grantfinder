@@ -87,6 +87,8 @@ export function log(level: Level, event: string, fields: Record<string, unknown>
   } catch {
     line = JSON.stringify({ ts: entry.ts, level, event, note: 'unserializable fields' });
   }
+  // A Claude API key must never reach the logs, whatever field it hides in.
+  line = line.replace(/sk-ant-[A-Za-z0-9_-]{4,}/g, 'sk-ant-[redacted]');
   // Tests set GRANTFINDER_LOG_STDOUT=0 to keep their output readable (errors still print).
   const quiet = process.env.GRANTFINDER_LOG_STDOUT === '0' && level !== 'error';
   if (!quiet) {

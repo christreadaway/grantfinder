@@ -14,7 +14,7 @@ if (onNetlify) {
   if (!secret) {
     throw new Error(
       'SECRET_KEY is not set. In Netlify: Site configuration > Environment variables > add SECRET_KEY ' +
-      '(at least 32 random characters; docs/deployment.md Step 1 shows how to make one), then redeploy.'
+      '(at least 32 random characters; docs/deployment.md Step 2 shows how to make one), then redeploy.'
     );
   }
   if (secret.length < 32) {

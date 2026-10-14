@@ -34,6 +34,7 @@ import {
   loadApplication,
   loadWriterProfile,
   newId,
+  draftsVsSpec,
   orderDrafts,
   withUrgency,
   WRITER_MESSAGES,
@@ -52,7 +53,7 @@ import {
   updateGaps,
   updateIntakeRequests,
 } from '../services/writerRepo';
-import type { AICallLog, Application, Gap, IntakeRequest, WriterExportFormat } from '../types';
+import type { AICallLog, Application, Gap, IntakeRequest, SectionDraft, WriterExportFormat } from '../types';
 
 /** Every job for one application shares its correlation id, so the debug bundle can trace it. */
 function jobOptions(app: Application) {
@@ -154,6 +155,7 @@ async function getApplicationState(ctx: RequestContext): Promise<Record<string, 
     getScorecard(user.id, app.id),
   ]);
   const voice = profile?.voice_profile ?? null;
+  const coverage = spec ? draftsVsSpec(drafts, spec) : null;
   return {
     application: app,
     has_voice_profile: Boolean(voice && voice.style_guidelines),
@@ -164,6 +166,9 @@ async function getApplicationState(ctx: RequestContext): Promise<Record<string, 
     open_blocking_gaps: blockingGaps(gaps),
     intake_requests: intake,
     sections: orderDrafts(drafts, spec),
+    // Required sections with no draft yet, and drafts the current requirements no longer ask for.
+    missing_sections: coverage ? coverage.missing.map((section) => ({ id: section.id, title: section.title })) : [],
+    stale_section_ids: coverage ? coverage.stale.map((draft) => draft.section_id) : [],
     scorecard,
   };
 }
@@ -350,6 +355,7 @@ async function draftSectionsRoute(ctx: RequestContext): Promise<Response> {
   const user = await ctx.user();
   const body = await ctx.json();
   const sectionId = optionalString(body, 'section_id');
+  const onlyMissing = body.only_missing === true;
   const app = await loadApplication(user.id, ctx.params.appId);
   await loadWriterProfile(user.id);
   const spec = await getGrantSpec(user.id, app.grant_id);
@@ -359,7 +365,7 @@ async function draftSectionsRoute(ctx: RequestContext): Promise<Response> {
     throw new HttpError(404, WRITER_MESSAGES.draftSectionNotInSpec);
   }
   await requireApiKey(user.id);
-  return startJob(ctx, 'writer.draft', { app_id: app.id, section_id: sectionId || null }, jobOptions(app));
+  return startJob(ctx, 'writer.draft', { app_id: app.id, section_id: sectionId || null, only_missing: onlyMissing }, jobOptions(app));
 }
 
 // =============================================================================
@@ -390,7 +396,10 @@ async function refineSectionRoute(ctx: RequestContext): Promise<Response> {
   if (!spec || !draft) throw new HttpError(404, WRITER_MESSAGES.sectionDraftNotFound);
   if (!spec.required_sections.some((section) => section.id === sectionId)) throw new HttpError(404, WRITER_MESSAGES.sectionNotInSpec);
   await requireApiKey(user.id);
-  return startJob(ctx, 'writer.refine', { app_id: app.id, section_id: sectionId, instruction }, jobOptions(app));
+  return startJob(ctx, 'writer.refine', { app_id: app.id, section_id: sectionId, instruction }, {
+    ...jobOptions(app),
+    exclusiveKey: `writer.refine:${app.id}:${sectionId}`,
+  });
 }
 
 // =============================================================================
@@ -409,31 +418,65 @@ async function exportApplication(ctx: RequestContext): Promise<Response> {
   ]);
   if (!spec || !stored.length) throw new HttpError(400, WRITER_MESSAGES.nothingToExport);
 
+  // Only sections the CURRENT requirements ask for are exported (re-analyzing
+  // the grant can drop or add sections). Undrafted ones get a visible placeholder.
+  const { current, stale, missing } = draftsVsSpec(stored, spec);
+  if (!current.length) throw new HttpError(400, WRITER_MESSAGES.nothingToExport);
+
   // Re-check every section against the CURRENT limits and banned phrases (never trust a stale flag).
   const limits = new Map(spec.required_sections.map((section) => [section.id, section]));
-  const drafts = orderDrafts(stored, spec).map((draft) => {
+  const checkedDrafts = current.map((draft) => {
     const checked = structuredClone(draft);
     applyCompliance(checked, limits.get(draft.section_id) ?? null, profile);
     return checked;
   });
 
   // Hard rule: never export over-limit content.
-  const overLimit = drafts.filter((draft) => draft.over_limit).map((draft) => draft.title);
+  const overLimit = checkedDrafts.filter((draft) => draft.over_limit).map((draft) => draft.title);
   if (overLimit.length) {
     throw new HttpError(
       409,
       `Cannot export: section(s) over their hard limit: ${overLimit.join(', ')}. Refine them (e.g. 'tighten to the limit') first.`,
     );
   }
-  const dirty = drafts.filter((draft) => draft.banned_phrase_hits.length).map((draft) => draft.title);
+  const dirty = checkedDrafts.filter((draft) => draft.banned_phrase_hits.length).map((draft) => draft.title);
   if (dirty.length) {
     throw new HttpError(409, `Cannot export: banned phrases remain in: ${dirty.join(', ')}. Refine first.`);
   }
 
+  const placeholders: SectionDraft[] = missing.map((section) => ({
+    id: `missing_${section.id}`,
+    application_id: app.id,
+    section_id: section.id,
+    title: section.title,
+    current_draft: '[NOT DRAFTED YET: draft this section in GrantFinder before you submit.]',
+    versions: [],
+    claims: [],
+    word_count: 0,
+    char_count: 0,
+    over_limit: false,
+    banned_phrase_hits: [],
+    compliance_notes: ['Not drafted yet'],
+  }));
+  const drafts = orderDrafts([...checkedDrafts, ...placeholders], spec);
+
   const file = await buildExport(format, app, spec, drafts);
   await touchApplication(user.id, app.id, { status: 'export' });
-  logger.info('application_exported', { correlation_id: app.correlation_id, app_id: app.id, format, file: file.filename });
-  return fileResponse(file.body, file.filename, file.contentType);
+  const notices = [
+    missing.length ? `Not drafted yet (marked in the file): ${missing.map((section) => section.title).join(', ')}.` : '',
+    stale.length ? `Left out because the current requirements no longer ask for them: ${stale.map((draft) => draft.title).join(', ')}.` : '',
+  ].filter(Boolean);
+  logger.info('application_exported', {
+    correlation_id: app.correlation_id,
+    app_id: app.id,
+    format,
+    file: file.filename,
+    missing_sections: missing.length,
+    stale_sections: stale.length,
+  });
+  const response = fileResponse(file.body, file.filename, file.contentType);
+  if (notices.length) response.headers.set('x-grantfinder-notice', encodeURIComponent(notices.join(' ')));
+  return response;
 }
 
 // =============================================================================

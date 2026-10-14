@@ -88,16 +88,19 @@ export default function Dashboard() {
   // Live status lines from background jobs ("Scoring grants 11-15 of 40")
   useEffect(() => onJobProgress((info) => setJobProgress(info.progress)), []);
 
-  // Pick up where the user left off: saved key, grants, profile, results, applications.
+  // Pick up where the user left off: saved key, grants, profile, results,
+  // applications, and a matching run still in progress from before a reload.
   useEffect(() => {
     if (!user || resumedFor.current === user.id) return;
     resumedFor.current = user.id;
     (async () => {
-      const [stats, profile, apps, latest] = await Promise.all([
+      const [stats, profile, apps, latest, keyStatus, jobs] = await Promise.all([
         api.getGrantStats().catch(() => null),
         api.getProfile().catch(() => null),
         api.listApplications().catch(() => []),
         api.getLatestMatchResults().catch(() => null),
+        api.getApiKeyStatus().catch(() => null),
+        api.listJobs().catch(() => []),
       ]);
       if (stats?.total_grants) {
         setDiscoveredTotal(stats.total_grants);
@@ -119,9 +122,33 @@ export default function Dashboard() {
       }
       setApplications(Array.isArray(apps) ? apps : []);
       if (latest && !matchResults) setMatchResults(latest);
-      if (user.claude_api_key_set) {
+      // Ask the engine (the signed-in user object can be from before the key was saved).
+      if (keyStatus?.is_set ?? user.claude_api_key_set) {
         setApiKeySet(true);
         setCurrentStep((step) => (step === 'api-key' ? (stats?.total_grants ? 'website' : 'grants') : step));
+      }
+      const runningMatch = jobs.find((job) => job.kind === 'processing.match_grants' && (job.status === 'running' || job.status === 'queued'));
+      if (runningMatch) {
+        setCurrentStep('processing');
+        setIsProcessing(true);
+        setProcessingLogs([{
+          timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
+          status: 'info',
+          message: 'Matching is still running from before; picking it back up...',
+        }]);
+        try {
+          const results: any = await api.waitForJob(runningMatch.id, runningMatch.kind);
+          setMatchResults(results);
+          setIsProcessing(false);
+          setCurrentStep('results');
+        } catch (error: any) {
+          setProcessingLogs((logs) => [...logs, {
+            timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
+            status: 'error',
+            message: errorDetail(error, 'Matching failed. Run it again from the Documents step.'),
+          }]);
+          setIsProcessing(false);
+        }
       }
     })();
   }, [user, matchResults, setMatchResults]);
@@ -188,6 +215,7 @@ export default function Dashboard() {
       }
       const result = await api.setApiKey(apiKey.trim());
       setApiKeySet(true);
+      if (user) setUser({ ...user, claude_api_key_set: true });
       setApiKey('');
       if (result?.warning) setNotice(result.warning);
       goTo(discoveredTotal > 0 ? 'website' : 'grants');
@@ -256,9 +284,8 @@ export default function Dashboard() {
         await api.scanWebsite(churchUrl, schoolUrl);
       } catch (error: any) {
         setShowBasics(true);
-        throw new Error(
-          `${errorDetail(error, 'Website scan failed.')} You can enter your organization's basics below instead, or skip this step.`,
-        );
+        const detail = errorDetail(error, 'Website scan failed.');
+        throw new Error(/by hand|skip/i.test(detail) ? detail : `${detail} Use "Enter the basics by hand" or "Skip to questions" below.`);
       }
       setWebsiteScanned(true);
       setProfileExists(true);
@@ -358,7 +385,7 @@ export default function Dashboard() {
       }
 
       // 2. Real matching run
-      addLog('info', `Scoring ${grantStats?.total_grants || discoveredTotal || 'all'} grants against your profile...`);
+      addLog('info', 'Scoring your grants and foundations against your profile...');
       addLog('info', 'Applying geographic and deadline hard filters, then AI scoring...');
       const results = await api.matchGrants();
       setMatchResults(results);
@@ -462,8 +489,8 @@ export default function Dashboard() {
 
       {/* Progress Steps (click any available step to jump there) */}
       <div className="border-b border-[var(--card-border)] py-4">
-        <div className="max-w-4xl mx-auto px-4">
-          <div className="flex items-center justify-between">
+        <div className="max-w-4xl mx-auto px-4 overflow-x-auto">
+          <div className="flex items-center justify-between min-w-max md:min-w-0">
             {steps.map((step, index) => {
               const Icon = step.icon;
               const isActive = step.id === currentStep;
@@ -474,6 +501,8 @@ export default function Dashboard() {
                   <button
                     type="button"
                     disabled={!visitable}
+                    aria-label={step.label}
+                    title={step.label}
                     onClick={() => goTo(step.id as SetupStep)}
                     className={`
                       flex items-center gap-2 px-3 py-2 rounded-lg
@@ -490,7 +519,7 @@ export default function Dashboard() {
                     <span className="text-sm font-medium hidden md:inline">{step.label}</span>
                   </button>
                   {index < steps.length - 1 && (
-                    <ChevronRight className="w-4 h-4 text-gray-600 mx-2" />
+                    <ChevronRight className="w-4 h-4 text-gray-600 mx-1 md:mx-2" />
                   )}
                 </div>
               );
@@ -510,7 +539,7 @@ export default function Dashboard() {
           )}
 
           {stepError && currentStep !== 'processing' && (
-            <div className="mb-4 p-3 rounded bg-red-900/30 text-red-300 text-sm flex items-start gap-2" role="alert">
+            <div className="sticky top-2 z-10 mb-4 p-3 rounded bg-red-950 border border-red-800 text-red-300 text-sm flex items-start gap-2" role="alert">
               <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
               <span>{stepError}</span>
             </div>
@@ -770,14 +799,14 @@ export default function Dashboard() {
                 {showBasics && (
                   <div className="mt-4 grid gap-3 md:grid-cols-2">
                     <div className="md:col-span-2">
-                      <label className="block text-sm font-medium mb-1">Organization name *</label>
-                      <input className="input" value={basics.organization_name}
+                      <label htmlFor="basics-name" className="block text-sm font-medium mb-1">Organization name *</label>
+                      <input className="input" id="basics-name" value={basics.organization_name}
                         onChange={(e) => setBasics({ ...basics, organization_name: e.target.value })}
                         placeholder="[Parish Name] Catholic Church and School" />
                     </div>
                     <div>
-                      <label className="block text-sm font-medium mb-1">Type</label>
-                      <select className="input" value={basics.organization_type}
+                      <label htmlFor="basics-type" className="block text-sm font-medium mb-1">Type</label>
+                      <select className="input" id="basics-type" value={basics.organization_type}
                         onChange={(e) => setBasics({ ...basics, organization_type: e.target.value })}>
                         <option value="both">Parish and school</option>
                         <option value="school">School</option>
@@ -785,23 +814,23 @@ export default function Dashboard() {
                       </select>
                     </div>
                     <div>
-                      <label className="block text-sm font-medium mb-1">Diocese</label>
-                      <input className="input" value={basics.diocese}
+                      <label htmlFor="basics-diocese" className="block text-sm font-medium mb-1">Diocese</label>
+                      <input className="input" id="basics-diocese" value={basics.diocese}
                         onChange={(e) => setBasics({ ...basics, diocese: e.target.value })} />
                     </div>
                     <div>
-                      <label className="block text-sm font-medium mb-1">City</label>
-                      <input className="input" value={basics.city}
+                      <label htmlFor="basics-city" className="block text-sm font-medium mb-1">City</label>
+                      <input className="input" id="basics-city" value={basics.city}
                         onChange={(e) => setBasics({ ...basics, city: e.target.value })} />
                     </div>
                     <div>
-                      <label className="block text-sm font-medium mb-1">State *</label>
-                      <input className="input" value={basics.state} placeholder="TX"
+                      <label htmlFor="basics-state" className="block text-sm font-medium mb-1">State *</label>
+                      <input className="input" id="basics-state" value={basics.state} placeholder="TX"
                         onChange={(e) => setBasics({ ...basics, state: e.target.value })} />
                     </div>
                     <div>
-                      <label className="block text-sm font-medium mb-1">Number of students</label>
-                      <input className="input" inputMode="numeric" value={basics.student_count}
+                      <label htmlFor="basics-students" className="block text-sm font-medium mb-1">Number of students</label>
+                      <input className="input" inputMode="numeric" id="basics-students" value={basics.student_count}
                         onChange={(e) => setBasics({ ...basics, student_count: e.target.value })} />
                     </div>
                     <div className="md:col-span-2">

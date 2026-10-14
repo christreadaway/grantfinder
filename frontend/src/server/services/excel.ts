@@ -14,6 +14,7 @@ import crypto from 'node:crypto';
 import { Workbook, type Cell, type CellValue, type Row, type Worksheet } from 'exceljs';
 
 import { HttpError } from '../errors';
+import { assertZipWithinLimits } from '../zipguard';
 import { logger } from '../log';
 import {
   GRANT_CATEGORIES,
@@ -459,6 +460,8 @@ export const XLS_MESSAGE =
  */
 export async function parseGrantWorkbook(content: Uint8Array, userId: string): Promise<ParsedWorkbook> {
   if (looksLikeXls(content)) throw new HttpError(400, XLS_MESSAGE);
+  // A 4 MB workbook built to inflate to gigabytes would exhaust memory inside exceljs.
+  assertZipWithinLimits(content);
 
   const workbook = new Workbook();
   try {

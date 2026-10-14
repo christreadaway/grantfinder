@@ -326,7 +326,7 @@ const blocked = await call('POST', '/api/processing/scan-website', { token: toke
 check(
   'scan of a site that blocks bots (HTTP 403) fails with the URL, the reason, and what to do instead',
   blocked.status === 400 && blocked.data.detail.includes(`${siteUrl}/blocked`) && /HTTP 403/.test(blocked.data.detail) &&
-    /blocks automated reading/.test(blocked.data.detail) && /upload documents/.test(blocked.data.detail) && /free-form notes/.test(blocked.data.detail),
+    /blocks automated reading/.test(blocked.data.detail) && /Enter the basics by hand/.test(blocked.data.detail) && /upload documents/.test(blocked.data.detail) && /free-form notes/.test(blocked.data.detail),
   blocked.data,
 );
 

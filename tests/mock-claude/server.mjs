@@ -25,6 +25,7 @@
  *   POST /__reset               clear the request log and forced failures
  *   POST /__fail {"prompt_id": "...", "status": 529, "type": "overloaded_error", "times": 1}
  *   POST /__fixtures {"prompt_id": "answer"}   add/override answers at runtime
+ *   POST /__delay {"prompt_id": "...", "ms": 1500}  answer that prompt slowly (0 clears)
  */
 import fs from 'node:fs';
 import http from 'node:http';
@@ -47,6 +48,7 @@ loadFixtures();
 
 let requests = [];
 let failures = {};
+let delays = {};
 
 function send(res, status, body, headers = {}) {
   res.writeHead(status, { 'content-type': 'application/json', ...headers });
@@ -138,12 +140,18 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/__reset') {
       requests = [];
       failures = {};
+      delays = {};
       loadFixtures();
       return send(res, 200, { ok: true });
     }
     if (req.method === 'POST' && url.pathname === '/__fail') {
       const body = JSON.parse((await readBody(req)) || '{}');
       failures[body.prompt_id] = { status: body.status || 529, type: body.type || 'overloaded_error', times: body.times ?? 1 };
+      return send(res, 200, { ok: true });
+    }
+    if (req.method === 'POST' && url.pathname === '/__delay') {
+      const body = JSON.parse((await readBody(req)) || '{}');
+      delays[body.prompt_id] = Number(body.ms) || 0;
       return send(res, 200, { ok: true });
     }
     if (req.method === 'POST' && url.pathname === '/__fixtures') {
@@ -179,6 +187,7 @@ const server = http.createServer(async (req, res) => {
         forced.times -= 1;
         return apiError(res, forced.status, forced.type, `forced ${forced.type} for ${promptId}`);
       }
+      if (delays[promptId]) await new Promise((resolve) => setTimeout(resolve, delays[promptId]));
       const answer = answerFor(promptId, body);
       const inputTokens = Math.max(1, Math.ceil(raw.length / 4));
       if (body.stream) return streamAnswer(res, body.model, answer, inputTokens);

@@ -10,6 +10,7 @@ import mammoth from 'mammoth';
 
 import { ALLOWED_DOCUMENT_EXTENSIONS } from '../config';
 import { HttpError } from '../errors';
+import { assertZipWithinLimits } from '../zipguard';
 import { logger } from '../log';
 import { extractPdfText } from '../pdf';
 
@@ -50,6 +51,8 @@ async function pdfText(content: Uint8Array, filename: string): Promise<string> {
 }
 
 async function docxText(content: Uint8Array, filename: string): Promise<string> {
+  // A small .docx built to inflate to gigabytes would exhaust memory inside mammoth.
+  assertZipWithinLimits(content);
   try {
     const result = await mammoth.extractRawText({ buffer: Buffer.from(content) });
     return result.value;

@@ -97,8 +97,8 @@ export function unreadableWebsiteMessage(urls: string[], problems: string[]): st
   const details = problems.length ? problems.map(friendlyProblem) : urls.map((url) => `${url}: no readable text`);
   return (
     `Couldn't read any text from ${urls.length > 1 ? 'either website' : 'the website'}. ${details.join('; ')}. ` +
-    'Instead you can skip the scan and upload documents (bulletins, annual reports, newsletters) in the Documents step, ' +
-    'or type your parish and school details into the free-form notes ("Anything else we should know?") on the questions step.'
+    'Instead, use "Enter the basics by hand" or "Skip to questions" on this step, then upload documents ' +
+    '(bulletins, annual reports, newsletters) in the Documents step and add details in the free-form notes on the questions step.'
   );
 }
 

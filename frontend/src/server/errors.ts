@@ -9,12 +9,15 @@
 export class HttpError extends Error {
   readonly status: number;
   readonly detail: string;
+  /** Extra JSON fields sent beside detail (e.g. job_id of a step that is already running). */
+  readonly extra?: Record<string, unknown>;
 
-  constructor(status: number, detail: string) {
+  constructor(status: number, detail: string, extra?: Record<string, unknown>) {
     super(detail);
     this.name = 'HttpError';
     this.status = status;
     this.detail = detail;
+    this.extra = extra;
   }
 }
 

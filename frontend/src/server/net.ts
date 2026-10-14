@@ -5,11 +5,13 @@
  * never localhost or private/link-local addresses, checked again on every
  * redirect hop.
  */
+import dnsCallback from 'node:dns';
 import dns from 'node:dns/promises';
 import net from 'node:net';
 
 import * as cheerio from 'cheerio';
 import type { AnyNode } from 'domhandler';
+import { Agent, fetch as undiciFetch } from 'undici';
 
 import { WEBSITE_CRAWL_MAX_PAGES } from './config';
 import { logger } from './log';
@@ -23,12 +25,27 @@ BLOCKED.addSubnet('127.0.0.0', 8, 'ipv4');
 BLOCKED.addSubnet('169.254.0.0', 16, 'ipv4');
 BLOCKED.addSubnet('0.0.0.0', 8, 'ipv4');
 BLOCKED.addSubnet('100.64.0.0', 10, 'ipv4');
+BLOCKED.addSubnet('192.0.0.0', 24, 'ipv4');
+BLOCKED.addSubnet('192.0.2.0', 24, 'ipv4');
+BLOCKED.addSubnet('198.18.0.0', 15, 'ipv4');
+BLOCKED.addSubnet('198.51.100.0', 24, 'ipv4');
+BLOCKED.addSubnet('203.0.113.0', 24, 'ipv4');
+BLOCKED.addSubnet('224.0.0.0', 4, 'ipv4');
+BLOCKED.addSubnet('240.0.0.0', 4, 'ipv4');
 BLOCKED.addAddress('::1', 'ipv6');
 BLOCKED.addAddress('::', 'ipv6');
+BLOCKED.addSubnet('::', 96, 'ipv6'); // IPv4-compatible (::a.b.c.d)
+BLOCKED.addSubnet('64:ff9b::', 96, 'ipv6'); // NAT64 (embeds an IPv4 address)
+BLOCKED.addSubnet('2002::', 16, 'ipv6'); // 6to4 (embeds an IPv4 address)
 BLOCKED.addSubnet('fc00::', 7, 'ipv6');
+BLOCKED.addSubnet('fec0::', 10, 'ipv6');
 BLOCKED.addSubnet('fe80::', 10, 'ipv6');
+BLOCKED.addSubnet('ff00::', 8, 'ipv6'); // multicast
 
-function isBlockedAddress(address: string): boolean {
+const allowLocalForTests = () =>
+  process.env.GRANTFINDER_TEST_MODE === '1' && process.env.GRANTFINDER_ALLOW_LOCAL_FETCH === '1';
+
+export function isBlockedAddress(address: string): boolean {
   const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address);
   if (mapped) return BLOCKED.check(mapped[1], 'ipv4');
   const family = net.isIP(address);
@@ -57,9 +74,7 @@ export async function checkUrl(url: string): Promise<{ ok: true } | { ok: false;
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return blocked('scheme');
   // Tests serve a fake parish website on localhost. Needs BOTH switches, so a
   // production deploy can never turn SSRF protection off by accident.
-  if (process.env.GRANTFINDER_TEST_MODE === '1' && process.env.GRANTFINDER_ALLOW_LOCAL_FETCH === '1') {
-    return { ok: true };
-  }
+  if (allowLocalForTests()) return { ok: true };
   const host = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
   if (!host || host === 'localhost' || host.endsWith('.localhost') || host === '0.0.0.0') return blocked('localhost');
   if (net.isIP(host)) {
@@ -117,6 +132,37 @@ export interface FetchedPage {
   /** Why nothing came back, in plain English. */
   error?: string;
 }
+
+/**
+ * Connection-time DNS check. checkUrl() validates a hostname before the
+ * request, but the HTTP client resolves it again when connecting; a hostname
+ * that switches to a private address in between (DNS rebinding) would slip
+ * through. This lookup runs for the real connection and refuses private
+ * addresses there, so the address checked is the address used.
+ */
+function safeLookup(
+  hostname: string,
+  options: dnsCallback.LookupOptions,
+  callback: (error: NodeJS.ErrnoException | null, address: string | dnsCallback.LookupAddress[], family?: number) => void,
+): void {
+  dnsCallback.lookup(hostname, { ...options, all: true }, (error, addresses) => {
+    if (error) {
+      callback(error, []);
+      return;
+    }
+    const list = addresses as dnsCallback.LookupAddress[];
+    const blocked = allowLocalForTests() ? undefined : list.find((entry) => isBlockedAddress(entry.address));
+    if (blocked || list.length === 0) {
+      logger.warn('url_blocked', { host: hostname, reason: 'connect_private', address: blocked?.address });
+      callback(Object.assign(new Error(`Blocked: ${hostname} points to a private or local address`), { code: 'EBLOCKED' }), []);
+      return;
+    }
+    if (options.all) callback(null, list);
+    else callback(null, list[0].address, list[0].family);
+  });
+}
+
+const safeAgent = new Agent({ connect: { lookup: safeLookup as never } });
 
 const BROWSER_HEADERS = {
   'user-agent':
@@ -182,7 +228,7 @@ export async function fetchPage(url: string, options: { maxChars?: number; timeo
       if (!check.ok) {
         return { url, finalUrl: current, ok: false, status: null, text: '', links: [], error: urlProblemMessage(check.reason, current) };
       }
-      const response = await fetch(current, { headers: BROWSER_HEADERS, redirect: 'manual', signal: deadline });
+      const response = await undiciFetch(current, { headers: BROWSER_HEADERS, redirect: 'manual', signal: deadline, dispatcher: safeAgent });
       if (response.status >= 300 && response.status < 400) {
         const location = response.headers.get('location');
         if (!location) {
@@ -221,10 +267,12 @@ export async function fetchPage(url: string, options: { maxChars?: number; timeo
     }
     return { url, finalUrl: current, ok: false, status: null, text: '', links: [], error: 'Too many redirects' };
   } catch (error) {
-    const cause = (error as { cause?: { code?: string } }).cause?.code;
+    const cause = (error as { cause?: { code?: string; message?: string } }).cause;
     const message = (error as Error).name === 'TimeoutError'
       ? 'Timed out after 30 seconds'
-      : `${(error as Error).message}${cause ? ` (${cause})` : ''}`;
+      : cause?.code === 'EBLOCKED'
+        ? cause.message || 'Blocked: that address points to a private or local network'
+        : `${(error as Error).message}${cause?.code ? ` (${cause.code})` : ''}`;
     logger.warn('fetch_page_failed', { url: current, error: message });
     return { url, finalUrl: current, ok: false, status: null, text: '', links: [], error: message };
   }

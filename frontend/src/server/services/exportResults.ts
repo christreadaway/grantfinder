@@ -89,7 +89,7 @@ const CSV_HEADER = ['Rank', 'Grant Name', 'Funder', 'Amount', 'Deadline', 'Score
  */
 function csvField(value: unknown): string {
   let text = value === null || value === undefined ? '' : String(value);
-  if (/^[=+@\t\r]/.test(text)) text = `'${text}`;
+  if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
   return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 

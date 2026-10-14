@@ -4,9 +4,8 @@
  * {"detail": "..."} responses with a request id.
  */
 import { authenticate } from './auth';
-import { toHttpError } from './errors';
+import { HttpError, toHttpError } from './errors';
 import { clientIp, errorResponse, jsonResponse, newRequestId, publicOrigin, type RequestContext } from './http';
-import { HttpError } from './errors';
 import { logger } from './log';
 import { Router } from './router';
 import { registerAuthRoutes } from './routes/auth';
@@ -110,7 +109,7 @@ export async function handleRequest(req: Request): Promise<Response> {
     } else {
       logger.info('request_rejected', { request_id: requestId, method: ctx.method, path, user_id: userId, status, detail });
     }
-    response = errorResponse(status, detail, requestId);
+    response = errorResponse(status, detail, requestId, error instanceof HttpError ? error.extra : undefined);
   }
 
   const fields = { request_id: requestId, method: ctx.method, path, status: response.status, ms: Date.now() - started, user_id: userId };

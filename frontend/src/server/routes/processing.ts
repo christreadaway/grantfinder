@@ -186,7 +186,8 @@ async function uploadDocument(ctx: RequestContext): Promise<Response> {
     text_length: text.length,
   };
   logger.info('document_uploaded', { user_id: user.id, filename, type: documentExtension(filename), bytes: entry.size, chars: text.length });
-  return startJob(ctx, PROCESSING_JOB_KINDS.uploadDocument, input);
+  // Several documents may be processing at once; each is its own job.
+  return startJob(ctx, PROCESSING_JOB_KINDS.uploadDocument, input, { exclusiveKey: null });
 }
 
 async function matchGrants(ctx: RequestContext): Promise<Response> {

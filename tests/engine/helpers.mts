@@ -48,6 +48,7 @@ export interface MockClaude {
   reset(): Promise<void>;
   fail(promptId: string, status?: number, type?: string, times?: number): Promise<void>;
   fixtures(map: Record<string, unknown>): Promise<void>;
+  delay(promptId: string, ms: number): Promise<void>;
 }
 
 let mockProcess: ChildProcess | null = null;
@@ -82,6 +83,9 @@ export async function startMock(port = 4000 + Math.floor(Math.random() * 900)): 
     },
     fixtures: async (map) => {
       await post('/__fixtures', map);
+    },
+    delay: async (promptId, ms) => {
+      await post('/__delay', { prompt_id: promptId, ms });
     },
   };
 }

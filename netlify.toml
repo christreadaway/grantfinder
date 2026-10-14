@@ -9,6 +9,10 @@
   command = "npm run build"
   publish = ".next"
 
+[build.environment]
+  # Next.js 16 and the undici HTTP client need Node 20.18+; pin the current LTS.
+  NODE_VERSION = "22"
+
 [functions]
   # Relative to the base directory above.
   directory = "netlify/functions"

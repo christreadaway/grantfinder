@@ -9,6 +9,25 @@ import {
 import api, { onJobProgress } from '@/lib/api';
 
 /** What each busy label means to a person watching the screen. */
+const GAP_STATUS_LABELS: Record<string, string> = {
+  open: 'open',
+  routed: 'asked',
+  answered: 'answered',
+  confirmed_gap: "they don't have it",
+  waived: 'waived',
+};
+
+/** Background job kind -> busy label, to pick a running step back up after a reload. */
+const JOB_BUSY: Record<string, string> = {
+  'writer.grant_spec': 'spec',
+  'writer.analyze': 'analyze',
+  'writer.intake_generate': 'intake',
+  'writer.voice_analyze': 'voice',
+  'writer.draft': 'draft',
+  'writer.refine': 'refine',
+  'writer.score': 'score',
+};
+
 const BUSY_LABELS: Record<string, string> = {
   spec: 'Reading the grant requirements',
   analyze: 'Comparing your profile to what the funder scores',
@@ -64,6 +83,25 @@ function WriterInner() {
   useEffect(() => {
     api.loadToken();
     refresh();
+    // A step started before a reload keeps running on the server: show it and
+    // wait for it, instead of letting a second click start (and pay for) it again.
+    if (appId) {
+      api.listJobs().then(async (jobs) => {
+        const running = jobs.find((job) => job.application_id === appId && (job.status === 'running' || job.status === 'queued'));
+        if (!running) return;
+        setBusy(JOB_BUSY[running.kind] || 'draft');
+        setJobProgress(running.progress);
+        try {
+          await api.waitForJob(running.id, running.kind);
+        } catch (e: any) {
+          setError(e?.response?.data?.detail || e?.message || 'That step failed.');
+        } finally {
+          await refresh();
+          setBusy(null);
+          setJobProgress(null);
+        }
+      }).catch(() => { /* nothing running */ });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appId]);
 
@@ -101,6 +139,7 @@ function WriterInner() {
   const download = async (format: 'docx' | 'md' | 'txt' | 'form_map') => {
     setBusy(`export-${format}`);
     setError(null);
+    setNotice(null);
     try {
       const response = await api.exportApplication(appId!, format);
       const disposition = response.headers['content-disposition'] || '';
@@ -112,6 +151,8 @@ function WriterInner() {
       a.download = filename;
       a.click();
       URL.revokeObjectURL(url);
+      const exportNotice = response.headers['x-grantfinder-notice'];
+      setNotice(exportNotice ? decodeURIComponent(exportNotice) : `Downloaded ${filename}.`);
       await refresh();
     } catch (e: any) {
       // Blob error responses need decoding
@@ -144,6 +185,8 @@ function WriterInner() {
   const blocking = state.open_blocking_gaps || [];
   const intake = state.intake_requests || [];
   const sections = state.sections || [];
+  const missingSections = state.missing_sections || [];
+  const staleIds: string[] = state.stale_section_ids || [];
   const scorecard = state.scorecard;
   const sectionSpecs: Record<string, any> = {};
   (spec?.required_sections || []).forEach((s: any) => { sectionSpecs[s.id] = s; });
@@ -177,19 +220,27 @@ function WriterInner() {
         </div>
       </div>
 
-      {busy && (
-        <div className="sticky top-2 z-10 p-3 rounded bg-[var(--terminal-bg)] border border-gray-800 text-sm flex items-center gap-2" role="status">
-          <Loader2 className="w-4 h-4 animate-spin text-[var(--primary)]" />
-          <span>{BUSY_LABELS[busy] || 'Working'}...{jobProgress ? ` ${jobProgress}` : ''}</span>
+      {(busy || notice || error) && (
+        <div className="sticky top-2 z-10 space-y-2">
+          {busy && (
+            <div className="p-3 rounded bg-[var(--terminal-bg)] border border-gray-800 text-sm flex items-center gap-2" role="status">
+              <Loader2 className="w-4 h-4 animate-spin text-[var(--primary)]" />
+              <span>{BUSY_LABELS[busy] || 'Working'}...{jobProgress ? ` ${jobProgress}` : ''}</span>
+            </div>
+          )}
+          {notice && !busy && (
+            <div className="p-3 rounded bg-green-950 border border-green-800 text-green-300 text-sm flex justify-between gap-4">
+              <span>{notice}</span>
+              <button onClick={() => setNotice(null)} aria-label="Dismiss">×</button>
+            </div>
+          )}
+          {error && !busy && (
+            <div className="p-3 rounded bg-red-950 border border-red-800 text-red-300 text-sm flex justify-between gap-4" role="alert">
+              <span>{error}</span>
+              <button onClick={() => setError(null)} aria-label="Dismiss">×</button>
+            </div>
+          )}
         </div>
-      )}
-
-      {notice && (
-        <div className="p-3 rounded bg-green-900/30 text-green-300 text-sm">{notice}</div>
-      )}
-
-      {error && (
-        <div className="p-3 rounded bg-red-900/30 text-red-300 text-sm" role="alert">{error}</div>
       )}
 
       {/* Stage 1: Grant Spec */}
@@ -304,6 +355,11 @@ function WriterInner() {
                     onClick={() => run('strategy', () => api.confirmStrategy(appId, strategyText))}>
                     {busy === 'strategy' ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Confirm Strategy'}
                   </button>
+                ) : strategyText.trim() && strategyText.trim() !== (app.strategy || '').trim() ? (
+                  <button className="btn btn-primary mt-2" disabled={busy !== null}
+                    onClick={() => run('strategy', () => api.confirmStrategy(appId, strategyText))}>
+                    Save strategy changes (used for the next drafts)
+                  </button>
                 ) : (
                   <p className="text-green-400 text-sm mt-2 flex items-center gap-1"><CheckCircle className="w-4 h-4" /> Strategy confirmed</p>
                 )}
@@ -323,7 +379,7 @@ function WriterInner() {
                 <div>
                   <span className={`uppercase text-xs mr-2 ${g.severity === 'high' ? 'text-red-400' : 'text-yellow-400'}`}>{g.severity}</span>
                   {g.description}
-                  <span className="text-gray-500 ml-2">→ {g.suggested_owner_role || 'unassigned'} · {g.status}</span>
+                  <span className="text-gray-500 ml-2">→ {g.suggested_owner_role || 'unassigned'} · {GAP_STATUS_LABELS[g.status] || g.status}</span>
                   {g.answer && <div className="text-gray-400 text-xs mt-1">Answer: {g.answer}</div>}
                 </div>
                 {['open', 'routed'].includes(g.status) && (
@@ -420,8 +476,20 @@ function WriterInner() {
               {blocking.length} high-severity gap(s) must be answered, marked &quot;don&apos;t have it&quot;, or waived before drafting.
             </p>
           )}
+          {sections.length > 0 && missingSections.length > 0 && (
+            <div className="mb-3 p-3 rounded border border-yellow-800 text-yellow-300 text-sm">
+              Not drafted yet: {missingSections.map((m: any) => m.title).join(', ')}.
+              <button className="btn btn-primary text-xs ml-3" disabled={busy !== null || blocking.length > 0}
+                onClick={() => run('draft', () => api.draftSections(appId, undefined, true))}>
+                Draft missing sections
+              </button>
+            </div>
+          )}
           <button className="btn btn-primary mb-4" disabled={busy !== null || blocking.length > 0}
-            onClick={() => run('draft', () => api.draftSections(appId))}>
+            onClick={() => {
+              if (sections.length > 0 && !window.confirm('Redraft every section from scratch? The current text, including your refinements, is replaced (earlier versions are kept in the history).')) return;
+              run('draft', () => api.draftSections(appId));
+            }}>
             {busy === 'draft' ? <Loader2 className="w-4 h-4 animate-spin" /> : sections.length > 0 ? 'Redraft All Sections' : 'Draft All Sections'}
           </button>
           <div className="space-y-4">
@@ -430,9 +498,15 @@ function WriterInner() {
               return (
                 <div key={s.section_id} className="border border-gray-800 rounded p-3">
                   <div className="flex items-center justify-between mb-2">
-                    <h3 className="font-semibold">{s.title}</h3>
+                    <h3 className="font-semibold">
+                      {s.title}
+                      {staleIds.includes(s.section_id) && (
+                        <span className="ml-2 text-xs text-yellow-400 font-normal">no longer in the requirements (not exported)</span>
+                      )}
+                    </h3>
                     <span className={`text-xs ${s.over_limit ? 'text-red-400' : 'text-gray-500'}`}>
                       {s.word_count} words{specSection?.word_limit ? ` / ${specSection.word_limit} max` : ''}
+                      {specSection?.char_limit ? ` · ${s.char_count} / ${specSection.char_limit} characters` : ''}
                       {s.over_limit && ' — OVER LIMIT'}
                     </span>
                   </div>
@@ -450,12 +524,12 @@ function WriterInner() {
                       {s.compliance_notes.map((note: string, i: number) => <li key={i}>{note}</li>)}
                     </ul>
                   )}
-                  <div className="flex gap-2">
+                  <div className="flex flex-wrap gap-2">
                     <input
                       placeholder='Refine: e.g. "tighten by 40 words", "warm this up", "lead with the outcome"'
                       value={refineInputs[s.section_id] || ''}
                       onChange={(e) => setRefineInputs({ ...refineInputs, [s.section_id]: e.target.value })}
-                      className="flex-1 bg-black/30 border border-gray-700 rounded p-2 text-xs"
+                      className="flex-1 min-w-[12rem] bg-black/30 border border-gray-700 rounded p-2 text-xs"
                     />
                     <button className="btn btn-secondary text-xs" disabled={busy !== null || !(refineInputs[s.section_id] || '').trim()}
                       onClick={() => run('refine', () => api.refineSection(appId, s.section_id, refineInputs[s.section_id]))}>

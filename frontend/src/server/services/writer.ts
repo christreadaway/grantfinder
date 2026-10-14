@@ -510,6 +510,22 @@ export function orderDrafts(drafts: SectionDraft[], spec: GrantSpec | null): Sec
   return [...drafts].sort((a, b) => (order.get(a.section_id) ?? 999) - (order.get(b.section_id) ?? 999));
 }
 
+/**
+ * Drafts measured against the CURRENT requirements. Re-analyzing the grant
+ * (e.g. after pasting the real guidelines) can drop or add sections, so
+ * scoring and export use `current`; `stale` drafts are kept but never
+ * exported, and `missing` sections still need drafting.
+ */
+export function draftsVsSpec(drafts: SectionDraft[], spec: GrantSpec): { current: SectionDraft[]; stale: SectionDraft[]; missing: RequiredSection[] } {
+  const required = new Set(spec.required_sections.map((section) => section.id));
+  const drafted = new Set(drafts.map((draft) => draft.section_id));
+  return {
+    current: orderDrafts(drafts.filter((draft) => required.has(draft.section_id)), spec),
+    stale: drafts.filter((draft) => !required.has(draft.section_id)),
+    missing: spec.required_sections.filter((section) => !drafted.has(section.id)),
+  };
+}
+
 /** Read a grant's guidelines from its website (HTML or PDF, SSRF-safe). Never throws. */
 export async function fetchGuidelines(url: string): Promise<{ ok: boolean; text: string; reason: string }> {
   const page = await fetchPage(normalizeUrl(url), { maxChars: 60000 });

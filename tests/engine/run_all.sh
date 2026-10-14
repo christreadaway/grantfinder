@@ -8,7 +8,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../../frontend" || exit 1
 failed=()
-for suite in foundation deadlines grants processing writer; do
+for suite in foundation deadlines grants processing writer regressions security; do
   echo "== $suite"
   if npx tsx "../tests/engine/$suite.test.mts" > "/tmp/grantfinder-engine-$suite.log" 2>&1; then
     tail -1 "/tmp/grantfinder-engine-$suite.log"
