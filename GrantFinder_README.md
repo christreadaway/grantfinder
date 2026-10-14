@@ -79,51 +79,24 @@ Every match shows: **Score**, **Amount**, **Due Date**, and **Why it fits**.
 
 ### Local Development
 
-```bash
-# Clone the repo
-git clone https://github.com/[your-username]/grantfinder-ai.git
-cd grantfinder-ai
-
-# Backend setup
-cd backend
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-pip install -r requirements.txt
-cp .env.example .env
-# Edit .env with your credentials
-uvicorn main:app --reload
-
-# Frontend setup (new terminal)
-cd frontend
-npm install
-cp .env.example .env.local
-# Edit .env.local with your credentials
-npm run dev
-```
+Step-by-step commands for running on your Mac are at the end of [docs/deployment.md](docs/deployment.md#run-it-on-your-mac-instead).
+In short: the engine runs with `uvicorn main:app --reload` from `backend/`, and the website runs with
+`npm run dev` from `frontend/`. Set `ALLOW_GUEST_LOGIN=true` in `backend/.env` to sign in without Google.
 
 Open [http://localhost:3000](http://localhost:3000)
 
 ### Setup in the App
 
-1. **Sign in with Google**
+1. **Sign in with Google** (or **Continue as guest** when guest sign-in is on)
 2. **Enter your Claude API key** — [Get one from Anthropic](https://console.anthropic.com/)
-3. **Add your website URLs** — Church site and/or school site
-4. **Upload your grant database** — Excel file with opportunities
+3. **Load grants**: the starter database, Grants.gov, AI web discovery, and/or your own Excel file
+4. **Add your website URLs**: church site and/or school site
 5. **Start matching!**
 
-### Deploy to Cloud
+### Deploy to the Web
 
-**Frontend (Vercel):**
-```bash
-cd frontend
-vercel
-```
-
-**Backend (Railway):**
-```bash
-cd backend
-railway up
-```
+The website deploys to **Netlify** and the Python engine to **Railway** (Netlify can't run Python).
+Follow [docs/deployment.md](docs/deployment.md): about 30 minutes, click by click.
 
 ---
 

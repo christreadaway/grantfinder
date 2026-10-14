@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_ID: str = ""
     GOOGLE_CLIENT_SECRET: str = ""
 
+    # Guest sign-in: temporary sessions without Google. Off by default; turn on
+    # to try a fresh deployment before Google sign-in is set up, or for local dev.
+    ALLOW_GUEST_LOGIN: bool = False
+
     # File Upload
     MAX_UPLOAD_SIZE: int = 10 * 1024 * 1024  # 10 MB
     ALLOWED_EXTENSIONS: List[str] = [".pdf", ".docx", ".txt", ".xlsx"]

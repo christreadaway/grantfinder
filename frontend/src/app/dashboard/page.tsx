@@ -40,19 +40,22 @@ export default function Dashboard() {
   const [processingLogs, setProcessingLogs] = useState<ProcessingLog[]>([]);
   const terminalRef = useRef<HTMLDivElement>(null);
 
-  // Check auth status on mount
+  // Every engine call needs a session, so visitors without one go to sign-in
   useEffect(() => {
     const token = api.loadToken();
-    if (!token && !user) {
-      // Demo mode - create fake user
-      setUser({
-        id: 'demo-user',
-        email: 'demo@example.com',
-        name: 'Demo User',
-        claude_api_key_set: false,
-      });
+    if (!token) {
+      router.replace('/');
+      return;
     }
-  }, [user, setUser]);
+    if (!user) {
+      api.getMe()
+        .then(setUser)
+        .catch(() => {
+          api.clearToken();
+          router.replace('/?expired=1');
+        });
+    }
+  }, [user, setUser, router]);
 
   // Auto-scroll terminal
   useEffect(() => {
@@ -257,7 +260,7 @@ export default function Dashboard() {
             <span className="text-xl font-bold">GrantFinder AI</span>
           </div>
           <div className="flex items-center gap-4">
-            <span className="text-sm text-gray-500">{user?.email || 'Demo Mode'}</span>
+            <span className="text-sm text-gray-500">{user?.name || user?.email || ''}</span>
             <button
               onClick={() => {
                 api.clearToken();

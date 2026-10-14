@@ -9,6 +9,46 @@ This file contains a complete history of Claude Code sessions for this repositor
 
 ---
 
+## 2026-10-14 (later) — Web Deploy via Netlify: Fix Sign-In, Deploy Guards, Real Tests
+
+### What We Built
+Chris asked for GrantFinder to web deploy via Netlify. Netlify Functions run JavaScript, TypeScript, and Go only, so the Python engine can't live there: the website deploys to Netlify and the engine to Railway, and visitors only see the Netlify address.
+1. **Found and fixed a dead end:** "Get Started (Demo Mode)" skipped sign-in, but every API route requires a session token, so every action after it failed. Replaced with guest sign-in behind `ALLOW_GUEST_LOGIN` (backend, off by default): `POST /api/auth/guest`, plus public `GET /api/auth/options` so the landing page shows exactly the sign-in methods the backend offers.
+2. **Landing page diagnostics:** shows "Can't reach the GrantFinder engine" with the URL it tried and what to check (API URL, backend up, CORS_ORIGINS with the site's own origin); "Sign-in isn't set up yet" when neither method is on; "half set up" when only Netlify has the Google client ID; sign-in errors shown on screen instead of only the console.
+3. **Expired sessions:** a backend restart (every Railway deploy) wipes in-memory sessions. An axios interceptor now sends any later 401 back to sign-in with "Your session ended..." instead of leaving every button failing. Dashboard sends tokenless visitors to sign-in and restores the user on refresh.
+4. **Deploy guards:** Netlify builds fail with plain-English fixes when `NEXT_PUBLIC_API_URL` is missing or not https; API base URL trailing slashes stripped.
+5. **Railway hardening:** start command `python -m uvicorn ...` (Procfile + guide), `backend/.python-version` 3.13, `main.py` honors `$PORT` and disables reload on platforms, `FORWARDED_ALLOW_IPS=*` so rate limiting sees real client IPs.
+6. **Docs:** `docs/deployment.md` rewritten as a click-by-click guide (secret key, Railway, Netlify, CORS, Google sign-in, troubleshooting table, where logs live, known limits, run-on-Mac); README setup/deploy sections point to it; env examples no longer ship fake Google IDs.
+7. **Committed tests:** `tests/e2e/run_e2e.sh` + `e2e.cjs` (production build, real backend, real browser, different origins; 4 phases, 25 checks) and `backend/tests/check_deadlines.py` (23 checks).
+
+### Technical Details
+- Modified: `backend/config.py`, `backend/routers/auth.py`, `backend/main.py`, `backend/Procfile`, `backend/.env.example`, `frontend/next.config.js`, `frontend/src/lib/api.ts`, `frontend/src/app/page.tsx`, `frontend/src/app/dashboard/page.tsx`, `frontend/.env.example`, `docs/deployment.md`, `GrantFinder_README.md`, `CLAUDE.md`
+- Added: `backend/.python-version`, `backend/tests/check_deadlines.py`, `tests/e2e/{run_e2e.sh,e2e.cjs,package.json,README.md}`
+- Verified: `next build` (Next 16.1.6) passes; Netlify guard tested with missing, http, and https URLs; tsc clean; no new lint findings (17 pre-existing `no-explicit-any`); E2E 25/25 across guest, expired, locked, down; deadline checks 23/23; CORS preflight returns the frontend origin; file log captures guest sign-ins and writer handoffs.
+
+### Current Status
+- ✅ Deploy-ready for Netlify (website) + Railway (engine), with tests proving the cross-origin flow
+- 🚧 The deploy itself needs Chris's Netlify, Railway, and Google Cloud accounts (about 40 minutes, docs/deployment.md)
+- ❌ Data still lives in memory and resets on every engine restart; AI steps not yet validated with a live key
+
+### Branch Info
+- Branch: `claude/relaxed-curie-sj0zvu`
+
+### Decisions Made
+- Netlify for the website, Railway for the engine (no TypeScript rewrite of the engine; revisit only if one platform matters more than the rebuild cost)
+- Guest sign-in exists but is off by default; turn it on only to try a fresh deployment or for local dev
+- No client-side demo mode, ever: it can't work against an authenticated API
+
+### Next Steps
+1. Chris: follow docs/deployment.md (Railway, then Netlify, then CORS, then Google sign-in)
+2. Persistence (Supabase or similar) so sessions and work survive engine restarts
+3. Live-key run of discovery, matching, and the writer pipeline on the deployed site, then add those steps to the E2E test
+
+### Questions/Blockers
+- None in code. Deployment needs Chris's accounts.
+
+---
+
 ## 2026-10-14 — Kenedy Foundation Application Kit + Annual Deadlines
 
 ### What We Built

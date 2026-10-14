@@ -3,7 +3,8 @@
  */
 import axios, { AxiosInstance } from 'axios';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+// A trailing slash would turn every path into "//api/...", which the backend rejects.
+export const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000').replace(/\/+$/, '');
 
 class ApiClient {
   private client: AxiosInstance;
@@ -24,6 +25,26 @@ class ApiClient {
       }
       return config;
     });
+
+    // Sessions live in the backend's memory, so a restart or redeploy ends them.
+    // Any later auth failure sends the user back to sign in with an explanation
+    // instead of leaving every button failing.
+    this.client.interceptors.response.use(
+      (response) => response,
+      (error) => {
+        const status = error?.response?.status;
+        const url: string = error?.config?.url || '';
+        const missingToken = status === 403 && error?.response?.data?.detail === 'Not authenticated';
+        if ((status === 401 || missingToken) && !url.startsWith('/api/auth/') && typeof window !== 'undefined') {
+          console.warn(`[GrantFinder] Session ended (${status} on ${url}); returning to sign-in.`);
+          this.clearToken();
+          if (window.location.pathname !== '/') {
+            window.location.href = '/?expired=1';
+          }
+        }
+        return Promise.reject(error);
+      },
+    );
   }
 
   setToken(token: string) {
@@ -48,8 +69,19 @@ class ApiClient {
   }
 
   // Auth endpoints
+  async getAuthOptions(): Promise<{ google: boolean; guest: boolean }> {
+    const response = await this.client.get('/api/auth/options', { timeout: 15000 });
+    return response.data;
+  }
+
   async googleAuth(credential: string) {
     const response = await this.client.post('/api/auth/google', { credential });
+    this.setToken(response.data.access_token);
+    return response.data;
+  }
+
+  async guestAuth() {
+    const response = await this.client.post('/api/auth/guest');
     this.setToken(response.data.access_token);
     return response.data;
   }

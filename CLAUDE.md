@@ -64,6 +64,14 @@ Last Updated: February 16, 2026
 - **Logging:** file logs at `~/logs/grantfinder/grantfinder.log` (daily rotation, 14 days). Every AI call logged with correlation ID, tokens, latency, cost. Debug bundle: `GET /api/writer/applications/{id}/debug-bundle` returns paste-ready markdown — look there first when something breaks. Set `LOG_LEVEL=debug` for verbose logs.
 - **Model:** set via `CLAUDE_MODEL` env var (default `claude-sonnet-5`). Never hardcode.
 
+## Deployment & Testing
+- **Where it runs:** website (`frontend/`) on **Netlify**; Python engine (`backend/`) on **Railway**. Netlify Functions can't run Python. Click-by-click guide: `docs/deployment.md`.
+- **Netlify build guard:** `frontend/next.config.js` fails Netlify builds when `NEXT_PUBLIC_API_URL` is missing or not `https://`. Don't remove it.
+- **Railway start command:** `python -m uvicorn main:app --host 0.0.0.0 --port $PORT` (also in `backend/Procfile`). One replica, no `--workers`: sessions and data live in memory.
+- **Sign-in:** Google (`GOOGLE_CLIENT_ID` on Railway + `NEXT_PUBLIC_GOOGLE_CLIENT_ID` on Netlify), or guest sign-in when `ALLOW_GUEST_LOGIN=true` on the backend (off by default). There is no client-side demo mode: every API route needs a session token.
+- **Tests (run before pushing UI or auth changes):** `bash tests/e2e/run_e2e.sh` (cross-origin browser test, 25 checks; setup at top of the script) and `python backend/tests/check_deadlines.py` (23 checks).
+- **Local npm installs:** `sfw npm install` (fallback `npm install` if sfw isn't installed). Netlify installs on its own.
+
 ## Branch Rules
 Always work on the main branch. Do not create new branches unless explicitly asked. Commit and push all changes directly to main.
 
