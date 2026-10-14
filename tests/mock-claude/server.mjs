@@ -19,6 +19,8 @@
  *   sk-ant-invalid...   -> 401 authentication_error (messages and models)
  *   sk-ant-nocredit...  -> 400 "credit balance is too low"
  *   sk-ant-overload...  -> 529 overloaded_error on messages
+ *   sk-ant-spendcap...  -> 429 monthly spend cap (error_code enforced_spend_limit_reached)
+ *   sk-ant-userlimit... -> 400 "You have reached your specified API usage limits"
  *
  * Control endpoints:
  *   GET  /__requests            every call received (prompt id, key suffix, prompt text)
@@ -130,6 +132,14 @@ function keyProblem(res, apiKey, forMessages) {
     return apiError(res, 400, 'invalid_request_error', 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.'), true;
   }
   if (forMessages && apiKey.startsWith('sk-ant-overload')) return apiError(res, 529, 'overloaded_error', 'Overloaded'), true;
+  if (forMessages && apiKey.startsWith('sk-ant-spendcap')) {
+    res.writeHead(429, { 'content-type': 'application/json', 'request-id': 'req_mock' });
+    res.end(JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'You have reached your API usage limits: your organization has crossed its monthly API usage threshold.', details: { error_code: 'enforced_spend_limit_reached' } } }));
+    return true;
+  }
+  if (forMessages && apiKey.startsWith('sk-ant-userlimit')) {
+    return apiError(res, 400, 'invalid_request_error', 'You have reached your specified API usage limits. You will regain access on 2026-11-01 at 00:00 UTC.'), true;
+  }
   return false;
 }
 

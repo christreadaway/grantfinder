@@ -15,7 +15,7 @@
 import crypto from 'node:crypto';
 
 import type { Claude } from '../claude';
-import { MAX_QUESTIONNAIRE_QUESTIONS } from '../config';
+import { MAX_QUESTIONNAIRE_QUESTIONS, testMode } from '../config';
 import { deadlinePassed, todayIso } from '../deadlines';
 import { ClaudeError, errorMessage, isFatalClaudeError } from '../errors';
 import { asInt, asNumber, asRecord, asString, asStringList, clamp, extractJsonArray, extractJsonObject } from '../json';
@@ -1024,6 +1024,22 @@ export async function matchGrants(options: MatchRunOptions): Promise<MatchResult
   };
   await Promise.all(Array.from({ length: Math.min(MATCH_CONCURRENCY, batches.length) }, () => worker()));
   if (fatalErrors.length) throw fatalErrors[0];
+
+  // Second chance, one batch at a time, for batches Claude couldn't score
+  // because of a passing problem (rate limit, overload, timeout) that outlasted
+  // the client's own retries. Lower-tier API keys hit this when 4 run at once.
+  const unavailable = `${NOT_AI_SCORED} Claude was unavailable (`;
+  for (let index = 0; index < batches.length; index++) {
+    const result = batchResults[index];
+    if (!result.length || !result.every((match) => match.explanation.startsWith(unavailable))) continue;
+    if (options.startDeadline && Date.now() > options.startDeadline) break;
+    await new Promise((resolve) => setTimeout(resolve, testMode() ? 50 : 15_000));
+    const first = index * MATCH_BATCH_SIZE + 1;
+    await options.progress?.(`Trying grants ${first}-${first + batches[index].length - 1} again...`);
+    options.note?.(`Retrying batch ${index + 1} once after a temporary Claude problem`);
+    batchResults[index] = await scoreGrantBatch(await client(), batches[index], profile, today);
+  }
+
   for (const result of batchResults) matches.push(...result);
 
   matches.sort((a, b) => b.score - a.score);

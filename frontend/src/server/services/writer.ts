@@ -516,13 +516,30 @@ export function orderDrafts(drafts: SectionDraft[], spec: GrantSpec | null): Sec
  * scoring and export use `current`; `stale` drafts are kept but never
  * exported, and `missing` sections still need drafting.
  */
+const titleKey = (title: string) => title.trim().toLowerCase().replace(/\s+/g, ' ');
+
+/**
+ * A draft answers a section only if it was written for that question. Ids
+ * alone aren't enough: re-analyzing the grant numbers sections s1, s2, s3...
+ * again, so a new "s1" can be a different question from the old "s1".
+ */
+export function replacedQuestionMessage(oldTitle: string, newTitle: string): string {
+  return `This draft answers "${oldTitle}", which the current requirements replaced with "${newTitle}". Use Redraft to write the new section first.`;
+}
+
+export function draftFitsSection(draft: SectionDraft, section: RequiredSection | undefined): boolean {
+  return Boolean(section) && titleKey(draft.title) === titleKey((section as RequiredSection).title);
+}
+
 export function draftsVsSpec(drafts: SectionDraft[], spec: GrantSpec): { current: SectionDraft[]; stale: SectionDraft[]; missing: RequiredSection[] } {
-  const required = new Set(spec.required_sections.map((section) => section.id));
-  const drafted = new Set(drafts.map((draft) => draft.section_id));
+  const byId = new Map(spec.required_sections.map((section) => [section.id, section]));
+  const fits = (draft: SectionDraft) => draftFitsSection(draft, byId.get(draft.section_id));
+  const current = drafts.filter(fits);
+  const covered = new Set(current.map((draft) => draft.section_id));
   return {
-    current: orderDrafts(drafts.filter((draft) => required.has(draft.section_id)), spec),
-    stale: drafts.filter((draft) => !required.has(draft.section_id)),
-    missing: spec.required_sections.filter((section) => !drafted.has(section.id)),
+    current: orderDrafts(current, spec),
+    stale: drafts.filter((draft) => !fits(draft)),
+    missing: spec.required_sections.filter((section) => !covered.has(section.id)),
   };
 }
 

@@ -127,5 +127,29 @@ await saveMatchResults({
 const csv = await api('POST', '/api/export', { token, json: { session_id: 'match_20261014T000000000Z_deadbeef', format: 'csv', include_all_matches: true } });
 check('CSV neutralizes cells starting with -, =, @', csv.status === 200 && csv.text.includes("'-2+3") && csv.text.includes("'=HYPERLINK") && csv.text.includes("'@me"), csv.text.slice(0, 400));
 
+// --- 7. Anthropic spending limits fail clearly, with no fallback results
+for (const [key, label] of [['sk-ant-spendcap-test-1', 'monthly spend cap (429)'], ['sk-ant-userlimit-test-1', 'user-set spend limit (400)']]) {
+  const t = await guest();
+  await saveKey(t, key);
+  const q = await api('POST', '/api/discovery/seed', { token: t });
+  void q;
+  let result = await api('POST', '/api/processing/generate-questionnaire', { token: t });
+  if (result.status === 202) {
+    for (let i = 0; i < 300; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const poll = await api('GET', `/api/jobs/${result.data.job_id}`, { token: t });
+      if (poll.data.status === 'done' || poll.data.status === 'failed') {
+        result = poll;
+        break;
+      }
+    }
+  }
+  check(
+    `${label} -> step fails with the billing page named`,
+    result.data?.status === 'failed' && /spending (cap|limit)/.test(result.data.error?.detail) && /settings\/billing/.test(result.data.error?.detail),
+    result.data,
+  );
+}
+
 mock.stop();
 finish();

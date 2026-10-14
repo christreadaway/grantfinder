@@ -55,6 +55,73 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 /** Netlify stops background work at 15 minutes; give polling a little longer. */
 const JOB_POLL_LIMIT_MS = 17 * 60 * 1000;
 
+/** How long a step may go without one successful status check before polling gives up. */
+const LOST_CONTACT_MS = 3 * 60 * 1000;
+
+const NETWORK_MESSAGE =
+  'Lost the connection to GrantFinder. Check your internet, then click the same button again: a step still running is picked back up, not started twice.';
+
+/** Resolves when the browser reports it is back online, or after maxMs (whichever comes first). */
+function waitForOnline(maxMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof window === 'undefined') return resolve();
+    const done = () => {
+      window.removeEventListener('online', done);
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(done, maxMs);
+    window.addEventListener('online', done);
+  });
+}
+
+/**
+ * The sentence to show a person when a call fails: the engine's own detail when
+ * there is one, otherwise a plain explanation (lost connection, timeout, a
+ * Netlify error page) instead of axios's raw "Network Error".
+ */
+export function errorDetail(error: any, fallback: string): string {
+  const detail = error?.response?.data?.detail;
+  if (typeof detail === 'string' && detail.trim()) return detail;
+  if (detail && typeof detail === 'object') {
+    try {
+      return JSON.stringify(detail);
+    } catch {
+      // fall through
+    }
+  }
+  if (error?.code === 'ECONNABORTED' || error?.code === 'ETIMEDOUT') {
+    return 'GrantFinder took too long to answer. Check your internet connection, then click the same button again (a step still running is picked back up, not started twice).';
+  }
+  if (error?.code === 'ERR_NETWORK' || (error?.isAxiosError && !error?.response)) return NETWORK_MESSAGE;
+  const status = error?.response?.status;
+  if (status >= 500) {
+    return `GrantFinder had a problem (HTTP ${status}). Wait a minute and try again. If it keeps happening, use "Copy debug report" and paste it into Claude Code.`;
+  }
+  if (status) return `${fallback} (HTTP ${status})`;
+  return error?.message || fallback;
+}
+
+/** errorDetail for downloads: their error bodies arrive as a Blob that must be read first. */
+export async function blobErrorDetail(error: any, fallback: string): Promise<string> {
+  const data = error?.response?.data;
+  if (data && typeof data.text === 'function') {
+    try {
+      const parsed = JSON.parse(await data.text());
+      if (typeof parsed?.detail === 'string' && parsed.detail.trim()) return parsed.detail;
+    } catch {
+      // Not JSON (e.g. a Netlify error page): fall back to the status.
+    }
+    return errorDetail({ ...error, response: { ...error.response, data: {} } }, fallback);
+  }
+  return errorDetail(error, fallback);
+}
+
+/** True when the engine said the session is over (as opposed to a network blip or a server error). */
+export function isSessionEnded(error: any): boolean {
+  return error?.response?.status === 401;
+}
+
 class ApiClient {
   private client: AxiosInstance;
   private token: string | null = null;
@@ -120,30 +187,46 @@ class ApiClient {
     );
   }
 
-  /** Poll a background job until it is done (returns its result) or failed (throws its detail). */
+  /**
+   * Poll a background job until it is done (returns its result) or failed
+   * (throws its detail). The step runs on the server either way, so a Wi-Fi
+   * drop, a sleeping laptop, or a passing Netlify error only pauses the
+   * checking: polling gives up only after 3 minutes without one good answer
+   * while the browser is online.
+   */
   async waitForJob(jobId: string, kind: string): Promise<unknown> {
     const started = Date.now();
     let delay = 1000;
-    let networkFailures = 0;
+    let lastContact = Date.now();
     console.info(`[GrantFinder] ${kind} started (job ${jobId})`);
     emitProgress({ jobId, kind, status: 'queued', progress: 'Starting...' });
     for (;;) {
-      if (Date.now() - started > JOB_POLL_LIMIT_MS) {
-        throw apiError(504, 'This step is taking much longer than expected. Reload the page in a minute; if it is still not done, use "Copy debug report" and paste it into Claude Code.');
-      }
       await sleep(delay);
       delay = Math.min(3000, delay + 250);
       let job: { status: JobProgress['status']; progress: string | null; result?: unknown; error?: { status: number; detail: string } | null };
       try {
         job = (await this.client.get(`/api/jobs/${jobId}`, { timeout: 20000 })).data;
-        networkFailures = 0;
+        lastContact = Date.now();
       } catch (error) {
         const status = (error as AxiosError)?.response?.status;
-        if (status === 401 || status === 404) throw error;
-        networkFailures += 1;
-        console.warn(`[GrantFinder] Checking ${kind} failed (${networkFailures}/6); retrying.`, error);
-        if (networkFailures >= 6) throw error;
-        continue;
+        if (status === 401 || status === 403 || status === 404) throw error;
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+          console.warn(`[GrantFinder] Offline while ${kind} runs (job ${jobId}); waiting for the connection.`);
+          emitProgress({ jobId, kind, status: 'running', progress: 'Waiting for your internet connection (the step keeps running on the server)...' });
+          await waitForOnline(30000);
+          lastContact = Date.now(); // time offline doesn't count against the step
+          delay = 1000;
+          continue;
+        }
+        const silentMs = Date.now() - lastContact;
+        console.warn(`[GrantFinder] Checking ${kind} failed (no answer for ${Math.round(silentMs / 1000)}s); retrying.`, error);
+        if (silentMs < LOST_CONTACT_MS) {
+          if (silentMs > 15000) {
+            emitProgress({ jobId, kind, status: 'running', progress: 'Having trouble reaching GrantFinder; still checking (the step keeps running on the server)...' });
+          }
+          continue;
+        }
+        throw apiError(503, 'Lost contact with GrantFinder while this step was running. It may still finish: wait a minute, then reload the page or click the same button again (a step still running is picked back up, not started twice).');
       }
       emitProgress({ jobId, kind, status: job.status, progress: job.progress });
       if (job.status === 'done') {
@@ -154,6 +237,9 @@ class ApiClient {
         const detail = job.error?.detail || 'This step failed. Use "Copy debug report" for details.';
         console.error(`[GrantFinder] ${kind} failed (job ${jobId}): ${detail}`);
         throw apiError(job.error?.status || 500, detail);
+      }
+      if (Date.now() - started > JOB_POLL_LIMIT_MS) {
+        throw apiError(504, 'This step is taking much longer than expected. Reload the page in a minute; if it is still not done, use "Copy debug report" and paste it into Claude Code.');
       }
     }
   }
@@ -279,6 +365,17 @@ class ApiClient {
     return response.data;
   }
 
+  /** The last questionnaire Claude wrote for this account, or null (so a reload doesn't pay for a new one). */
+  async getSavedQuestionnaire() {
+    try {
+      const response = await this.client.get('/api/processing/questionnaire');
+      return response.data;
+    } catch (error) {
+      if ((error as AxiosError)?.response?.status === 404) return null;
+      throw error;
+    }
+  }
+
   async uploadDocument(file: File) {
     const formData = new FormData();
     formData.append('file', file);
@@ -395,6 +492,12 @@ class ApiClient {
       `/api/writer/applications/${appId}/sections/${sectionId}/refine`,
       { instruction },
     );
+    return response.data;
+  }
+
+  /** Save a hand edit of one section (limits and banned phrases are re-checked on the server). */
+  async editSection(appId: string, sectionId: string, text: string) {
+    const response = await this.client.put(`/api/writer/applications/${appId}/sections/${sectionId}`, { text });
     return response.data;
   }
 

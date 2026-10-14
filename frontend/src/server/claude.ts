@@ -82,6 +82,12 @@ export interface ClaudeContext {
   jobId?: string | null;
   /** Receives one log entry per call (the job runner stores them on the job). */
   onCall?: (entry: AICallLog) => void;
+  /**
+   * Aborts calls still running when the job nears Netlify's 15-minute limit.
+   * (The SDK timeout only covers waiting for the first response bytes, not a
+   * slow stream.)
+   */
+  signal?: AbortSignal;
 }
 
 function apiMessage(error: InstanceType<typeof Anthropic.APIError>): string {
@@ -92,6 +98,11 @@ function apiMessage(error: InstanceType<typeof Anthropic.APIError>): string {
 function apiErrorType(error: InstanceType<typeof Anthropic.APIError>): string {
   const body = error.error as { error?: { type?: string } } | undefined;
   return body?.error?.type || '';
+}
+
+function apiErrorCode(error: InstanceType<typeof Anthropic.APIError>): string {
+  const body = error.error as { error?: { details?: { error_code?: string } } } | undefined;
+  return body?.error?.details?.error_code || '';
 }
 
 /** Remove anything that looks like an API key (some client errors quote the header). */
@@ -105,6 +116,14 @@ export function translateClaudeError(error: unknown, model: string): ClaudeError
 
 function translateClaudeErrorRaw(error: unknown, model: string): ClaudeError {
   if (error instanceof ClaudeError) return error;
+  if (error instanceof Anthropic.APIUserAbortError) {
+    return new ClaudeError(
+      'timeout',
+      504,
+      'Claude was still working when this step reached its time limit. Run it again; work that finished was saved.',
+      false,
+    );
+  }
   if (error instanceof Anthropic.AuthenticationError) {
     return new ClaudeError(
       'auth',
@@ -131,6 +150,14 @@ function translateClaudeErrorRaw(error: unknown, model: string): ClaudeError {
   }
   if (error instanceof Anthropic.BadRequestError) {
     const message = apiMessage(error);
+    if (/specified (workspace )?API usage limits/i.test(message)) {
+      return new ClaudeError(
+        'billing',
+        400,
+        `Your Anthropic account hit a spending limit that was set on it (${message}). Raise it at platform.claude.com/settings/billing, then try again.`,
+        true,
+      );
+    }
     if (/credit balance|billing|purchase credits/i.test(message)) {
       return new ClaudeError(
         'billing',
@@ -142,6 +169,15 @@ function translateClaudeErrorRaw(error: unknown, model: string): ClaudeError {
     return new ClaudeError('bad_request', 400, `Claude rejected the request: ${message}`, true);
   }
   if (error instanceof Anthropic.RateLimitError) {
+    if (apiErrorCode(error) === 'enforced_spend_limit_reached') {
+      // Monthly spend cap: retrying can't help until the cap is raised or the month turns.
+      return new ClaudeError(
+        'billing',
+        400,
+        `Your Anthropic account reached its monthly API spending cap (${apiMessage(error)}). Raise it at platform.claude.com/settings/billing, then try again.`,
+        true,
+      );
+    }
     return new ClaudeError('rate_limit', 429, 'Claude rate limit reached for your API key. Wait a minute and try again.', false);
   }
   if (error instanceof Anthropic.APIConnectionTimeoutError) {
@@ -194,7 +230,10 @@ export class Claude {
     const started = Date.now();
     const messages: MessageParam[] = [{ role: 'user', content: options.prompt }];
     const content: ContentBlock[] = [];
-    const maxTokens = Math.min(64000, Math.max(options.maxTokens ?? 4000, 1000) + 12000);
+    // Adaptive thinking shares max_tokens with the answer. Streaming means a
+    // high ceiling costs nothing (only generated tokens are billed, and
+    // max_tokens doesn't count toward rate limits), so leave generous room.
+    const maxTokens = Math.min(64000, Math.max(options.maxTokens ?? 4000, 1000) + 32000);
     const maxContinuations = options.maxContinuations ?? 5;
     let inputTokens = 0;
     let outputTokens = 0;
@@ -212,7 +251,10 @@ export class Claude {
             ...(options.system ? { system: options.system } : {}),
             ...(options.tools?.length ? { tools: options.tools } : {}),
           },
-          testMode() ? { headers: { 'x-grantfinder-prompt-id': options.promptId } } : undefined,
+          {
+            ...(this.ctx.signal ? { signal: this.ctx.signal } : {}),
+            ...(testMode() ? { headers: { 'x-grantfinder-prompt-id': options.promptId } } : {}),
+          },
         );
         const message = await stream.finalMessage();
         inputTokens += message.usage?.input_tokens ?? 0;

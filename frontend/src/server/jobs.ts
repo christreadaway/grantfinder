@@ -18,7 +18,7 @@ import { JOB_MAX_RUNTIME_MS, JOB_START_GRACE_MS, onNetlify, secretKey } from './
 import { HttpError, toHttpError } from './errors';
 import { jsonResponse, type RequestContext } from './http';
 import { logger } from './log';
-import { keyPart, kv, sortableId, update } from './store';
+import { getMany, keyPart, kv, sortableId, update } from './store';
 import type { AICallLog } from './types';
 
 export type JobStatus = 'queued' | 'running' | 'done' | 'failed';
@@ -206,19 +206,23 @@ export async function dispatchJob(job: Job, origin: string): Promise<void> {
   }
   // The deploy's own address (Netlify sets DEPLOY_URL/URL for functions), never
   // the request's Host header, so a crafted Host can't redirect this call.
-  const base = (process.env.GRANTFINDER_JOBS_ORIGIN || process.env.DEPLOY_URL || process.env.URL || origin).replace(/\/+$/, '');
+  const base = (process.env.GRANTFINDER_JOBS_ORIGIN || process.env.DEPLOY_URL || origin).replace(/\/+$/, '');
   const url = `${base}${BACKGROUND_FUNCTION_PATH}`;
   try {
     const response = await fetch(url, {
       method: 'POST',
+      // A redirect would turn this POST into a body-less GET that "succeeds"
+      // without starting anything; only a real 202 from the worker counts.
+      redirect: 'manual',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ user_id: job.user_id, job_id: job.id, signature: signJob(job.user_id, job.id) }),
       signal: AbortSignal.timeout(15000),
     });
-    if (response.status !== 202 && !response.ok) {
-      throw new Error(`HTTP ${response.status} from ${url}`);
+    if (response.status !== 202) {
+      const location = response.headers.get('location');
+      throw new Error(`HTTP ${response.status}${location ? ` (redirect to ${location})` : ''} from ${url}`);
     }
-    logger.info('job_dispatched', { job_id: job.id, kind: job.kind, status: response.status });
+    logger.info('job_dispatched', { job_id: job.id, kind: job.kind, status: response.status, url });
   } catch (error) {
     const message = (error as Error).message;
     logger.error('job_dispatch_failed', { job_id: job.id, kind: job.kind, url, error: message });
@@ -268,6 +272,7 @@ export async function startJob(
 
 /** Run a queued job. Safe to call twice: only the first caller claims it. */
 export async function runJob(userId: string, jobId: string): Promise<void> {
+  const invokedAt = Date.now();
   const key = jobKey(userId, jobId);
   const claim = crypto.randomBytes(8).toString('hex');
   const startedAt = new Date().toISOString();
@@ -282,6 +287,19 @@ export async function runJob(userId: string, jobId: string): Promise<void> {
 
   const { JOB_HANDLERS } = await import('./jobHandlers');
   const handler = JOB_HANDLERS[claimed.kind];
+  // Stop Claude calls a little before Netlify's 15-minute cutoff so the job
+  // can still save what finished and report what didn't.
+  const hardStop = AbortSignal.timeout(Math.max(30_000, invokedAt + JOB_MAX_RUNTIME_MS - 75_000 - Date.now()));
+  // Heartbeat: shows the job is alive even during one long Claude call, so a
+  // job whose worker died is detected in minutes, not after 16.
+  const heartbeat = setInterval(() => {
+    update<Job>(key, (job) => {
+      if (!job || job.claim !== claim || job.status !== 'running') return undefined;
+      return { ...job, updated_at: new Date().toISOString() };
+    }).catch(() => {
+      // Best effort.
+    });
+  }, 45_000);
   const aiCalls: AICallLog[] = [];
   const notes: string[] = [];
   let lastProgressWrite = 0;
@@ -310,6 +328,7 @@ export async function runJob(userId: string, jobId: string): Promise<void> {
         correlationId: claimed.correlation_id,
         applicationId: claimed.application_id,
         jobId,
+        signal: hardStop,
         onCall: (entry) => aiCalls.push(entry),
       });
     },
@@ -346,6 +365,7 @@ export async function runJob(userId: string, jobId: string): Promise<void> {
   try {
     if (!handler) throw new Error(`No handler registered for job kind "${claimed.kind}"`);
     const result = await handler(ctx);
+    clearInterval(heartbeat);
     if (progressTimer) clearTimeout(progressTimer);
     const finishedAt = new Date().toISOString();
     await update<Job>(key, (job) => {
@@ -365,6 +385,7 @@ export async function runJob(userId: string, jobId: string): Promise<void> {
     const cost = aiCalls.reduce((sum, call) => sum + call.cost_estimate_usd, 0);
     logger.info('job_done', { job_id: jobId, kind: claimed.kind, ms: Date.now() - t0, ai_calls: aiCalls.length, cost_usd: Number(cost.toFixed(4)) });
   } catch (error) {
+    clearInterval(heartbeat);
     if (progressTimer) clearTimeout(progressTimer);
     const { status, detail } = toHttpError(error, jobId);
     const raw = error instanceof Error ? `${error.name}: ${error.message}\n${(error.stack || '').split('\n').slice(1, 8).join('\n')}` : String(error);
@@ -402,13 +423,17 @@ export async function runJob(userId: string, jobId: string): Promise<void> {
 /** Jobs that died without reporting (crash, 15-minute cutoff, lost dispatch) read as failed. */
 function withStaleCheck(job: Job): Job {
   const now = Date.now();
-  if (job.status === 'running' && job.started_at && now - Date.parse(job.started_at) > JOB_MAX_RUNTIME_MS + 60_000) {
+  const tooLong = job.started_at !== null && now - Date.parse(job.started_at) > JOB_MAX_RUNTIME_MS + 60_000;
+  const silent = now - Date.parse(job.updated_at) > 3 * 60_000; // no heartbeat for 3 minutes
+  if (job.status === 'running' && (tooLong || silent)) {
     return {
       ...job,
       status: 'failed',
       error: {
         status: 504,
-        detail: 'This step ran out of time (the background worker stops after 15 minutes). Try again: finished drafts were saved, and drafting again does the missing sections first.',
+        detail: tooLong
+          ? 'This step ran out of time (the background worker stops after 15 minutes). Try it again; anything that finished was saved (drafting again does the missing sections first).'
+          : 'The background worker stopped unexpectedly during this step. Try it again; anything that finished was saved. If it repeats, use "Copy debug report".',
       },
     };
   }
@@ -447,6 +472,6 @@ export async function getJob(userId: string, jobId: string): Promise<Job | null>
 /** Most recent jobs first. */
 export async function listJobs(userId: string, limit = 20): Promise<Job[]> {
   const keys = (await kv().list(jobsPrefix(userId))).slice(-limit).reverse();
-  const jobs = await Promise.all(keys.map((key) => kv().get<Job>(key)));
-  return jobs.filter((job): job is Job => job !== null).map(withStaleCheck);
+  const jobs = await getMany<Job>(keys);
+  return jobs.map(withStaleCheck);
 }

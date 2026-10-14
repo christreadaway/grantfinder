@@ -247,9 +247,32 @@ export async function fetchPage(url: string, options: { maxChars?: number; timeo
       if (declared > MAX_BYTES) {
         return { url, finalUrl: current, ok: false, status: response.status, text: '', links: [], error: 'Page is too large to read' };
       }
-      const buffer = new Uint8Array(await response.arrayBuffer());
-      if (buffer.byteLength > MAX_BYTES) {
+      // Read with a running cap: a server can omit content-length and stream forever.
+      const chunks: Uint8Array[] = [];
+      let received = 0;
+      let tooLarge = false;
+      if (response.body) {
+        const reader = response.body.getReader();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          received += value.byteLength;
+          if (received > MAX_BYTES) {
+            tooLarge = true;
+            await reader.cancel().catch(() => undefined);
+            break;
+          }
+          chunks.push(value);
+        }
+      }
+      if (tooLarge) {
         return { url, finalUrl: current, ok: false, status: response.status, text: '', links: [], error: 'Page is too large to read' };
+      }
+      const buffer = new Uint8Array(received);
+      let offset = 0;
+      for (const chunk of chunks) {
+        buffer.set(chunk, offset);
+        offset += chunk.byteLength;
       }
       const type = (response.headers.get('content-type') || '').toLowerCase();
       let text = '';

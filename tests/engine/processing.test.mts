@@ -854,7 +854,8 @@ check(
 await mock.reset();
 
 const beforeFailures = (await api('GET', '/api/processing/match-results/latest', { token: tokenA })).data.session_id;
-await mock.fail('grant_match_batch_v1', 529, 'overloaded_error', 10);
+// Overloaded for the whole run: the first pass and the one retry pass both fail.
+await mock.fail('grant_match_batch_v1', 529, 'overloaded_error', 100);
 const busy = await call('POST', '/api/processing/match-grants', { token: tokenA });
 const unscored = busy.data?.matches?.filter((m: Json) => m.score_tier !== 'not_eligible') ?? [];
 check(
@@ -864,6 +865,19 @@ check(
       m.score === 50 && m.score_tier === 'possible' && m.evidence.length === 0) &&
     busy.data.not_eligible === 4 && byId(busy.data, 'grant_pt_04').explanation === 'This grant is marked CLOSED in the database.',
   busy.data?.matches?.slice(0, 2),
+);
+await mock.reset();
+
+// A passing overload: both batches fail all 3 client attempts (6 calls), then
+// the one-batch-at-a-time retry pass scores them for real.
+await mock.fail('grant_match_batch_v1', 529, 'overloaded_error', 6);
+const recovered = await call('POST', '/api/processing/match-grants', { token: tokenA });
+const stillUnscored = (recovered.data?.matches ?? []).filter((m: Json) => String(m.explanation).startsWith('Not AI-scored: Claude was unavailable'));
+const retryReport = (await api('GET', '/api/debug/report', { token: tokenA })).text;
+check(
+  'a passing overload during matching is retried: every grant gets a real score, and the debug report says so',
+  recovered.status === 200 && stillUnscored.length === 0 && /Retrying batch \d+ once after a temporary Claude problem/.test(retryReport),
+  [stillUnscored.length, retryReport.slice(0, 300)],
 );
 await mock.reset();
 

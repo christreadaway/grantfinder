@@ -11,7 +11,7 @@
  * Only the web route imports this module: it pulls in the `docx` package,
  * which the background worker must not bundle (see jobHandlers.ts).
  */
-import { Document, HeadingLevel, Packer, PageBreak, Paragraph, TextRun } from 'docx';
+import type { Paragraph, TextRun } from 'docx';
 
 import { todayIso } from '../deadlines';
 import type { Application, GrantSpec, RequiredSection, SectionDraft, WriterExportFormat } from '../types';
@@ -101,22 +101,32 @@ export function buildFormMap(app: Application, spec: GrantSpec, drafts: SectionD
 }
 
 /** One paragraph's runs; single newlines become line breaks, as python-docx's run.text does. */
-function bodyRuns(text: string): TextRun[] {
-  return text.split('\n').map((line, index) => new TextRun({ text: line, size: 22, break: index > 0 ? 1 : undefined }));
+/** Control characters (and U+FFFE/U+FFFF) make Word refuse to open the file. */
+const WORD_INVALID = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g;
+
+export function wordSafe(text: string): string {
+  return text.replace(WORD_INVALID, '');
+}
+
+function bodyRuns(docx: typeof import('docx'), text: string): TextRun[] {
+  return wordSafe(text).split('\n').map((line, index) => new docx.TextRun({ text: line, size: 22, break: index > 0 ? 1 : undefined }));
 }
 
 /** Clean, formatted Word document ready to attach (mirrors the python-docx layout). */
 export async function buildDocx(app: Application, spec: GrantSpec, drafts: SectionDraft[]): Promise<Uint8Array> {
+  // Loaded on first use, so requests that never export a .docx start faster.
+  const docx = await import('docx');
+  const { Document, HeadingLevel, Packer, PageBreak, Paragraph, TextRun } = docx;
   const children: Paragraph[] = [
-    new Paragraph({ text: app.grant_name, heading: HeadingLevel.TITLE }),
+    new Paragraph({ text: wordSafe(app.grant_name), heading: HeadingLevel.TITLE }),
     new Paragraph({
-      children: [new TextRun({ text: `Funder: ${app.funder}    Deadline: ${app.deadline || 'Check guidelines'}`, italics: true })],
+      children: [new TextRun({ text: wordSafe(`Funder: ${app.funder}    Deadline: ${app.deadline || 'Check guidelines'}`), italics: true })],
     }),
   ];
   for (const d of ordered(drafts, spec)) {
-    children.push(new Paragraph({ text: d.title, heading: HeadingLevel.HEADING_1 }));
+    children.push(new Paragraph({ text: wordSafe(d.title), heading: HeadingLevel.HEADING_1 }));
     for (const para of d.current_draft.split('\n\n')) {
-      if (para.trim()) children.push(new Paragraph({ children: bodyRuns(para.trim()) }));
+      if (para.trim()) children.push(new Paragraph({ children: bodyRuns(docx, para.trim()) }));
     }
   }
   const checklist = submissionChecklist(spec);

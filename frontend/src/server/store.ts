@@ -123,6 +123,9 @@ class BlobsKV implements KV {
     const result = etag
       ? await this.store.setJSON(key, value, { onlyIfMatch: etag })
       : await this.store.setJSON(key, value, { onlyIfNew: true });
+    // The Blobs client reports any non-412 answer (e.g. a 503) as modified,
+    // with no ETag; a real save always returns one.
+    if (result.modified && !result.etag) throw new Error(`Netlify Blobs did not confirm saving ${key}`);
     return result.modified;
   }
 
@@ -273,7 +276,8 @@ export async function update<T>(
     const next = await fn(draft);
     if (next === undefined) return value;
     if (value !== null && etag === null) {
-      // Storage returned no version tag; fall back to a plain write.
+      // Storage returned no version tag even from a listing; fall back to a plain write.
+      logger.warn('store_update_without_etag', { key });
       await store.set(key, next);
       return next;
     }

@@ -76,7 +76,10 @@ function basicWebSearchTool(maxUses: number): Tool {
 
 /** Web searches Claude ran: the usage counter, or the search blocks if usage is missing. */
 function countSearches(response: ClaudeCallResult): number {
-  const blocks = response.content.filter((block) => block.type === 'server_tool_use').length;
+  // Dynamic-filtering web search also emits code-execution tool blocks; only count searches.
+  const blocks = response.content.filter(
+    (block) => block.type === 'server_tool_use' && (block as { name?: string }).name === 'web_search',
+  ).length;
   return Math.max(response.webSearches, blocks);
 }
 

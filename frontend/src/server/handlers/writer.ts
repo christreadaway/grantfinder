@@ -27,7 +27,9 @@ import {
   generateIntakePackets,
   loadApplication,
   loadWriterProfile,
+  draftFitsSection,
   draftsVsSpec,
+  replacedQuestionMessage,
   refineSection,
   scoreDraft,
   WRITER_MESSAGES,
@@ -231,19 +233,21 @@ async function draftJob(ctx: JobContext): Promise<unknown> {
   const onlyMissing = (input(ctx) as { only_missing?: unknown }).only_missing === true;
   // Earlier drafts, so a redraft keeps the replaced text in the section's history.
   const priorDrafts = new Map((await listSectionDrafts(ctx.userId, app.id)).map((draft) => [draft.section_id, draft]));
+  // Sections that already have a draft written for the CURRENT question.
+  const covered = new Set(draftsVsSpec([...priorDrafts.values()], spec).current.map((draft) => draft.section_id));
   let targets = spec.required_sections;
   if (onlySection) {
     targets = spec.required_sections.filter((section) => section.id === onlySection);
     if (!targets.length) throw new HttpError(404, WRITER_MESSAGES.draftSectionNotInSpec);
   } else if (onlyMissing) {
-    targets = spec.required_sections.filter((section) => !priorDrafts.has(section.id));
+    targets = spec.required_sections.filter((section) => !covered.has(section.id));
     if (!targets.length) return { sections: [], note: 'Every required section already has a draft.' };
   }
   const analysis = await getFitAnalysis(ctx.userId, app.id);
   const confirmedGaps = gaps.filter((gap) => gap.status === 'confirmed_gap');
 
   // Sections that have no draft yet go first, so a run cut short still fills the holes.
-  const existing = new Set(priorDrafts.keys());
+  const existing = covered;
   const queue = [...targets.filter((s) => !existing.has(s.id)), ...targets.filter((s) => existing.has(s.id))];
 
   const run = runFor(ctx, await ctx.claude());
@@ -391,6 +395,7 @@ async function refineJob(ctx: JobContext): Promise<unknown> {
   if (!spec || !draft) throw new HttpError(404, WRITER_MESSAGES.sectionDraftNotFound);
   const section = spec.required_sections.find((s) => s.id === sectionId);
   if (!section) throw new HttpError(404, WRITER_MESSAGES.sectionNotInSpec);
+  if (!draftFitsSection(draft, section)) throw new HttpError(409, replacedQuestionMessage(draft.title, section.title));
 
   await ctx.progress(`Revising "${draft.title}"...`);
   const run = runFor(ctx, await ctx.claude());

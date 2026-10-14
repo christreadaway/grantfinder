@@ -94,11 +94,18 @@ export function extractJson<T = unknown>(text: string | null | undefined, kind: 
   const whole = /^[[{]/.test(trimmed) ? tryParseRepaired(trimmed) : tryParse(trimmed);
   if (whole.ok && matchesKind(whole.value, kind)) return whole.value as T;
 
+  // Prefer the largest fenced block that parses: a short example fence can
+  // come before the real answer.
   const fence = /```(?:json|JSON)?\s*([\s\S]*?)```/g;
+  let bestFence: { value: unknown; length: number } | null = null;
   for (let match = fence.exec(text); match; match = fence.exec(text)) {
-    const parsed = tryParseRepaired(match[1].trim());
-    if (parsed.ok && matchesKind(parsed.value, kind)) return parsed.value as T;
+    const body = match[1].trim();
+    const parsed = tryParseRepaired(body);
+    if (parsed.ok && matchesKind(parsed.value, kind) && (!bestFence || body.length > bestFence.length)) {
+      bestFence = { value: parsed.value, length: body.length };
+    }
   }
+  if (bestFence) return bestFence.value as T;
 
   let best: { value: unknown; length: number } | null = null;
   let attempts = 0;

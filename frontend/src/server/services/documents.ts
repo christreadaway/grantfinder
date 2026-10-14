@@ -6,7 +6,6 @@
  * unreadable or empty document is reported at once with a clear 400.
  * Imports mammoth, so background job handlers must never import this file.
  */
-import mammoth from 'mammoth';
 
 import { ALLOWED_DOCUMENT_EXTENSIONS } from '../config';
 import { HttpError } from '../errors';
@@ -54,7 +53,10 @@ async function docxText(content: Uint8Array, filename: string): Promise<string> 
   // A small .docx built to inflate to gigabytes would exhaust memory inside mammoth.
   assertZipWithinLimits(content);
   try {
-    const result = await mammoth.extractRawText({ buffer: Buffer.from(content) });
+    // Loaded on first use, so requests that never read a .docx start faster.
+    const loaded = await import('mammoth');
+    const extractRawText = loaded.default?.extractRawText ?? loaded.extractRawText;
+    const result = await extractRawText({ buffer: Buffer.from(content) });
     return result.value;
   } catch (error) {
     logger.warn('document_docx_unreadable', { filename, error: shortReason(error) });

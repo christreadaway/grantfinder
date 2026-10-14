@@ -11,7 +11,7 @@
  */
 import crypto from 'node:crypto';
 
-import { Workbook, type Cell, type CellValue, type Row, type Worksheet } from 'exceljs';
+import type { Cell, CellValue, Row, Worksheet } from 'exceljs';
 
 import { HttpError } from '../errors';
 import { assertZipWithinLimits } from '../zipguard';
@@ -463,6 +463,9 @@ export async function parseGrantWorkbook(content: Uint8Array, userId: string): P
   // A 4 MB workbook built to inflate to gigabytes would exhaust memory inside exceljs.
   assertZipWithinLimits(content);
 
+  // Loaded on first use: exceljs is large, and most requests never read a workbook.
+  const exceljs = await import('exceljs');
+  const Workbook = exceljs.Workbook ?? (exceljs as unknown as { default: typeof exceljs }).default.Workbook;
   const workbook = new Workbook();
   try {
     await workbook.xlsx.load(Buffer.from(content.buffer, content.byteOffset, content.byteLength) as unknown as Parameters<typeof workbook.xlsx.load>[0]);

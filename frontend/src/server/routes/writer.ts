@@ -34,7 +34,9 @@ import {
   loadApplication,
   loadWriterProfile,
   newId,
+  draftFitsSection,
   draftsVsSpec,
+  replacedQuestionMessage,
   orderDrafts,
   withUrgency,
   WRITER_MESSAGES,
@@ -365,7 +367,10 @@ async function draftSectionsRoute(ctx: RequestContext): Promise<Response> {
     throw new HttpError(404, WRITER_MESSAGES.draftSectionNotInSpec);
   }
   await requireApiKey(user.id);
-  return startJob(ctx, 'writer.draft', { app_id: app.id, section_id: sectionId || null, only_missing: onlyMissing }, jobOptions(app));
+  return startJob(ctx, 'writer.draft', { app_id: app.id, section_id: sectionId || null, only_missing: onlyMissing }, {
+    ...jobOptions(app),
+    exclusiveKey: `writer.sections:${app.id}`,
+  });
 }
 
 // =============================================================================
@@ -394,11 +399,14 @@ async function refineSectionRoute(ctx: RequestContext): Promise<Response> {
   const sectionId = ctx.params.sectionId;
   const [spec, draft] = await Promise.all([getGrantSpec(user.id, app.grant_id), getSectionDraft(user.id, app.id, sectionId)]);
   if (!spec || !draft) throw new HttpError(404, WRITER_MESSAGES.sectionDraftNotFound);
-  if (!spec.required_sections.some((section) => section.id === sectionId)) throw new HttpError(404, WRITER_MESSAGES.sectionNotInSpec);
+  const section = spec.required_sections.find((item) => item.id === sectionId);
+  if (!section) throw new HttpError(404, WRITER_MESSAGES.sectionNotInSpec);
+  if (!draftFitsSection(draft, section)) throw new HttpError(409, replacedQuestionMessage(draft.title, section.title));
   await requireApiKey(user.id);
+  // Drafting and refining write the same section records, so they never run at once.
   return startJob(ctx, 'writer.refine', { app_id: app.id, section_id: sectionId, instruction }, {
     ...jobOptions(app),
-    exclusiveKey: `writer.refine:${app.id}:${sectionId}`,
+    exclusiveKey: `writer.sections:${app.id}`,
   });
 }
 
