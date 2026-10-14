@@ -50,6 +50,11 @@ export async function isSafeUrl(url: string): Promise<boolean> {
     logger.warn('url_blocked', { url, reason: 'scheme' });
     return false;
   }
+  // Tests serve a fake parish website on localhost. Needs BOTH switches, so a
+  // production deploy can never turn SSRF protection off by accident.
+  if (process.env.GRANTFINDER_TEST_MODE === '1' && process.env.GRANTFINDER_ALLOW_LOCAL_FETCH === '1') {
+    return true;
+  }
   const host = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
   if (!host || host === 'localhost' || host.endsWith('.localhost') || host === '0.0.0.0') {
     logger.warn('url_blocked', { url, reason: 'localhost' });
