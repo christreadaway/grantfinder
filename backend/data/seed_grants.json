@@ -272,15 +272,15 @@
       "grant_name": "Kenedy Memorial Foundation Grants",
       "funder": "The John G. and Marie Stella Kenedy Memorial Foundation",
       "category": "mixed",
-      "deadline": "Check website",
-      "amount": "Varies",
-      "description": "Supports Catholic charitable, educational, and religious organizations in Texas, with emphasis on South Texas and the Diocese of Corpus Christi.",
-      "contact": "Via website",
-      "url": "https://www.kenedy.org",
-      "status": "Check deadline",
+      "deadline": "Annual: October 15",
+      "amount": "Typically $6,000 to $50,000 (2024 median about $25,000). Catholic requests over $50,000 need a three-fourths Board vote and are not favored.",
+      "description": "Funds Catholic and non-sectarian charities in Texas only. About 70% of discretionary Catholic grants go to South Texas; the rest to other Texas dioceses. Catholic education is the top priority, including tuition assistance for South Texas Catholic schools and for Catholic schools with demonstrated need elsewhere in Texas. Favors seed money with wide ripple effects. Core values: breaking the cycle of poverty, developing the Catholic faith, supporting Catholic institutions, and collaborative partnerships. The Board decides in May on applications received by October 15.",
+      "contact": "Online only: pass the Eligibility Quiz linked from the Application Process page, then apply in the portal. Do not contact Board members about a request.",
+      "url": "https://kenedy.org/grants/application-process/",
+      "status": "OPEN",
       "geo_qualified": "Yes - TX Only",
-      "eligibility_notes": "Texas Catholic organizations; priority to South Texas.",
-      "funds_for": ["education", "ministry", "capital"]
+      "eligibility_notes": "501(c)(3) listed in IRS Publication 78 or the Official Catholic Directory; funds used only in Texas. A parish school applies separately from its parish; one application per organization every 12 months; Catholic applicants check diocesan protocol first. Not funded: completed projects, debt or deficits, political activity, scholarships or grants to individuals; endowments disfavored. Required uploads (Exhibits A-H): IRS letter or Official Catholic Directory page, charter and bylaws (new applicants), board list with minutes authorizing the request, funding summary, detailed budget (three years for ongoing programs), financial statements, Form 990, and a litigation disclosure. Final Grant Status Report due within 12 months of funding.",
+      "funds_for": ["education", "tuition_assistance", "programs", "capital", "ministry", "emergency_relief"]
     },
     {
       "grant_name": "Scanlan Foundation Grants",

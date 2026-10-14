@@ -8,6 +8,7 @@ import httpx
 from bs4 import BeautifulSoup
 import logging
 import json
+import re
 import uuid
 import ipaddress
 import socket
@@ -27,6 +28,12 @@ logger = logging.getLogger(__name__)
 
 # US states whose orgs satisfy "Yes - TX Only" grants
 TX_STATE_VALUES = {"TX", "TEXAS"}
+
+# Recurring yearly deadlines, e.g. "Annual: October 15" (foundation cycles)
+ANNUAL_DEADLINE_RE = re.compile(
+    r"^annual(?:ly)?\s*[:,-]?\s*(?P<month>[a-z]+)\.?\s+(?P<day>\d{1,2})$",
+    re.IGNORECASE,
+)
 
 # Paths worth crawling on a parish/school website, in priority order
 PRIORITY_PATH_KEYWORDS = [
@@ -610,7 +617,12 @@ Return ONLY the JSON object, no other text."""
 
     @staticmethod
     def _parse_deadline(deadline: str) -> Optional[Any]:
-        """Parse a deadline string into a date if it looks like one."""
+        """Parse a deadline string into a date if it looks like one.
+
+        A recurring deadline ("Annual: October 15") resolves to its next
+        occurrence on or after today, so a yearly funder is never filtered
+        out as expired and the writer's urgency flag fires every cycle.
+        """
         if not deadline:
             return None
         text = str(deadline).strip()
@@ -619,6 +631,20 @@ Return ONLY the JSON object, no other text."""
                 return datetime.strptime(text, fmt).date()
             except ValueError:
                 continue
+        annual = ANNUAL_DEADLINE_RE.match(text)
+        if annual:
+            today = datetime.utcnow().date()
+            for year in (today.year, today.year + 1):
+                for fmt in ("%B %d %Y", "%b %d %Y"):
+                    try:
+                        due = datetime.strptime(
+                            f"{annual['month']} {annual['day']} {year}", fmt
+                        ).date()
+                    except ValueError:
+                        continue
+                    if due >= today:
+                        return due
+            logger.debug("Unparseable annual deadline: %s", text)
         return None
 
     async def _score_grant_batch(

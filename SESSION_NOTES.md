@@ -3,9 +3,49 @@
 **Repository:** `grantfinder`  
 **Total Sessions Logged:** 3  
 **Date Range:** 2025-02-01 to 2025-02-02  
-**Last Updated:** 2026-02-16 at 14:48 UTC
+**Last Updated:** 2026-10-14
 
 This file contains a complete history of Claude Code sessions for this repository, automatically generated from transcript files. Sessions are listed in reverse chronological order (most recent first).
+
+---
+
+## 2026-10-14 — Kenedy Foundation Application Kit + Annual Deadlines
+
+### What We Built
+Chris asked whether GrantFinder can write grants, and for help with a Kenedy Memorial Foundation application due Oct 15, 2026.
+1. **Capability answer:** yes. The GrantWriter module (built 2026-07-10) is real and wired: the backend boots with 42 API paths, 15 of them writer endpoints. It has never run against a live Claude key, storage is in-memory, and it isn't deployed, so for a next-day deadline the writing was done directly in-session with the same method (grant spec, fit/gap, honesty ledger, intake, draft, self-score, adversarial review).
+2. **Kenedy application kit** (a Claude Doc, kept outside the repo): 24-hour checklist, eligibility traps, strategy and honesty ledger, paste-ready portal answers (Organization Information and Grant Project Data), Plan B and Plan C swap-ins, Exhibits A-H tracker with status dropdowns, exhibit templates (C resolution, D funding summary, E three-year budget, G no-990 statement, H litigation disclosure), fact sheet, sources.
+3. **Strategy:** recommended Phase 2 of the school's Notre Dame DELTA-funded AI formation pilot ($45,000, with a $25,000 fallback): partner Texas Catholic schools including South Texas, a free summer institute, Spanish family materials, free K-8 materials. Tuition assistance held as Plan B because a high-performing school has a weak "demonstrated need" case; capital as Plan C.
+4. **Kenedy seed record corrected** in `backend/data/seed_grants.json`: annual Oct 15 deadline, $50,000 soft cap and ~$25,000 median, exclusions, Exhibits A-H, application-process URL, OPEN status.
+5. **Annual deadline support:** `AIService._parse_deadline` now resolves "Annual: October 15" to its next occurrence, so yearly funders are never filtered out as expired and the writer's urgency flag fires every cycle.
+
+### Technical Details
+- Modified: `backend/services/ai_service.py` (`ANNUAL_DEADLINE_RE`, `_parse_deadline`), `backend/data/seed_grants.json` (Kenedy record).
+- Verified with a 23-check ad-hoc script (not committed): annual parsing incl. year rollover, Feb 29, abbreviations, bogus months; seed JSON validity and load; TX prefilter pass and non-TX disqualify; Kenedy not expired after Oct 15; writer urgency flag true on Oct 14.
+- Found: the "16-check offline writer pipeline test" cited in earlier notes is not committed to the repo.
+
+### Current Status
+- ✅ Backend boots; writer routes registered; annual deadlines verified
+- ✅ Kenedy kit complete, names kept as placeholders per PII rules
+- 🚧 The application itself: Chris fills the fact sheet, calls the diocese and Foundation, gets board authorization, submits by 3 p.m. Oct 15
+- ❌ GrantWriter still not validated with a live Claude key; storage still in-memory
+
+### Branch Info
+- Branch: `claude/relaxed-curie-sj0zvu` (the session's designated branch; CLAUDE.md's "work on main" rule conflicts, so the designated branch was kept and Chris merges online)
+
+### Decisions Made
+- Recommend AI formation Phase 2 over tuition assistance for Kenedy (reasons above)
+- Keep all school, parish, and staff names as placeholders in the kit; one find-and-replace before pasting
+- Recurring deadlines are written as "Annual: Month Day" in seed data
+
+### Next Steps
+1. Commit a pytest suite for the writer pipeline and deadline parsing (the earlier 16-check test isn't in the repo)
+2. Live-key validation of the GrantWriter pipeline, using the Kenedy kit as the benchmark case
+3. Funder templates: store a funder's required portal sections and exhibits (like Kenedy's A-H) so the Grant Spec stage uses them verbatim
+4. Supabase persistence
+
+### Questions/Blockers
+- None for the code. For the application: diocesan protocol and the Foundation's answers on Exhibits C, G, and H depend on Chris's calls.
 
 ---
 
