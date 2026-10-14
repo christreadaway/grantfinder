@@ -44,6 +44,7 @@ export default function Dashboard() {
   const [discoveredTotal, setDiscoveredTotal] = useState(0);
   const [discoveryStatus, setDiscoveryStatus] = useState<string | null>(null);
   const [discoveryBusy, setDiscoveryBusy] = useState<string | null>(null);
+  const [discoveryFocus, setDiscoveryFocus] = useState('');
   const [churchUrl, setChurchUrl] = useState('');
   const [schoolUrl, setSchoolUrl] = useState('');
   const [websiteScanned, setWebsiteScanned] = useState(false);
@@ -205,8 +206,11 @@ export default function Dashboard() {
         result = await api.searchGrantsGov();
         setDiscoveryStatus(`Grants.gov: found ${result.found}, added ${result.added} new (${result.total_grants} total).`);
       } else {
-        result = await api.webDiscovery();
+        result = await api.webDiscovery(discoveryFocus.trim() || undefined);
         setDiscoveryStatus(`AI web discovery: found ${result.found}, added ${result.added} new (${result.total_grants} total).`);
+      }
+      if (Array.isArray(result.notes) && result.notes.length) {
+        setDiscoveryStatus((status) => `${status} ${result.notes.join(' ')}`);
       }
       setDiscoveredTotal(result.total_grants);
     } catch (error: any) {
@@ -628,6 +632,14 @@ export default function Dashboard() {
                 </button>
               </div>
 
+              <input
+                type="text"
+                value={discoveryFocus}
+                onChange={(e) => setDiscoveryFocus(e.target.value)}
+                placeholder="Optional focus for AI web discovery, e.g. teacher training in AI, playground equipment"
+                className="input mb-6 text-sm"
+              />
+
               {discoveryBusy && (
                 <div className="mb-6 p-3 rounded bg-[var(--terminal-bg)] text-sm flex items-center gap-2" role="status">
                   <Loader2 className="w-4 h-4 animate-spin text-[var(--primary)]" />
@@ -653,8 +665,10 @@ export default function Dashboard() {
                 onDrop={(e) => {
                   e.preventDefault();
                   const file = e.dataTransfer.files[0];
-                  if (file?.name.endsWith('.xlsx') || file?.name.endsWith('.xls')) {
+                  if (file && /\.xlsx?$/i.test(file.name)) {
                     setGrantFile(file);
+                  } else if (file) {
+                    setStepError(`${file.name} is not an Excel file. Save it as .xlsx and try again.`);
                   }
                 }}
               >

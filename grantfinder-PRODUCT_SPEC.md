@@ -2,7 +2,7 @@
 
 **Repository:** `grantfinder`  
 **Filename:** `grantfinder-PRODUCT_SPEC.md`  
-**Last Updated:** 2026-02-16 at 15:10 UTC
+**Last Updated:** 2026-10-14
 
 ---
 
@@ -16,7 +16,10 @@
 
 ## Tech Stack
 
-Grant database, search, tracking
+Grant database, search, tracking. One Next.js 16 + TypeScript app deployed entirely on Netlify:
+website, engine API at `/api/*` (`frontend/src/server`), a background function for AI jobs, and
+Netlify Blobs storage. The `backend/` items in the history below describe the original Python
+engine, which is now reference only. Current architecture: `docs/engine.md`.
 
 ---
 
@@ -44,6 +47,10 @@ The following features have been implemented based on development sessions:
 18. Successfully built Next.js frontend production application
 19. [Checked git status and found recently created markdown file]
 20. âœ“ Built complete MVP - FastAPI backend with auth, grants, processing, profile, and export routers; Next.js frontend with dark mode, setup wizard, and terminal UI
+21. Grant discovery: curated starter database, live Grants.gov search, and AI web discovery, merged with deduplication (`docs/grant-discovery.md`)
+22. GrantWriter (v2.0 application writer): requirements, fit/gap analysis, stakeholder intake, voice-conditioned drafting, rubric self-scoring, refinement, and Word/Markdown/portal exports with human approval gates (`docs/grant-writer.md`)
+23. Recurring "Annual: October 15" deadlines and the Kenedy Memorial Foundation record in the starter database
+24. October 2026: moved everything onto Netlify. The engine was ported to TypeScript (`frontend/src/server`), AI steps run as background jobs, data and sign-ins persist in Netlify Blobs, and the dashboard resumes saved work (`docs/engine.md`, `docs/deployment.md`)
 
 ---
 

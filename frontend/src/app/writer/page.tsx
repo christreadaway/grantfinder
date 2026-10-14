@@ -70,9 +70,12 @@ function WriterInner() {
   const run = async (label: string, fn: () => Promise<any>) => {
     setBusy(label);
     setError(null);
+    setNotice(null);
     setJobProgress(null);
     try {
-      await fn();
+      const result = await fn();
+      // e.g. "Could not read <url> (HTTP 403); requirements were inferred. Paste the guidelines..."
+      if (result?.note) setNotice(result.note);
     } catch (e: any) {
       console.error(`[GrantFinder] writer step "${label}" failed:`, e);
       setError(e?.response?.data?.detail || e?.message || `${label} failed`);
@@ -216,6 +219,12 @@ function WriterInner() {
                 <span className="ml-2 text-yellow-400">rubric INFERRED — verify against actual guidelines</span>
               )}
             </div>
+            {spec.rubric_source === 'inferred' && (
+              <p className="text-yellow-300">
+                These requirements were inferred, not read from the funder&apos;s guidelines. For an exact
+                spec, paste the guidelines below and re-analyze.
+              </p>
+            )}
             <ul className="list-disc ml-5 text-gray-300">
               {spec.required_sections.map((s: any) => (
                 <li key={s.id}>
@@ -230,6 +239,19 @@ function WriterInner() {
             {spec.deliverables.length > 0 && (
               <p className="text-gray-400">Deliverables: {spec.deliverables.join(' · ')}</p>
             )}
+            <details open={spec.rubric_source === 'inferred'}>
+              <summary className="cursor-pointer text-gray-400">Paste guidelines and re-analyze</summary>
+              <textarea
+                value={guidelines}
+                onChange={(e) => setGuidelines(e.target.value)}
+                placeholder="Paste guidelines / RFP text here..."
+                className="w-full h-32 bg-black/30 border border-gray-700 rounded p-3 text-sm my-2"
+              />
+              <button className="btn btn-secondary" disabled={busy !== null || !guidelines.trim()}
+                onClick={() => run('spec', () => api.enrichGrantSpec(appId, guidelines))}>
+                {busy === 'spec' ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Re-analyze Requirements'}
+              </button>
+            </details>
           </div>
         )}
       </div>
@@ -257,6 +279,14 @@ function WriterInner() {
                   </div>
                 ))}
               </div>
+              <button className="text-xs text-gray-400 hover:underline" disabled={busy !== null}
+                onClick={() => {
+                  if (window.confirm('Re-running the fit analysis replaces the current gap list. Answers you recorded stay in your profile and are used in the new analysis. Continue?')) {
+                    run('analyze', () => api.analyzeFit(appId));
+                  }
+                }}>
+                Re-run fit analysis (after adding answers or documents)
+              </button>
               {analysis.honesty_ledger.length > 0 && (
                 <div className="text-sm text-gray-300">
                   <span className="font-semibold">Name honestly (don&apos;t hide):</span> {analysis.honesty_ledger.join(' · ')}
@@ -415,6 +445,11 @@ function WriterInner() {
                   {s.banned_phrase_hits.length > 0 && (
                     <p className="text-red-400 text-xs mb-2">Banned phrases present: {s.banned_phrase_hits.join(', ')}</p>
                   )}
+                  {(s.compliance_notes || []).length > 0 && (
+                    <ul className="text-gray-500 text-xs mb-2 list-disc ml-4">
+                      {s.compliance_notes.map((note: string, i: number) => <li key={i}>{note}</li>)}
+                    </ul>
+                  )}
                   <div className="flex gap-2">
                     <input
                       placeholder='Refine: e.g. "tighten by 40 words", "warm this up", "lead with the outcome"'
@@ -425,6 +460,11 @@ function WriterInner() {
                     <button className="btn btn-secondary text-xs" disabled={busy !== null || !(refineInputs[s.section_id] || '').trim()}
                       onClick={() => run('refine', () => api.refineSection(appId, s.section_id, refineInputs[s.section_id]))}>
                       {busy === 'refine' ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Wand2 className="w-3 h-3" /> Refine</>}
+                    </button>
+                    <button className="btn btn-secondary text-xs" disabled={busy !== null || blocking.length > 0}
+                      title="Write this section again from scratch"
+                      onClick={() => run('draft', () => api.draftSections(appId, s.section_id))}>
+                      Redraft
                     </button>
                   </div>
                 </div>

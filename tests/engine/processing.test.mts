@@ -623,8 +623,10 @@ check(
 );
 const txtJob = await storedJob(userC, txt.jobId);
 check(
-  'document job input: id, filename, text (no API key)',
-  txtJob?.kind === 'processing.upload_document' && txtJob.input.filename === 'bulletin.txt' && txtJob.input.text.includes('roof') && !JSON.stringify(txtJob.input).includes('sk-ant-'),
+  'finished document job keeps the file name but not the document text (and never the API key)',
+  txtJob?.kind === 'processing.upload_document' && txtJob.input.filename === 'bulletin.txt' &&
+    /characters, not kept/.test(String(txtJob.input.text)) && !String(txtJob.input.text).includes('roof') &&
+    !JSON.stringify(txtJob.input).includes('sk-ant-'),
   txtJob?.input,
 );
 

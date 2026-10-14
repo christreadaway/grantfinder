@@ -48,6 +48,11 @@ whole application takes minutes. So every Claude call runs as a **job**:
 - **Storage**: `repo.ts` for grants, foundations, profile, match results, applications;
   `store.ts` `kv()` and `update()` for anything else. Use `update()` (compare-and-swap)
   for read-modify-write, never get-then-set, because jobs run concurrently.
+  Two Netlify Blobs details live in `store.ts` and must stay: the client gets a
+  fetch that reads every response fully (inside Netlify functions, cancelling an
+  unread 404 body never settles, so lookups of missing keys hung), and when a read
+  carries no ETag (Netlify's local sandbox) the version tag comes from a listing
+  taken before the re-read, so compare-and-swap still works.
 - **Logging**: `logger.info/warn/error(event, fields)` from `log.ts`: one JSON line per
   event. Every Claude call is logged automatically with tokens, latency, cost, and the
   correlation id, and stored on its job.
@@ -67,7 +72,7 @@ whole application takes minutes. So every Claude call runs as a **job**:
 | `auth.ts` | Session tokens (HS256, 30 days), users, AES-256-GCM API key storage, rate limits |
 | `store.ts` | Netlify Blobs / local file key-value store with safe `update()` |
 | `repo.ts` | Storage layout and accessors for shared records |
-| `jobs.ts` | Job records, dispatch to the background function, runner, stale-job detection |
+| `jobs.ts` | Job records, dispatch to the background function, runner, stale-job detection; finished jobs keep only a summary of their input (document text and pasted guidelines are not stored) |
 | `jobHandlers.ts` | Registry of every job kind → handler (`handlers/*.ts`) |
 | `claude.ts` | Claude client: streaming, pause_turn, logging, error translation, prices |
 | `json.ts` | Lenient JSON extraction from model output and coercion helpers |
@@ -91,6 +96,23 @@ writer/{userId}/...               writer artifacts (grant specs, fit analyses, g
 jobs/{userId}/{jobId}             Job (input, status, result, error, AI call log, notes)
 ratelimit/{bucket}/{ipHash}       sign-in rate-limit window
 ```
+
+## Tests
+
+```bash
+cd ~/grantfinder
+bash tests/engine/run_all.sh      # 406 checks: foundation, deadlines, grants, processing, writer
+bash tests/e2e/run_e2e.sh         # real browser through the whole journey on a production build
+```
+
+The engine suites call `handleRequest()` in-process with a mock Claude
+(`tests/mock-claude/server.mjs`, answers in `tests/mock-claude/fixtures/*.json`, keyed by
+prompt id) and a throwaway data folder. Mock keys `sk-ant-invalid…`, `sk-ant-nocredit…`, and
+`sk-ant-overload…` simulate Anthropic failures; `/__fail` forces errors per prompt.
+
+To exercise the real Netlify runtime (background function + Blobs) on a Mac, install the
+Netlify CLI and run `netlify build` then `netlify serve` against a copy of `frontend/` with
+its own `netlify.toml` (the CLI's local server mishandles the repo's `base = "frontend"`).
 
 ## Debugging
 

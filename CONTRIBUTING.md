@@ -11,32 +11,28 @@ Thank you for your interest in contributing to GrantFinder AI! This project help
 
 ## Development Setup
 
-### Backend (Python/FastAPI)
-
-```bash
-cd backend
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-pip install -r requirements.txt
-cp .env.example .env
-# Edit .env with your credentials
-uvicorn main:app --reload
-```
-
-### Frontend (Next.js)
+The website and the engine are one Next.js app in `frontend/` (the engine is TypeScript in
+`frontend/src/server`; see `docs/engine.md`). The old Python engine in `backend/` is reference only.
 
 ```bash
 cd frontend
 npm install
 cp .env.example .env.local
-# Edit .env.local with your credentials
+# Optional: edit .env.local (guest sign-in is on by default)
 npm run dev
+```
+
+Run the tests before opening a pull request:
+
+```bash
+bash tests/engine/run_all.sh   # engine suites, mock Claude, no API key needed
+bash tests/e2e/run_e2e.sh      # browser test of the whole journey (setup at the top of the script)
 ```
 
 ## Code Style
 
-- **Python**: Follow PEP 8 guidelines
-- **TypeScript/JavaScript**: Follow ESLint configuration
+- **TypeScript/JavaScript**: Follow ESLint configuration (`npx eslint src/server` must stay clean)
+- **Python** (legacy `backend/` only): Follow PEP 8 guidelines
 - **Commits**: Use clear, descriptive commit messages
 
 ## Pull Request Process

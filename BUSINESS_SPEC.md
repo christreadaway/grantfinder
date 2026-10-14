@@ -54,30 +54,30 @@ An AI-powered grant matching platform that builds a comprehensive profile of a C
 - **JSON** — Machine-readable format for integrations
 
 ## 5. Tech Stack
-- **Backend:** Python FastAPI
-- **Frontend:** Next.js 14+ with TypeScript
+- **Engine:** TypeScript API routes inside the Next.js app (`frontend/src/server`) plus a Netlify background function for long AI work (the original Python FastAPI engine in `backend/` is reference only)
+- **Frontend:** Next.js 16 with TypeScript
+- **Hosting & storage:** Netlify (website, API, background jobs) and Netlify Blobs (data)
 - **AI:** Claude API (Anthropic) for questionnaire generation, document extraction, profile generation, and grant matching
-- **Auth:** Google OAuth with JWT tokens
-- **Security:** Fernet encryption for API keys
-- **Document Processing:** PDF (pdfplumber), DOCX (python-docx), TXT
+- **Auth:** Google OAuth (or temporary guest sign-in) with signed session tokens
+- **Security:** AES-256-GCM encryption for API keys
+- **Document Processing:** PDF (unpdf), DOCX (mammoth), TXT
 - **Excel Parsing:** 5-category parser with flexible column mapping
 - **State:** Zustand (frontend)
 
 ## 6. Data & Privacy
-- API keys encrypted with Fernet + PBKDF2
+- API keys encrypted with AES-256-GCM (key derived from the site's SECRET_KEY)
 - Organization profiles stored server-side with user auth
 - Grant databases are non-sensitive public/semi-public information
-- Document uploads processed and text extracted — originals not retained long-term
+- Document uploads processed and text extracted — the files themselves are not stored
 - Google OAuth — no password storage
 
 ## 7. Current Status
-- **Built:** Complete backend (FastAPI) with all routes and services
-- **Built:** Complete frontend (Next.js) with setup wizard, profile builder, matching results
-- **Built:** AI service integration with Claude API
-- **Built:** 5-category Excel parser
-- **Branch:** claude/review-spec-v2.6-rG8EQ
-- **Not Tested:** End-to-end flow with real data
-- **Not Deployed:** Needs production environment
+- **Built:** Complete engine in TypeScript (ported from the original FastAPI backend) with all routes and services
+- **Built:** Complete frontend (Next.js) with setup wizard, profile builder, matching results, and the GrantWriter
+- **Built:** AI service integration with Claude API (background jobs, cost and token logging)
+- **Built:** 5-category Excel parser, starter database, Grants.gov search, AI web discovery
+- **Tested:** 406 automated engine checks with a mock Claude, a browser test of the whole journey, and a local run on the Netlify runtime
+- **Deploy:** Netlify only (`docs/deployment.md`); a live-key run with real data is the next milestone
 
 ## 8. Business Model
 - **Free Tier:** Manual grant database, basic profile, limited matches

@@ -14,7 +14,8 @@ Product builder, not a coder. I bring requirements and vision — you handle imp
 
 ## Tech Stack
 - **Category:** School
-- **Details:** Check repo for current implementation
+- **Details:** One Next.js 16 + TypeScript app in `frontend/`, deployed entirely on **Netlify**: website (`frontend/src/app/`), engine API at `/api/*` (`frontend/src/server/`), a background function for AI jobs (`frontend/netlify/functions/`), and Netlify Blobs for storage. Claude via `@anthropic-ai/sdk`. How it fits together: `docs/engine.md`.
+- **Legacy:** `backend/` is the original Python FastAPI engine, kept only as the reference the TypeScript engine was ported from. It is not deployed; don't add features there.
 
 ## File Paths
 - **Always use:** `~/grantfinder/`
@@ -52,25 +53,27 @@ git push
 - Top 3 next steps for the next session
 
 ---
-Last Updated: February 16, 2026
+Last Updated: October 14, 2026
 
 
 ## GrantWriter Module (Application Writer)
-- **Where it lives:** `backend/routers/writer.py`, `backend/services/writer_service.py`, `backend/services/writer_export.py`, `backend/models/writer_schemas.py`, `frontend/src/app/writer/`. Full docs: `docs/grant-writer.md`.
-- **Single source of truth:** the writer READS and EXTENDS the existing org profile (`state.profiles_db`) and grant records (`routers/grants.grants_db`). Never duplicate them. An application is just `{user, grant_id}` + writer artifacts.
-- **AI orchestration map (one purpose-built prompt per stage):** Extract (`grant_spec_v1`, `voice_profile_v1`) → Map (`fit_gap_v1`) → Route (`intake_packets_v1`) → Draft (`section_draft_v1`) → Score (`self_score_v1`) → Refine (`section_refine_v1`) → Enforce (`voice_enforce_v1`). All in `writer_service.py`.
+- **Where it lives:** `frontend/src/server/services/writer.ts` (stages, prompts, compliance), `services/writerRepo.ts` (storage), `services/writerExport.ts` (docx/md/txt/form map), `routes/writer.ts`, `handlers/writer.ts` (background jobs), UI in `frontend/src/app/writer/`. Full docs: `docs/grant-writer.md`.
+- **Single source of truth:** the writer READS and EXTENDS the existing org profile (`repo.ts` `getProfile`/`updateProfile`) and grant records (`repo.ts` grants; `getGrantOrFoundation` in `services/ai.ts` also opens foundations). Never duplicate them. An application is just `{user, grant_id}` + writer artifacts.
+- **AI orchestration map (one purpose-built prompt per stage):** Extract (`grant_spec_v1`, `voice_profile_v1`) → Map (`fit_gap_v1`) → Route (`intake_packets_v1`) → Draft (`section_draft_v1`) → Score (`self_score_v1`) → Refine (`section_refine_v1`) → Enforce (`voice_enforce_v1`). All in `services/writer.ts`. Other prompt ids: `website_scan_v1`, `questionnaire_v1`, `document_signals_v1`, `grant_match_batch_v1` (`services/ai.ts`), `web_discovery_v1` (`services/discovery.ts`).
 - **Human approval gates (never bypass):** (1) strategy confirmation before drafting, (2) stakeholder emails are copy-paste only — never auto-sent, (3) export is an explicit user action — nothing is ever auto-submitted to a funder.
 - **Hard rules in code:** never fabricate (unsupported claims get flagged); never export over-limit or banned-phrase content; high-severity gaps block drafting until answered/confirmed/waived.
-- **Logging:** file logs at `~/logs/grantfinder/grantfinder.log` (daily rotation, 14 days). Every AI call logged with correlation ID, tokens, latency, cost. Debug bundle: `GET /api/writer/applications/{id}/debug-bundle` returns paste-ready markdown — look there first when something breaks. Set `LOG_LEVEL=debug` for verbose logs.
+- **Logging:** one JSON line per event (`frontend/src/server/log.ts`): Netlify > Logs > Functions when deployed, plus `~/logs/grantfinder/grantfinder.log` locally (daily rotation, 14 days). Every AI call is logged with correlation ID, tokens, latency, cost, and stored on its background job. Look first at the dashboard's **Copy debug report** (`GET /api/debug/report`) or the writer's **Copy debug bundle** (`GET /api/writer/applications/{id}/debug-bundle`): both are paste-ready markdown. Set `LOG_LEVEL=debug` for verbose logs.
 - **Model:** set via `CLAUDE_MODEL` env var (default `claude-sonnet-5`). Never hardcode.
 
 ## Deployment & Testing
-- **Where it runs:** website (`frontend/`) on **Netlify**; Python engine (`backend/`) on **Railway**. Netlify Functions can't run Python. Click-by-click guide: `docs/deployment.md`.
-- **Netlify build guard:** `frontend/next.config.js` fails Netlify builds when `NEXT_PUBLIC_API_URL` is missing or not `https://`. Don't remove it.
-- **Railway start command:** `python -m uvicorn main:app --host 0.0.0.0 --port $PORT` (also in `backend/Procfile`). One replica, no `--workers`: sessions and data live in memory.
-- **Sign-in:** Google (`GOOGLE_CLIENT_ID` on Railway + `NEXT_PUBLIC_GOOGLE_CLIENT_ID` on Netlify), or guest sign-in when `ALLOW_GUEST_LOGIN=true` on the backend (off by default). There is no client-side demo mode: every API route needs a session token.
-- **Tests (run before pushing UI or auth changes):** `bash tests/e2e/run_e2e.sh` (cross-origin browser test, 25 checks; setup at top of the script) and `python backend/tests/check_deadlines.py` (23 checks).
+- **Where it runs:** everything on **Netlify** (no other host). `netlify.toml` builds `frontend/`. Click-by-click guide: `docs/deployment.md`.
+- **Long AI work = background jobs:** Netlify stops normal functions at 60 seconds, so every Claude call runs in `frontend/netlify/functions/grantfinder-jobs-background.mts` (15-minute limit). Routes check everything they can, then answer `202 {job_id}`; `frontend/src/lib/api.ts` polls `GET /api/jobs/{id}` automatically. Never call Claude inside a route handler.
+- **Storage:** Netlify Blobs (store `grantfinder`) via `frontend/src/server/store.ts`; locally JSON files in `frontend/.data/`. Data and sign-ins survive deploys. Use `update()` (compare-and-swap) for read-modify-write. Keep the buffered `blobsFetch` in `store.ts`: without it, Blobs lookups of missing keys hang inside Netlify functions.
+- **Netlify build guard:** `frontend/next.config.js` fails Netlify builds when `SECRET_KEY` is missing or shorter than 32 characters. Don't remove it.
+- **Sign-in:** Google (`NEXT_PUBLIC_GOOGLE_CLIENT_ID` in Netlify; the engine reads the same value), or guest sign-in when `ALLOW_GUEST_LOGIN=true` (off by default). Every API route except health, sign-in (`/api/auth/options`, `/google`, `/guest`), and `/api/export/formats` needs a session token. Sessions last 30 days.
+- **Tests (run before pushing):** `bash tests/engine/run_all.sh` (406 checks: foundation, deadlines, grants, processing, writer; mock Claude, no key needed) and `bash tests/e2e/run_e2e.sh` (real browser through the whole journey on a production build; setup at the top of the script).
 - **Local npm installs:** `sfw npm install` (fallback `npm install` if sfw isn't installed). Netlify installs on its own.
+- **Run it locally:** `cd ~/grantfinder/frontend && cp .env.example .env.local && npm run dev`, then open http://localhost:3000 (guest sign-in is on in `.env.example`).
 
 ## Branch Rules
 Always work on the main branch. Do not create new branches unless explicitly asked. Commit and push all changes directly to main.

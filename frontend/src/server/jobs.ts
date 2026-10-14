@@ -46,6 +46,21 @@ export interface Job {
   finished_at: string | null;
 }
 
+/**
+ * Finished jobs keep a short summary of their input instead of the input
+ * itself: uploaded document text and pasted guidelines are not stored
+ * after the step that needed them is done. Short values (ids, file names,
+ * instructions) stay, so debug reports still show what was asked.
+ */
+export function summarizeInput(input: unknown): unknown {
+  if (typeof input === 'string') return input.length > 300 ? `(${input.length.toLocaleString('en-US')} characters, not kept)` : input;
+  if (Array.isArray(input)) return input.length > 20 ? `(${input.length} items, not kept)` : input.map(summarizeInput);
+  if (input && typeof input === 'object') {
+    return Object.fromEntries(Object.entries(input as Record<string, unknown>).map(([key, value]) => [key, summarizeInput(value)]));
+  }
+  return input;
+}
+
 /** What the website sees when it polls. */
 export interface PublicJob {
   id: string;
@@ -271,7 +286,17 @@ export async function runJob(userId: string, jobId: string): Promise<void> {
     const finishedAt = new Date().toISOString();
     await update<Job>(key, (job) => {
       if (!job || job.claim !== claim) return undefined;
-      return { ...job, status: 'done', result: result ?? null, progress: null, ai_calls: [...aiCalls], notes: [...notes], updated_at: finishedAt, finished_at: finishedAt };
+      return {
+        ...job,
+        status: 'done',
+        input: summarizeInput(job.input),
+        result: result ?? null,
+        progress: null,
+        ai_calls: [...aiCalls],
+        notes: [...notes],
+        updated_at: finishedAt,
+        finished_at: finishedAt,
+      };
     });
     const cost = aiCalls.reduce((sum, call) => sum + call.cost_estimate_usd, 0);
     logger.info('job_done', { job_id: jobId, kind: claimed.kind, ms: Date.now() - t0, ai_calls: aiCalls.length, cost_usd: Number(cost.toFixed(4)) });
@@ -288,6 +313,7 @@ export async function runJob(userId: string, jobId: string): Promise<void> {
         return {
           ...job,
           status: 'failed',
+          input: summarizeInput(job.input),
           error: { status, detail: friendly },
           error_debug: raw.slice(0, 4000),
           progress: pendingProgress,

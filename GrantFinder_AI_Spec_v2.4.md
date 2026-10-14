@@ -102,7 +102,7 @@ When the app is doing work, display a **terminal-style interface** showing real-
 │ GrantFinder AI — Scanning Website                           │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
-│ [14:32:01] Connecting to https://sttheresa.org...          │
+│ [14:32:01] Connecting to https://yourparish.org...         │
 │ [14:32:02] ✓ Found homepage                                │
 │ [14:32:03] Scanning /about...                              │
 │ [14:32:04] ✓ Extracted: Parish founded 1978                │
@@ -242,7 +242,7 @@ User uploads actual parish/school documents. AI extracts grant-relevant informat
 After gathering all inputs, AI synthesizes a **Parish Profile** and shows it to the user for review:
 
 ```
-PARISH PROFILE — St. Theresa Catholic Church & School
+PARISH PROFILE — [Parish Name] Catholic Church & School
 
 ORGANIZATION FACTS:
 ✓ 501(c)(3) Catholic parish with K-8 school
@@ -493,10 +493,10 @@ PostgreSQL Database
 ```json
 {
   "id": "uuid",
-  "name": "St. Theresa Catholic Church & School",
+  "name": "[Parish Name] Catholic Church & School",
   "websites": {
-    "church": "https://sttheresa.org",
-    "school": "https://sttheresaschool.org"
+    "church": "https://yourparish.org",
+    "school": "https://yourparishschool.org"
   },
   "website_extracted": {
     "founded_year": 1978,
@@ -529,7 +529,7 @@ PostgreSQL Database
     },
     {
       "need": "STEM program expansion",
-      "source": "https://sttheresaschool.org/academics",
+      "source": "https://yourparishschool.org/academics",
       "source_type": "website",
       "quote": "Looking to expand our STEM lab in 2026",
       "confidence": "medium"
@@ -562,6 +562,13 @@ PostgreSQL Database
 | Backend | Railway | Render, Fly.io |
 | Database | Supabase Postgres | Railway Postgres, PlanetScale |
 | File Storage | Supabase Storage | S3, Cloudflare R2 |
+
+> **Implementation note (October 2026):** GrantFinder now runs entirely on **Netlify**: one
+> Next.js + TypeScript app serves the website and the engine API (`frontend/src/server`), a
+> Netlify background function runs every Claude step (up to 15 minutes each), and Netlify Blobs
+> stores users, encrypted API keys, grants, profiles, and applications. Documents are parsed with
+> `unpdf` (PDF) and `mammoth` (DOCX). The original Python/FastAPI engine in `backend/` is kept as
+> reference only. See `docs/engine.md` and `docs/deployment.md`.
 
 ### Optional / Future
 
@@ -716,7 +723,7 @@ A lighter version for individual teachers to find and apply to classroom grants.
 - [ ] Works on desktop and mobile browsers
 - [ ] Handles errors gracefully (bad API key, failed upload, etc.)
 - [ ] README with setup instructions for self-hosting
-- [ ] Deployable to Vercel + Railway with one-click (or near it)
+- [ ] Deployable to Vercel + Railway with one-click (or near it) (built instead: Netlify only, one environment variable; see `docs/deployment.md`)
 - [ ] Code ready for GitHub public release
 
 ### Quantitative Success Metrics
@@ -981,7 +988,7 @@ Include "not_eligible" array for grants they definitely don't qualify for (with 
 |  GrantFinder AI                            [← Back]       |
 +----------------------------------------------------------+
 |                                                          |
-|  Grant Matches for St. Theresa                           |
+|  Grant Matches for [Parish Name]                         |
 |  Scored 52 grants • 12 matches above 50%                 |
 |                                                          |
 |  Sort by: [Score ▼] [Deadline] [Amount] [Category]       |
