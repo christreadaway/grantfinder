@@ -1,26 +1,36 @@
 /** @type {import('next').NextConfig} */
 
-// Netlify sets NETLIFY=true during builds. Without the backend URL, every
-// visitor's browser would call http://localhost:8000, so fail the build loudly
-// with the fix instead of shipping a site that can't reach its backend.
-if (process.env.NETLIFY === 'true') {
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
-  if (!apiUrl) {
+// GrantFinder runs entirely on Netlify: this Next.js app serves the website
+// AND the engine (src/server, mounted at /api/*), and a Netlify background
+// function (netlify/functions/) runs the long AI jobs.
+//
+// Netlify sets NETLIFY=true during builds. SECRET_KEY signs every sign-in and
+// encrypts saved Claude API keys, so refuse to build a site without it rather
+// than ship one where nobody can sign in.
+const onNetlify = process.env.NETLIFY === 'true';
+
+if (onNetlify) {
+  const secret = process.env.SECRET_KEY || '';
+  if (!secret) {
     throw new Error(
-      'NEXT_PUBLIC_API_URL is not set. In Netlify: Site configuration > Environment variables > ' +
-      'add NEXT_PUBLIC_API_URL = your backend URL (https://....up.railway.app), then redeploy.'
+      'SECRET_KEY is not set. In Netlify: Site configuration > Environment variables > add SECRET_KEY ' +
+      '(at least 32 random characters; docs/deployment.md Step 1 shows how to make one), then redeploy.'
     );
   }
-  if (!apiUrl.startsWith('https://')) {
-    throw new Error(
-      `NEXT_PUBLIC_API_URL must start with https:// (got "${apiUrl}"). ` +
-      'Browsers block an https site from calling an http backend.'
-    );
+  if (secret.length < 32) {
+    throw new Error(`SECRET_KEY must be at least 32 characters (it is ${secret.length}). Make a longer one and redeploy.`);
   }
 }
 
 const nextConfig = {
   reactStrictMode: true,
+  // The old Python API accepted paths like /api/grants/ ; keep them working
+  // instead of redirecting (a redirect would drop POST bodies in some clients).
+  skipTrailingSlashRedirect: true,
+  // Lets server code know it is running on Netlify (Blobs storage, background jobs).
+  env: {
+    GRANTFINDER_ON_NETLIFY: onNetlify ? 'true' : '',
+  },
   images: {
     remotePatterns: [
       { protocol: 'https', hostname: 'lh3.googleusercontent.com' },
