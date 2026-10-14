@@ -439,6 +439,23 @@ async function newPage(context, label) {
 
 const card = (page, heading) => page.locator('.card').filter({ has: page.getByRole('heading', { name: heading }) }).first();
 
+const escapeRe = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** One drafted section's card in the writer, found by its title. */
+const sectionCard = (scope, title) => {
+  const page = typeof scope.page === 'function' ? scope.page() : scope; // inner locators must come from the page
+  return scope.locator('[data-section-id]').filter({ has: page.locator('h3', { hasText: new RegExp(`^\\s*${escapeRe(title)}`) }) }).first();
+};
+
+/** One stakeholder request's card in the writer. */
+const intakeCards = (page) => page.locator('[data-intake-id]');
+
+/** Wait until the dashboard has finished reopening saved work and shows a step. */
+async function waitForDashboard(page, timeout = 30000) {
+  await page.getByText('Opening your saved work...').first().waitFor({ state: 'detached', timeout }).catch(() => {});
+  await page.getByRole('heading', { name: /Enter Your Claude API Key|Build Your Grant Database|Enter Website URLs|Answer a Few Questions|Upload Documents \(Optional\)|Finding Your Grants|Match Results/ }).first().waitFor({ timeout });
+}
+
 /** The page's error box (Next.js also has an empty role=alert route announcer, which is not an error). */
 const alertBox = (page) => page.locator('[role="alert"]:not(#__next-route-announcer__)');
 
@@ -465,8 +482,8 @@ async function goToStep(page, stepId, key = VALID_KEY) {
   info(`(recovering: moving to the "${STEP_LABELS[stepId]}" step)`);
   if (!/\/dashboard$/.test(page.url())) {
     await page.goto(`${BASE}/dashboard`, { waitUntil: 'domcontentloaded' });
-    await page.getByRole('heading').first().waitFor({ timeout: 20000 });
   }
+  await waitForDashboard(page);
   if (await onStep(page, stepId)) return;
   if (await onStep(page, 'api-key')) {
     await saveKey(page, key);
@@ -478,7 +495,7 @@ async function goToStep(page, stepId, key = VALID_KEY) {
   if (!(await button.isEnabled())) {
     info('(the step bar is locked; reloading the dashboard)');
     await page.reload({ waitUntil: 'domcontentloaded' });
-    await page.getByRole('heading', { name: /Enter Your Claude API Key|Build Your Grant Database|Enter Website URLs/ }).first().waitFor({ timeout: 20000 });
+    await waitForDashboard(page);
     await sleep(1000);
     if (await onStep(page, stepId)) return;
     button = page.getByRole('button', { name: STEP_LABELS[stepId], exact: true });
@@ -593,7 +610,7 @@ async function journey(browser) {
 
   await mock.reset();
   await mock.fixtures(FX.journeyFixtures());
-  await mock.latency({ default: 250, website_scan_v1: 1200, grant_match_batch_v1: 1500, section_draft_v1: 1600, voice_enforce_v1: 400, self_score_v1: 1200 });
+  await mock.latency({ default: 250, website_scan_v1: 1200, grant_match_batch_v1: 4000, section_draft_v1: 1600, voice_enforce_v1: 400, self_score_v1: 1200 });
   await site.reset();
 
   const context = await newContext(browser);
@@ -710,7 +727,7 @@ async function journey(browser) {
       const text = await alert.innerText();
       info(`blocked-site message: ${text}`);
       check('blocked site: inline error explains the site blocked reading', /403|block/i.test(text), text);
-      check('blocked site: error offers the basics form or skipping', /basics below|skip this step/i.test(text), text);
+      check('blocked site: error offers the basics form or skipping', /basics below|skip this step|Enter the basics by hand|Skip to questions/i.test(text), text);
       check('blocked site: basics form is open', await page.getByRole('button', { name: 'Save basics and continue' }).isVisible());
     });
     const scans = await promptsFor('website_scan_v1', before);
@@ -979,13 +996,14 @@ async function journey(browser) {
     await page.waitForURL(/\/dashboard$/, { timeout: 20000 });
     const apps = card(page, /Your applications/);
     await apps.waitFor({ timeout: 20000 });
-    await page.getByRole('heading', { name: /Enter Your Claude API Key|Enter Website URLs|Build Your Grant Database/ }).first().waitFor({ timeout: 20000 });
+    await waitForDashboard(page);
     await sleep(1500); // let the dashboard finish restoring saved state
     const keyPrompt = (await page.getByRole('heading', { name: 'Enter Your Claude API Key' }).count()) > 0;
     const keySavedNote = (await page.getByText(/A key is already saved/).count()) > 0;
     check('back from the writer: dashboard does not ask for the API key again', !keyPrompt, keyPrompt ? `API key step shown${keySavedNote ? ' (with "A key is already saved")' : ' with NO "already saved" note'}` : '');
-    const resultsEnabled = await page.getByRole('button', { name: 'Results', exact: true }).isEnabled();
-    check('back from the writer: Results step is one click away', resultsEnabled, 'Results step disabled');
+    const onResults = await onStep(page, 'results');
+    const resultsEnabled = onResults || (await page.getByRole('button', { name: 'Results', exact: true }).isEnabled());
+    check('back from the writer: Results step is open or one click away', resultsEnabled, 'Results step disabled');
     await shot('back-from-writer');
     const appsText = await apps.innerText();
     check('"Your applications" lists the Kenedy application', appsText.includes(KENEDY), appsText);
@@ -994,8 +1012,10 @@ async function journey(browser) {
 
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.getByText('Guest', { exact: true }).first().waitFor({ timeout: 20000 });
-    await page.getByRole('heading', { name: 'Enter Website URLs' }).waitFor({ timeout: 20000 });
+    await waitForDashboard(page);
+    check('after reload with results: the Results step opens (not a new scan)', await onStep(page, 'results'));
     check('after reload: no API key prompt (saved key remembered)', (await page.getByRole('heading', { name: 'Enter Your Claude API Key' }).count()) === 0);
+    await goToStep(page, 'website');
     check('after reload: grant database remembered (24)', await page.getByText(/24 grants in your database/).isVisible());
     check('after reload: website URL remembered', (await page.getByPlaceholder('https://yourparish.org').inputValue()).startsWith(SITE));
     check('after reload: school website URL remembered', (await page.getByPlaceholder('https://yourschool.org').inputValue()) === `${SITE}/school-home`);
@@ -1148,7 +1168,7 @@ async function writerFlow(page, S, urgency) {
   });
 
   await step('Writer 6: record an answer, mark one "They don\'t have it"', async () => {
-    const requests = page.locator('div.border.rounded.p-3').filter({ has: page.getByPlaceholder("Paste the stakeholder's answer here...") });
+    const requests = intakeCards(page).filter({ has: page.getByPlaceholder("Paste the stakeholder's answer here...") });
     const finance = requests.filter({ hasText: 'Finance' }).first();
     const recordButton = finance.getByRole('button', { name: 'Record Answer' });
     check('"Record Answer" disabled until an answer is pasted', await recordButton.isDisabled());
@@ -1160,7 +1180,7 @@ async function writerFlow(page, S, urgency) {
     const profile = (await api('GET', '/api/processing/profile', { token: S.token })).data || {};
     check('the answer was added to the shared profile as evidence', (profile.evidence || []).some((e) => /ANSWER-MARKER/.test(e.summary || JSON.stringify(e))), profile.evidence);
 
-    const principal = page.locator('div.border.rounded.p-3').filter({ hasText: 'Principal' }).first();
+    const principal = intakeCards(page).filter({ hasText: 'Principal' }).first();
     await principal.getByRole('button', { name: /They don.t have it/ }).click();
     await page.getByText(/confirmed_gap/).first().waitFor({ timeout: 30000 });
     check('"They don\'t have it" marks the gap confirmed', true);
@@ -1203,9 +1223,9 @@ async function writerFlow(page, S, urgency) {
     const text = await draftCard.innerText();
     for (const s of FX.SECTIONS) check(`drafted: ${s.title}`, text.includes(s.title), text.slice(0, 300));
     check('word counts shown against limits ("/ 300 max")', /\d+ words \/ 300 max/.test(text), text.slice(0, 600));
-    const portalHeader = await draftCard.locator('div.border.rounded.p-3').filter({ hasText: 'Portal Summary' }).first().locator('div').first().innerText();
-    check('a character-limited section shows its character count against the limit (1000 chars)', /\d+\s*(chars|characters)/i.test(portalHeader) && /1000/.test(portalHeader),
-      `the Portal Summary header only says "${portalHeader.replace(/\s+/g, ' ').trim()}"`);
+    const portalHeader = await sectionCard(draftCard, 'Portal Summary').innerText();
+    check('a character-limited section shows its character count against the limit (1000 chars)', /\d+\s*\/\s*1000\s*(chars|characters)/i.test(portalHeader),
+      `the Portal Summary card says "${portalHeader.replace(/\s+/g, ' ').trim().slice(0, 300)}"`);
     check('no section over its limit', !/OVER LIMIT/.test(text));
     const sectionTexts = (await draftCard.locator('pre').allInnerTexts()).join('\n');
     check('banned phrase ("We are thrilled") was rewritten by Enforce', !/we are thrilled/i.test(sectionTexts) && sectionTexts.includes(FX.MARKERS.enforced), sectionTexts.slice(0, 600));
@@ -1230,14 +1250,14 @@ async function writerFlow(page, S, urgency) {
 
   await step('Writer 9: Refine one section', async () => {
     const draftCard = card(page, /4 · Draft/);
-    const section = draftCard.locator('div.border.rounded.p-3').filter({ hasText: 'Statement of Need' }).first();
+    const section = sectionCard(draftCard, 'Statement of Need');
     const input = section.getByPlaceholder(/Refine: e\.g\./);
     await input.fill('tighten and lead with the families');
     const before = await requestCount();
     await section.getByRole('button', { name: /Refine/ }).click();
-    await page.locator('div.border.rounded.p-3').filter({ hasText: 'Statement of Need' }).filter({ hasText: FX.MARKERS.refined }).first().waitFor({ timeout: JOB_TIMEOUT });
+    await sectionCard(page, 'Statement of Need').filter({ hasText: FX.MARKERS.refined }).waitFor({ timeout: JOB_TIMEOUT });
     check('refined text replaces the Statement of Need draft', true);
-    const other = await draftCard.locator('div.border.rounded.p-3').filter({ hasText: 'Organization Background' }).first().innerText();
+    const other = await sectionCard(draftCard, 'Organization Background').innerText();
     check('other sections untouched by the refinement', !other.includes(FX.MARKERS.refined), other.slice(0, 200));
     const calls = await promptsFor('section_refine_v1', before);
     check('the instruction reached Claude', calls.length >= 1 && calls[0].prompt.includes('tighten and lead with the families'), calls.length);
@@ -1546,9 +1566,15 @@ async function basics(browser) {
   });
 
   await step('Sign out returns to sign-in and forgets the session', async () => {
+    let signOutAsked = '';
+    page.once('dialog', (dialog) => {
+      signOutAsked = dialog.message();
+      dialog.accept().catch(() => {});
+    });
     await page.getByRole('button', { name: 'Sign out' }).click();
     await page.waitForURL(/127\.0\.0\.1:\d+\/$/, { timeout: 20000 });
     await page.getByRole('button', { name: /continue as guest/i }).waitFor({ timeout: 20000 });
+    check('signing out a guest warns that the work can\'t be opened again', /guest/i.test(signOutAsked) && /can.t be opened again/i.test(signOutAsked), signOutAsked);
     check('sign-in page shown after signing out', true);
     check('session token removed from the browser', (await tokenOf(page)) === null);
     await page.goto(`${BASE}/dashboard`, { waitUntil: 'domcontentloaded' });
@@ -1701,19 +1727,24 @@ async function errors(browser) {
     }
     const state = (await api('GET', `/api/writer/applications/${appId}`, { token })).data || {};
     const saved = (state.sections || []).length;
-    const shown = await card(page, /4 · Draft/).locator('div.border.rounded.p-3').count();
+    const shown = await card(page, /4 · Draft/).locator('[data-section-id]').count();
     check('sections finished before the failure are saved and shown', saved >= 1 && saved <= 3 && shown === saved, `saved=${saved} shown=${shown}`);
-    await page.getByRole('button', { name: /Redraft All Sections|Draft All Sections/ }).click();
+    const finishButton = page.getByRole('button', { name: 'Draft missing sections' });
+    check('after a partial failure, "Draft missing sections" is offered', (await finishButton.count()) === 1);
+    const beforeFinish = await requestCount();
+    await finishButton.click();
     await waitUntil(async () => ((await api('GET', `/api/writer/applications/${appId}`, { token })).data?.sections || []).length === 4, JOB_TIMEOUT, 'all 4 sections');
     await waitUntil(async () => (await page.locator('[role=status]').count()) === 0, JOB_TIMEOUT, 'drafting to finish');
-    check('drafting again fills in the missing sections (4 of 4)', (await card(page, /4 · Draft/).locator('div.border.rounded.p-3').count()) === 4);
+    check('drafting again fills in the missing sections (4 of 4)', (await card(page, /4 · Draft/).locator('[data-section-id]').count()) === 4);
+    const finishCalls = await promptsFor('section_draft_v1', beforeFinish);
+    check('"Draft missing sections" drafts only the unfinished section(s)', finishCalls.length === 4 - saved, `${finishCalls.length} draft call(s) for ${4 - saved} missing section(s)`);
 
     check('no error left on the page', (await alertBox(page).count()) === 0, (await alertBox(page).allInnerTexts()).join(' '));
   });
 
   await step('Export hard rules: over-limit or banned-phrase text never exports', async () => {
     if (!appId) throw new Error('no application from the previous step');
-    const portal = () => page.locator('div.border.rounded.p-3').filter({ hasText: 'Portal Summary' }).first();
+    const portal = () => sectionCard(page, 'Portal Summary');
     const refinePortal = async (instruction) => {
       const before = await requestCount();
       await portal().getByPlaceholder(/Refine: e\.g\./).fill(instruction);
@@ -1765,12 +1796,18 @@ async function errors(browser) {
     await mock.latency({ default: 150, section_draft_v1: 5000 });
     const portalBefore = (((await api('GET', `/api/writer/applications/${appId}`, { token })).data || {}).sections || []).find((x) => x.title === 'Portal Summary');
     const jobsBefore = (((await api('GET', '/api/jobs', { token })).data || {}).jobs || []).map((job) => job.id);
+    let redraftAsked = '';
+    page.once('dialog', (dialog) => {
+      redraftAsked = dialog.message();
+      dialog.accept().catch(() => {});
+    });
     await page.getByRole('button', { name: /Redraft All Sections/ }).click();
     await page.locator('[role=status]').waitFor({ timeout: 10000 });
     await sleep(1500);
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.getByRole('heading', { name: KENEDY }).waitFor({ timeout: 20000 });
     await sleep(1500);
+    check('"Redraft All Sections" asks before replacing every section', /Redraft every section/i.test(redraftAsked), redraftAsked);
     const busyShown = (await page.locator('[role=status]').count()) > 0;
     const redraftEnabled = await page.getByRole('button', { name: /Redraft All Sections/ }).isEnabled();
     check('after a reload, the page shows drafting is still running (and does not offer to start it again)', busyShown && !redraftEnabled,
@@ -1801,10 +1838,10 @@ async function errors(browser) {
     await page.goto(`${BASE}/writer?id=${appId}`, { waitUntil: 'domcontentloaded' });
     await page.getByRole('heading', { name: KENEDY }).waitFor({ timeout: 20000 });
     const draftCard = card(page, /4 · Draft/);
-    await draftCard.locator('div.border.rounded.p-3').first().waitFor({ timeout: 20000 });
+    await draftCard.locator('[data-section-id]').first().waitFor({ timeout: 20000 });
 
     // One-section Redraft: only that section is drafted again.
-    const oneSection = draftCard.locator('div.border.rounded.p-3').filter({ hasText: 'Project Description' }).first();
+    const oneSection = sectionCard(draftCard, 'Project Description');
     if (await oneSection.getByRole('button', { name: /^Redraft$/ }).count()) {
       const before = await requestCount();
       await oneSection.getByRole('button', { name: /^Redraft$/ }).click();
@@ -2026,7 +2063,11 @@ async function persist(browser) {
     // Mobile emulation can widen window.innerWidth to fit the page, so compare with the phone's real width.
     const overflow = () => mobile.evaluate(() => Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - 390);
     await mobile.goto(`${BASE}/dashboard`, { waitUntil: 'domcontentloaded' });
-    await mobile.getByRole('heading', { name: 'Enter Website URLs' }).waitFor({ timeout: 20000 });
+    await waitForDashboard(mobile);
+    if (await onStep(mobile, 'results')) {
+      await mobile.getByRole('button', { name: 'Website', exact: true }).evaluate((el) => el.click());
+      await mobile.getByRole('heading', { name: 'Enter Website URLs' }).waitFor({ timeout: 20000 });
+    }
     const setup = await overflow();
     await shot('phone-dashboard', mobile);
     check('dashboard fits a phone screen (no sideways scroll)', setup <= 1, `page is ${setup}px wider than the 390px screen (the 7-step bar does not fit; "Results" is off-screen)`);
