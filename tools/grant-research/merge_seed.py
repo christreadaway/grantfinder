@@ -259,7 +259,7 @@ def main():
     files = [p for p in files if p.name not in ("excluded_all.json",)]
     intel_files = [p for p in files if p.name.startswith("intel")]
     files = [p for p in files if not p.name.startswith("intel")]
-    if not files:
+    if not files and not intel_files:
         print(f"No research files in {research}", file=sys.stderr)
         sys.exit(1)
 

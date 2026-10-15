@@ -2,6 +2,11 @@
 
 What each monthly run of the grant-research skill changed in the starter database (newest first).
 
+## 2026-10-15 (later): funder intelligence and QA corrections
+
+- Every grant now carries a funder track record (`funder_intel`): past awards by recipient type and city, award levels, record with Catholic schools, giving trend and announced changes, from IRS Form 990/990-PF filings, grant lists, annual reports and announcements (89 with figures; 8 formula or entitlement programs marked not applicable).
+- QA corrections: 20 Texas- or Austin-only grants marked "Yes - TX Only"; closed windows say when they closed and that the next isn't posted (Urban Forest, Area Grants, BIMO, CNAMB/BCIM, CommonSpirit, Heritage Preservation, Burdine Johnson, Faith & AI, aiEDU, CSTA, GenerationAI, INVITE, WTCS, Sprouts); relative wording replaced with dates; every grant says who applies (`applicants`); links moved to funders' own pages or final addresses (USDA programs now under fna.usda.gov); wording written for one school made general; FADICA removed from foundations (a network, not a grantmaker).
+
 ## 2026-10-15
 
 97 grants (was 24): the first verified edition. Four research agents (re-checking the original 24, then Catholic, Texas and national funders) and a fifth for AI in education. Two programs that two agents found under different names were merged (Strake Foundation; the National School Lunch and Breakfast Programs).
