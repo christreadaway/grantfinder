@@ -1,12 +1,25 @@
-# Netlify deploys the Next.js frontend from /frontend.
-# The Python FastAPI backend cannot run on Netlify - deploy it to
-# Railway or Render and set NEXT_PUBLIC_API_URL to its URL.
-# See docs/deployment.md.
+# GrantFinder runs entirely on Netlify, on any plan:
+#   - the website and the engine API (Next.js app in /frontend, API at /api/*)
+#   - AI steps run inside normal requests by default; with
+#     GRANTFINDER_BACKGROUND_JOBS=true (plans that include background
+#     functions) they run in frontend/netlify/background/ for up to 15 minutes
+#   - data in Netlify Blobs (no database to set up)
+# Required environment variable: SECRET_KEY. See docs/deployment.md.
 
 [build]
   base = "frontend"
-  command = "npm run build"
+  # The script adds the background worker only when GRANTFINDER_BACKGROUND_JOBS=true.
+  command = "node scripts/netlify-functions.mjs && npm run build"
   publish = ".next"
+
+[build.environment]
+  # Next.js 16 and the undici HTTP client need Node 20.18+; pin the current LTS.
+  NODE_VERSION = "22"
+
+[functions]
+  # Relative to the base directory above.
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
 
 [[plugins]]
   package = "@netlify/plugin-nextjs"

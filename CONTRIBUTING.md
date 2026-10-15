@@ -11,32 +11,38 @@ Thank you for your interest in contributing to GrantFinder AI! This project help
 
 ## Development Setup
 
-### Backend (Python/FastAPI)
+The website and the engine are one Next.js app in `frontend/` (the engine is TypeScript in
+`frontend/src/server`; see `docs/engine.md`). The old Python engine in `backend/` is reference only.
 
 ```bash
-cd backend
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-pip install -r requirements.txt
-cp .env.example .env
-# Edit .env with your credentials
-uvicorn main:app --reload
+cd ~/grantfinder/frontend
+sfw npm install            # if sfw isn't installed, use: npm install
+cp .env.example .env.local
+# Optional: edit .env.local (guest sign-in is on by default)
+npm run dev
 ```
 
-### Frontend (Next.js)
+Run the tests before opening a pull request:
 
 ```bash
-cd frontend
-npm install
-cp .env.example .env.local
-# Edit .env.local with your credentials
-npm run dev
+cd ~/grantfinder
+bash tests/engine/run_all.sh   # 10 engine suites (684 checks), then 5 again in direct job mode: 1,251 checks; mock Claude, no API key needed
+bash tests/e2e/run_e2e.sh      # browser test of the whole journey, 443 checks (setup at the top of the script)
+```
+
+On Netlify, AI steps run inside normal requests by default (direct job mode). `run_all.sh`
+already runs the processing, grants, writer and regressions suites that way too. To run the
+browser test that way as well:
+
+```bash
+cd ~/grantfinder
+E2E_JOB_MODE=direct bash tests/e2e/run_e2e.sh
 ```
 
 ## Code Style
 
-- **Python**: Follow PEP 8 guidelines
-- **TypeScript/JavaScript**: Follow ESLint configuration
+- **TypeScript/JavaScript**: Follow ESLint configuration (`cd ~/grantfinder/frontend && npx eslint src/server` must stay clean)
+- **Python** (legacy `backend/` only): Follow PEP 8 guidelines
 - **Commits**: Use clear, descriptive commit messages
 
 ## Pull Request Process

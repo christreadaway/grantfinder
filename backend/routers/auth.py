@@ -12,6 +12,7 @@ from cryptography.fernet import Fernet
 import httpx
 import logging
 import time
+import uuid
 
 from config import settings
 from models.schemas import User, TokenResponse
@@ -216,6 +217,47 @@ async def google_auth(request: GoogleAuthRequest, req: Request):
     except Exception as e:
         logger.error(f"Google auth error: {e}")
         raise HTTPException(status_code=500, detail="Authentication failed")
+
+
+@router.get("/options")
+async def auth_options():
+    """Which sign-in methods this deployment offers (public; the landing page
+    uses it to show the right buttons and to detect an unreachable backend)."""
+    return {
+        "google": bool(settings.GOOGLE_CLIENT_ID),
+        "guest": settings.ALLOW_GUEST_LOGIN,
+    }
+
+
+@router.post("/guest", response_model=TokenResponse)
+async def guest_auth(req: Request):
+    """
+    Start a temporary guest session without Google.
+    Only available when ALLOW_GUEST_LOGIN is on. Like every session today,
+    it lives in memory and ends when the backend restarts.
+    """
+    if not settings.ALLOW_GUEST_LOGIN:
+        raise HTTPException(status_code=403, detail="Guest sign-in is turned off. Sign in with Google.")
+
+    client_ip = req.client.host if req.client else "unknown"
+    if not check_rate_limit(client_ip):
+        raise HTTPException(status_code=429, detail="Too many requests")
+
+    guest_id = f"guest_{uuid.uuid4().hex[:12]}"
+    user = User(
+        id=guest_id,
+        google_id=guest_id,
+        email=f"{guest_id}@guest.grantfinder",
+        name="Guest",
+        created_at=datetime.utcnow(),
+    )
+    users_db[guest_id] = user
+    logger.info(f"Guest session created: {guest_id}")
+
+    return TokenResponse(
+        access_token=create_access_token({"sub": guest_id}),
+        user=user,
+    )
 
 
 @router.get("/me", response_model=User)

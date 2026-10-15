@@ -108,6 +108,12 @@ body {
   margin-bottom: 4px;
 }
 
+/* The message: long file names and web addresses wrap instead of widening the page. */
+.terminal-line > span:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .terminal-timestamp {
   color: var(--terminal-purple);
   flex-shrink: 0;
@@ -166,6 +172,13 @@ body {
   padding: 24px;
 }
 
+/* Phones: a little less padding so every step fits a 360px-wide screen. */
+@media (max-width: 639px) {
+  .card {
+    padding: 16px;
+  }
+}
+
 /* Buttons */
 .btn {
   display: inline-flex;
@@ -185,7 +198,7 @@ body {
   color: white;
 }
 
-.btn-primary:hover {
+.btn-primary:hover:not(:disabled):not([aria-disabled="true"]) {
   background: var(--primary-hover);
 }
 
@@ -195,8 +208,75 @@ body {
   border: 1px solid var(--card-border);
 }
 
-.btn-secondary:hover {
+.btn-secondary:hover:not(:disabled):not([aria-disabled="true"]) {
   background: var(--card-bg);
+}
+
+/* A button that can't be used right now must look that way (and not react to hover).
+   A "Browse Files" label can't be :disabled, so it says aria-disabled="true" instead. */
+.btn:disabled,
+.btn[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+/* Match results: days-left badges and due dates (red within 2 weeks, amber within ~6, gray later) */
+.deadline-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 9999px;
+  border: 1px solid transparent;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.deadline-badge.soon {
+  background: rgba(239, 68, 68, 0.15);
+  border-color: rgba(239, 68, 68, 0.45);
+  color: #fca5a5;
+}
+
+.deadline-badge.near {
+  background: rgba(245, 158, 11, 0.15);
+  border-color: rgba(245, 158, 11, 0.45);
+  color: #fcd34d;
+}
+
+.deadline-badge.later {
+  background: rgba(107, 114, 128, 0.2);
+  border-color: rgba(107, 114, 128, 0.45);
+  color: #d1d5db;
+}
+
+.deadline-badge.past {
+  border-color: #4b5563;
+  color: #9ca3af;
+  font-weight: 500;
+}
+
+.due-text.soon { color: #fca5a5; }
+.due-text.near { color: #fcd34d; }
+.due-text.later { color: #d1d5db; }
+
+.results-select {
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  color: var(--foreground);
+  padding: 6px 10px;
+  font-size: 14px;
+}
+
+.results-select:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
 }
 
 /* Inputs */
@@ -208,6 +288,11 @@ body {
   border-radius: 8px;
   color: var(--foreground);
   font-size: 14px;
+}
+
+.input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .input:focus {
@@ -260,6 +345,12 @@ body {
   padding: 40px;
   text-align: center;
   transition: all 0.2s;
+}
+
+@media (max-width: 639px) {
+  .dropzone {
+    padding: 24px 16px;
+  }
 }
 
 .dropzone:hover,

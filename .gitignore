@@ -50,3 +50,13 @@ htmlcov/
 # Misc
 *.sqlite3
 *.db
+
+# GrantFinder local data (file store, dev secret) and Netlify CLI state
+frontend/.data/
+.data/
+.netlify/
+frontend/.netlify/
+
+# Test artifacts
+tests/e2e/artifacts/
+tests/e2e/node_modules/

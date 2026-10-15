@@ -3,9 +3,140 @@
 **Repository:** `grantfinder`  
 **Total Sessions Logged:** 3  
 **Date Range:** 2025-02-01 to 2025-02-02  
-**Last Updated:** 2026-02-16 at 14:48 UTC
+**Last Updated:** 2026-10-15
 
 This file contains a complete history of Claude Code sessions for this repository, automatically generated from transcript files. Sessions are listed in reverse chronological order (most recent first).
+
+---
+
+## 2026-10-14 to 2026-10-15 — Everything on Netlify: TypeScript Engine, Product-Test Fixes, Writer Ready for the Kenedy Application
+
+### What We Built
+Chris asked to run GrantFinder entirely on Netlify (no Railway; none of his other apps use it), test it comprehensively with multiple agents, fix bugs from low to critical, and update every doc, so he can finish the Kenedy Memorial Foundation application (due Oct 15) in the app.
+
+1. **Engine ported to TypeScript inside the Next.js app** (about 5,500 lines of Python FastAPI): API routes at `/api/*` (`frontend/src/server/`), Netlify Blobs storage. The Python `backend/` stays as reference only; `backend/Procfile` (Railway) deleted; Railway removed from all docs.
+1b. **Runs on any Netlify plan** (Chris: "make this compatible with my netlify"). Legacy Netlify plans (accounts before Sept 4, 2025, e.g. legacy Starter) have no background functions, and a deploy containing one fails there. Default "direct" job mode runs each AI step inside a normal request (`POST /api/jobs/{id}/run`, Claude calls stop at 50 s of Netlify's 60); long steps continue automatically in parts (`__continue`: drafting sections, matching unscored grants). The 15-minute background function is optional (`GRANTFINDER_BACKGROUND_JOBS=true`, copied in by `frontend/scripts/netlify-functions.mjs`). If Netlify ever cuts a step short, the message says how many seconds it got and how to fix it.
+2. **Background jobs that don't lose or double-pay work:** `202 {job_id}` + polling; one run per lock key (an identical request waits for the running one; a different request gets a plain 409); 45-second heartbeat, stale after 3 silent minutes; hard stop before Netlify's cutoff; the dashboard and writer pick running steps back up after a reload.
+3. **Security:** 30-day HS256 sessions, AES-256-GCM saved API keys, sign-in rate limits, SSRF guard checked again at connect time (DNS rebinding), zip-bomb guard for .docx/.xlsx, CSV formula neutralization, API keys redacted from logs, spending-cap errors that name the billing page.
+4. **Writer:** edit any section by hand (history kept, restore earlier versions); live limit and banned-phrase checks (whole words) that match export; [NEEDS INPUT] placeholders and unsupported claims shown before export; edited strategy saved before drafting; "Draft missing sections" after a partial failure; stakeholder requests only for uncovered gaps; plain status words; funder question, ranked fixes, strength leads shown; typed text survives a reload.
+5. **Dashboard and sign-in:** a session is cleared only on a real 401 (a 502 or Wi-Fi drop shows "Try again"); no silent replacement of a guest session; guest sign-out warns; saved work reopens before any step shows; returning users land on Results; saved questions and answers come back; already-read documents listed; "Add to my profile only (no new matching)"; phone layout and accessibility fixes.
+6. **Profile:** questionnaire answers merge (never erased); `GET /api/processing/questionnaire`; documents yield key facts (enrollment, percentages, prior grants) saved as evidence the writer drafts from; 60,000 characters read per document; the USCCB group ruling counts as 501(c)(3).
+7. **Client:** polling survives Wi-Fi drops and sleep; plain-English network errors; Safari-safe downloads and copies; heavy file libraries load on first use.
+7b. **Product pillars (Chris, Oct 15):** surface grants with deadlines and links (Top picks, sort by deadline, days-left badges); fast response (guidelines as a file, Add Materials in the writer); optimize the outcome with AI (Funder History: notes, files or web research become a funder profile with verified comparable grants, positioning and a suggested ask, feeding fit, drafts and score); show what's needed and the gaps (Application Checklist with due date, next step, section status, attachments to tick, gaps by owner).
+8. **Docs** updated line by line (engine, writer, discovery, deployment, template format, READMEs, specs, CLAUDE.md tests line); unused legacy `components/`, `hooks/`, `types/` deleted.
+
+### Technical Details
+- Key files: `frontend/src/server/{app,auth,claude,jobs,store,net,zipguard,log}.ts`, `routes/`, `handlers/`, `services/`; `frontend/netlify/functions/grantfinder-jobs-background.mts`; `frontend/src/lib/{api,download}.ts`; pages in `frontend/src/app/`.
+- Tests: `bash tests/engine/run_all.sh` (7 suites, mock Claude) and `bash tests/e2e/run_e2e.sh` (real browser, production build, 7 phases). Local Netlify runtime checked with `netlify build` + `netlify serve` against a copy of `frontend/` (background function, Blobs, document parsing, hand edits, Word export).
+- Agents used: three builders (writer, dashboard/sign-in, processing engine), two reviewers, one docs agent; every change re-verified by the lead before commit.
+
+### Current Status
+- ✅ Engine: 1,251 checks (10 suites, plus 5 again in direct job mode); browser: 443 checks (direct job mode, including Funder History); local Netlify runtime (no background function): 57 API checks, including drafting continued across 4 requests, Funder History, guideline PDF upload and the checklist
+- 🚧 Checklist, Top picks and uploads are covered by engine tests only (browser coverage next session)
+- ✅ No Railway anywhere; Netlify is the only host
+- ✅ Ready to merge to `main`
+- 🚧 Not yet deployed; the real-key run happens when Chris uses it on the deployed site
+
+### Branch Info
+- Branch: `claude/relaxed-curie-sj0zvu` (pushed). Merge into `main` on GitHub, then Netlify deploys from `main`.
+
+### Decisions Made
+- Netlify only (website, engine, AI jobs, storage). No Railway, Render, Vercel or Supabase.
+- Works on Chris's existing Netlify account without a plan change: no background function by default; Sonnet (`claude-sonnet-5`) recommended for one-minute steps.
+- Guest sign-in for today (turn on with `ALLOW_GUEST_LOGIN=true`); guest work lives in one browser.
+- Only an identical request attaches to a running step; anything else is told to wait.
+- Banned phrases match whole words only ("compassionate" never trips "passionate").
+- Export never includes unsaved edit-box text; it asks the person to save first.
+
+### Next Steps
+1. Merge the branch on GitHub; on Netlify set `SECRET_KEY`, `ALLOW_GUEST_LOGIN=true`, optionally `CLAUDE_MODEL=claude-opus-5-5`; deploy.
+2. Write the Kenedy application in the writer: paste the guidelines, upload the school documents, confirm strategy, draft, edit, export Word.
+3. After the deadline: Google sign-in so work follows Chris across computers; a real-key test pass of every prompt.
+
+### Questions/Blockers
+- CLAUDE.md's "Branch Rules" (work on main) contradicts "Git Branch Strategy" (new branch per session); sessions have followed the per-session branch.
+
+---
+
+## 2026-10-14 (later) — Web Deploy via Netlify: Fix Sign-In, Deploy Guards, Real Tests
+
+> **Superseded:** Railway was dropped. The engine was rewritten in TypeScript and everything (website, engine, AI jobs, storage) now runs on Netlify alone. See the newest entry.
+
+### What We Built
+Chris asked for GrantFinder to web deploy via Netlify. Netlify Functions run JavaScript, TypeScript, and Go only, so the Python engine can't live there: the website deploys to Netlify and the engine to Railway, and visitors only see the Netlify address.
+1. **Found and fixed a dead end:** "Get Started (Demo Mode)" skipped sign-in, but every API route requires a session token, so every action after it failed. Replaced with guest sign-in behind `ALLOW_GUEST_LOGIN` (backend, off by default): `POST /api/auth/guest`, plus public `GET /api/auth/options` so the landing page shows exactly the sign-in methods the backend offers.
+2. **Landing page diagnostics:** shows "Can't reach the GrantFinder engine" with the URL it tried and what to check (API URL, backend up, CORS_ORIGINS with the site's own origin); "Sign-in isn't set up yet" when neither method is on; "half set up" when only Netlify has the Google client ID; sign-in errors shown on screen instead of only the console.
+3. **Expired sessions:** a backend restart (every Railway deploy) wipes in-memory sessions. An axios interceptor now sends any later 401 back to sign-in with "Your session ended..." instead of leaving every button failing. Dashboard sends tokenless visitors to sign-in and restores the user on refresh.
+4. **Deploy guards:** Netlify builds fail with plain-English fixes when `NEXT_PUBLIC_API_URL` is missing or not https; API base URL trailing slashes stripped.
+5. **Railway hardening:** start command `python -m uvicorn ...` (Procfile + guide), `backend/.python-version` 3.13, `main.py` honors `$PORT` and disables reload on platforms, `FORWARDED_ALLOW_IPS=*` so rate limiting sees real client IPs.
+6. **Docs:** `docs/deployment.md` rewritten as a click-by-click guide (secret key, Railway, Netlify, CORS, Google sign-in, troubleshooting table, where logs live, known limits, run-on-Mac); README setup/deploy sections point to it; env examples no longer ship fake Google IDs.
+7. **Committed tests:** `tests/e2e/run_e2e.sh` + `e2e.cjs` (production build, real backend, real browser, different origins; 4 phases, 25 checks) and `backend/tests/check_deadlines.py` (23 checks).
+
+### Technical Details
+- Modified: `backend/config.py`, `backend/routers/auth.py`, `backend/main.py`, `backend/Procfile`, `backend/.env.example`, `frontend/next.config.js`, `frontend/src/lib/api.ts`, `frontend/src/app/page.tsx`, `frontend/src/app/dashboard/page.tsx`, `frontend/.env.example`, `docs/deployment.md`, `GrantFinder_README.md`, `CLAUDE.md`
+- Added: `backend/.python-version`, `backend/tests/check_deadlines.py`, `tests/e2e/{run_e2e.sh,e2e.cjs,package.json,README.md}`
+- Verified: `next build` (Next 16.1.6) passes; Netlify guard tested with missing, http, and https URLs; tsc clean; no new lint findings (17 pre-existing `no-explicit-any`); E2E 25/25 across guest, expired, locked, down; deadline checks 23/23; CORS preflight returns the frontend origin; file log captures guest sign-ins and writer handoffs.
+
+### Current Status
+- ✅ Deploy-ready for Netlify (website) + Railway (engine), with tests proving the cross-origin flow
+- 🚧 The deploy itself needs Chris's Netlify, Railway, and Google Cloud accounts (about 40 minutes, docs/deployment.md)
+- ❌ Data still lives in memory and resets on every engine restart; AI steps not yet validated with a live key
+
+### Branch Info
+- Branch: `claude/relaxed-curie-sj0zvu`
+
+### Decisions Made
+- Netlify for the website, Railway for the engine (no TypeScript rewrite of the engine; revisit only if one platform matters more than the rebuild cost)
+- Guest sign-in exists but is off by default; turn it on only to try a fresh deployment or for local dev
+- No client-side demo mode, ever: it can't work against an authenticated API
+
+### Next Steps
+1. Chris: follow docs/deployment.md (Railway, then Netlify, then CORS, then Google sign-in)
+2. Persistence (Supabase or similar) so sessions and work survive engine restarts
+3. Live-key run of discovery, matching, and the writer pipeline on the deployed site, then add those steps to the E2E test
+
+### Questions/Blockers
+- None in code. Deployment needs Chris's accounts.
+
+---
+
+## 2026-10-14 — Kenedy Foundation Application Kit + Annual Deadlines
+
+### What We Built
+Chris asked whether GrantFinder can write grants, and for help with a Kenedy Memorial Foundation application due Oct 15, 2026.
+1. **Capability answer:** yes. The GrantWriter module (built 2026-07-10) is real and wired: the backend boots with 42 API paths, 15 of them writer endpoints. It has never run against a live Claude key, storage is in-memory, and it isn't deployed, so for a next-day deadline the writing was done directly in-session with the same method (grant spec, fit/gap, honesty ledger, intake, draft, self-score, adversarial review).
+2. **Kenedy application kit** (a Claude Doc, kept outside the repo): 24-hour checklist, eligibility traps, strategy and honesty ledger, paste-ready portal answers (Organization Information and Grant Project Data), Plan B and Plan C swap-ins, Exhibits A-H tracker with status dropdowns, exhibit templates (C resolution, D funding summary, E three-year budget, G no-990 statement, H litigation disclosure), fact sheet, sources.
+3. **Strategy:** recommended Phase 2 of the school's Notre Dame DELTA-funded AI formation pilot ($45,000, with a $25,000 fallback): partner Texas Catholic schools including South Texas, a free summer institute, Spanish family materials, free K-8 materials. Tuition assistance held as Plan B because a high-performing school has a weak "demonstrated need" case; capital as Plan C.
+4. **Kenedy seed record corrected** in `backend/data/seed_grants.json`: annual Oct 15 deadline, $50,000 soft cap and ~$25,000 median, exclusions, Exhibits A-H, application-process URL, OPEN status.
+5. **Annual deadline support:** `AIService._parse_deadline` now resolves "Annual: October 15" to its next occurrence, so yearly funders are never filtered out as expired and the writer's urgency flag fires every cycle.
+
+### Technical Details
+- Modified: `backend/services/ai_service.py` (`ANNUAL_DEADLINE_RE`, `_parse_deadline`), `backend/data/seed_grants.json` (Kenedy record).
+- Verified with a 23-check ad-hoc script (not committed): annual parsing incl. year rollover, Feb 29, abbreviations, bogus months; seed JSON validity and load; TX prefilter pass and non-TX disqualify; Kenedy not expired after Oct 15; writer urgency flag true on Oct 14.
+- Found: the "16-check offline writer pipeline test" cited in earlier notes is not committed to the repo.
+
+### Current Status
+- ✅ Backend boots; writer routes registered; annual deadlines verified
+- ✅ Kenedy kit complete, names kept as placeholders per PII rules
+- 🚧 The application itself: Chris fills the fact sheet, calls the diocese and Foundation, gets board authorization, submits by 3 p.m. Oct 15
+- ❌ GrantWriter still not validated with a live Claude key; storage still in-memory
+
+### Branch Info
+- Branch: `claude/relaxed-curie-sj0zvu` (the session's designated branch; CLAUDE.md's "work on main" rule conflicts, so the designated branch was kept and Chris merges online)
+
+### Decisions Made
+- Recommend AI formation Phase 2 over tuition assistance for Kenedy (reasons above)
+- Keep all school, parish, and staff names as placeholders in the kit; one find-and-replace before pasting
+- Recurring deadlines are written as "Annual: Month Day" in seed data
+
+### Next Steps
+1. Commit a pytest suite for the writer pipeline and deadline parsing (the earlier 16-check test isn't in the repo)
+2. Live-key validation of the GrantWriter pipeline, using the Kenedy kit as the benchmark case
+3. Funder templates: store a funder's required portal sections and exhibits (like Kenedy's A-H) so the Grant Spec stage uses them verbatim
+4. Supabase persistence
+
+### Questions/Blockers
+- None for the code. For the application: diocesan protocol and the Foundation's answers on Exhibits C, G, and H depend on Chris's calls.
 
 ---
 
@@ -33,6 +164,8 @@ Audit of "anything else that needs building" found the dashboard was partly thea
 ---
 
 ## 2026-07-10 (evening) — Netlify Deployment Readiness
+
+> **Superseded:** Railway was dropped. The engine was rewritten in TypeScript and everything (website, engine, AI jobs, storage) now runs on Netlify alone. See the newest entry.
 
 ### What We Built
 Made the repo deployable: frontend to Netlify, backend to Railway/Render (Netlify can't run Python servers — split matches spec section 7's hosting table).

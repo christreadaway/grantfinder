@@ -91,4 +91,7 @@ async def health_check():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    # Reference code only (the deployed engine is TypeScript on Netlify).
+    # Locally there is no PORT, so default to 8000 with auto-reload.
+    port = os.getenv("PORT")
+    uvicorn.run("main:app", host="0.0.0.0", port=int(port or 8000), reload=port is None)

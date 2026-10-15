@@ -1,19 +1,44 @@
 # Grant Database Template Format
 
-Your Excel file (.xlsx) should have the following columns:
+Upload an Excel workbook (.xlsx, up to 4 MB) on the dashboard's **Grant Database** step. The
+upload merges into your database: a row whose grant name and funder match a saved grant updates the
+cells you filled in, other rows are added, and nothing is deleted.
 
-## Required Columns
+## Sheets (one per category)
+
+Name each sheet after its category. Sheets with other names are skipped.
+
+| Category | Sheet name (any of these) |
+|---|---|
+| 1. Church/Parish | "Parish Grants", "Church-Parish Grants", "Category 1" |
+| 2. Catholic School | "Catholic School Grants", "School Grants", "Category 2" |
+| 3. Mixed Church-School | "Mixed Church-School", "Mixed", "Category 3" |
+| 4. Non-Catholic Qualifying | "Non-Catholic Qualifying", "Non-Catholic", "Secular Grants", "Category 4" |
+| 5. Catholic Foundations | "Catholic Foundations", "Foundations", "Category 5" |
+
+Excel doesn't allow "/" in sheet names, so write "Church-Parish" (a dash or underscore works).
+Put the column names in row 1 of each sheet and one grant per row below them. The foundations
+sheet uses "Foundation Name" (or "Name") instead of "Grant Name".
+
+## Columns
+
+Each grant sheet should have the following columns:
+
+## Required Column
 
 | Column Name | Description | Example |
 |------------|-------------|---------|
-| Grant Name | Name of the grant | "KaBOOM! Build It Yourself Grant" |
-| Description | What the grant funds | "Funds playground equipment for community organizations" |
+| Grant Name | Name of the grant ("Foundation Name" on the foundations sheet) | "KaBOOM! Build It Yourself Grant" |
+
+A row without a grant name is skipped. Everything else is optional, but matching works far
+better with a description.
 
 ## Optional Columns
 
 | Column Name | Description | Example |
 |------------|-------------|---------|
-| Granting Authority | Foundation or organization | "KaBOOM!" |
+| Description | What the grant funds (strongly recommended) | "Funds playground equipment for community organizations" |
+| Granting Authority | Foundation or organization (shown as "Unknown" when missing) | "KaBOOM!" |
 | Deadline | Due date (YYYY-MM-DD) or "Rolling" | "2026-05-01" or "Rolling" |
 | Amount Min | Minimum grant amount | 5000 |
 | Amount Max | Maximum grant amount | 15000 |
@@ -30,7 +55,8 @@ Your Excel file (.xlsx) should have the following columns:
    - "Amount Max", "Max Amount", "Maximum", "Up To"
    - "Due Date", "Deadline", "Application Deadline"
 
-2. **Dates** - Use YYYY-MM-DD format or write "Rolling" for ongoing opportunities
+2. **Dates** - Use YYYY-MM-DD format, an Excel date cell, "Rolling" for ongoing opportunities,
+   or "Annual: October 15" for a deadline that repeats every year
 
 3. **Amounts** - Can include $ and commas (e.g., "$15,000" or just "15000")
 

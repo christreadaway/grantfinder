@@ -2,7 +2,7 @@
 
 **Repository:** `grantfinder`  
 **Filename:** `grantfinder-PRODUCT_SPEC.md`  
-**Last Updated:** 2026-02-16 at 15:10 UTC
+**Last Updated:** 2026-10-15
 
 ---
 
@@ -16,7 +16,11 @@
 
 ## Tech Stack
 
-Grant database, search, tracking
+Grant database, search, tracking. One Next.js 16 + TypeScript app deployed entirely on Netlify, on
+any Netlify plan: website, engine API at `/api/*` (`frontend/src/server`, which also runs each AI
+step inside a normal request; an optional background function gives each step up to 15 minutes on
+plans that include them), and Netlify Blobs storage. The `backend/` items in the history below describe the original Python
+engine, which is now reference only. Current architecture: `docs/engine.md`.
 
 ---
 
@@ -44,6 +48,13 @@ The following features have been implemented based on development sessions:
 18. Successfully built Next.js frontend production application
 19. [Checked git status and found recently created markdown file]
 20. âœ“ Built complete MVP - FastAPI backend with auth, grants, processing, profile, and export routers; Next.js frontend with dark mode, setup wizard, and terminal UI
+21. Grant discovery: curated starter database, live Grants.gov search, and AI web discovery, merged with deduplication (`docs/grant-discovery.md`)
+22. GrantWriter (v2.0 application writer): requirements, fit/gap analysis, stakeholder intake, voice-conditioned drafting, rubric self-scoring, refinement, and Word/Markdown/portal exports with human approval gates (`docs/grant-writer.md`)
+23. Recurring "Annual: October 15" deadlines and the Kenedy Memorial Foundation record in the starter database
+24. October 2026: moved everything onto Netlify. The engine was ported to TypeScript (`frontend/src/server`), AI steps run as background jobs, data and sign-ins persist in Netlify Blobs, and the dashboard resumes saved work (`docs/engine.md`, `docs/deployment.md`)
+25. October 2026: GrantWriter hand edits with earlier versions and "Restore this version", live limit and banned-phrase checks at export, `[NEEDS INPUT]` placeholders listed per section, and "Draft missing sections" after a partial run (`docs/grant-writer.md`). Questionnaire answers are kept across new question sets, documents add key facts the writer drafts from, and sign-ins survive network blips (`docs/grant-discovery.md`, `docs/deployment.md`)
+26. October 2026: runs on any Netlify plan, including legacy Starter. Each AI step runs inside a normal request (about a minute); long steps continue in parts on their own (drafting a few sections per part, matching the grants that didn't fit). The 15-minute background function is optional (`GRANTFINDER_BACKGROUND_JOBS=true`, only for plans that include background functions), and `/api/health` shows which way AI steps run (`docs/engine.md`, `docs/deployment.md`)
+27. October 2026: Results page **Top picks** (up to 5 strong matches with open deadlines, soonest first), a days-left badge on every match, "Deadline soonest" sort and "Hide not eligible"; the deadline fields are worked out each time results are read (`docs/grant-discovery.md`). GrantWriter step **1b · Funder History**: paste notes, add up to 6 files, or let Claude research the web, and get a funder profile (typical award, comparable grants they made, a suggested ask, what they don't fund) that the fit analysis, drafting and scoring use. An **Application Checklist** at the top of the writer (due date and days left, next step, section status, attachments and requirements to tick off, open gaps, approvals), grant guidelines added as a file, and an **Add Materials** card for adding a document from the writer (`docs/grant-writer.md`)
 
 ---
 
