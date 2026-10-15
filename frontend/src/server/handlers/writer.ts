@@ -18,6 +18,7 @@ import { logger } from '../log';
 import { updateProfile } from '../repo';
 import { getGrantOrFoundation } from '../services/ai';
 import {
+  addNote,
   analyzeFit,
   analyzeVoice,
   assertDraftAllowed,
@@ -31,9 +32,11 @@ import {
   draftsVsSpec,
   MAX_SECTION_VERSIONS,
   openGapsByCoverage,
+  refineConflictMessage,
   replacedQuestionMessage,
   refineSection,
   scoreDraft,
+  SECTION_NOTES,
   WRITER_MESSAGES,
   type WriterAI,
   type WriterRun,
@@ -49,10 +52,11 @@ import {
   saveGaps,
   saveGrantSpec,
   saveScorecard,
-  saveSectionDraft,
   touchApplication,
   updateGaps,
   updateIntakeRequests,
+  updateSectionDraft,
+  writeSectionDraft,
 } from '../services/writerRepo';
 import type { RequiredSection, SectionDraft } from '../types';
 
@@ -308,24 +312,41 @@ async function draftJob(ctx: JobContext): Promise<unknown> {
     try {
       const draft = await draftSection(run, app, section, spec, profile, analysis, confirmedGaps);
       const prior = priorDrafts.get(section.id);
-      if (prior?.current_draft) {
-        // Keep what this replaces (including refinements and hand edits), newest last, capped.
-        draft.versions = [...(prior.versions ?? []), prior.current_draft, ...draft.versions].slice(-MAX_SECTION_VERSIONS);
+      // Compare-and-swap: if the section's text changed after this run read it (a hand edit
+      // that slipped in), that text stays current and the new draft goes into its history.
+      let keptTheirs = false as boolean;
+      const saved = await writeSectionDraft(ctx.userId, app.id, section.id, (stored) => {
+        keptTheirs = false;
+        if (!stored) return draft;
+        if (prior && stored.current_draft === prior.current_draft) {
+          // Keep what this replaces (including refinements and hand edits), newest last, capped.
+          const replaced = stored.current_draft ? [stored.current_draft] : [];
+          return { ...draft, versions: [...(stored.versions ?? []), ...replaced, ...draft.versions].slice(-MAX_SECTION_VERSIONS) };
+        }
+        keptTheirs = true;
+        const kept: SectionDraft = { ...stored, versions: [...(stored.versions ?? []), draft.current_draft].slice(-MAX_SECTION_VERSIONS) };
+        addNote(kept, SECTION_NOTES.redraftKept);
+        return kept;
+      });
+      const result = saved ?? draft;
+      drafted.set(section.id, result);
+      if (keptTheirs) {
+        ctx.note(`Section ${section.id} "${section.title}" changed while drafting: kept the saved text; the new draft is in its earlier versions.`);
+        logger.warn('section_draft_kept_saved_text', { correlation_id: app.correlation_id, app_id: app.id, section_id: section.id });
+        return;
       }
-      await saveSectionDraft(ctx.userId, draft);
-      drafted.set(section.id, draft);
       ctx.note(
-        `Drafted ${section.id} "${section.title}": ${draft.word_count} words, ${draft.char_count} chars` +
-          `${draft.over_limit ? ', OVER LIMIT' : ''}${draft.banned_phrase_hits.length ? `, banned: ${draft.banned_phrase_hits.join(', ')}` : ''}` +
-          `, ${draft.claims.filter((claim) => claim.flagged).length} unsupported claim(s)`,
+        `Drafted ${section.id} "${section.title}": ${result.word_count} words, ${result.char_count} chars` +
+          `${result.over_limit ? ', OVER LIMIT' : ''}${result.banned_phrase_hits.length ? `, banned: ${result.banned_phrase_hits.join(', ')}` : ''}` +
+          `, ${result.claims.filter((claim) => claim.flagged).length} unsupported claim(s)`,
       );
       logger.info('section_drafted', {
         correlation_id: app.correlation_id,
         app_id: app.id,
         section_id: section.id,
-        words: draft.word_count,
-        over_limit: draft.over_limit,
-        banned_hits: draft.banned_phrase_hits.length,
+        words: result.word_count,
+        over_limit: result.over_limit,
+        banned_hits: result.banned_phrase_hits.length,
       });
     } catch (error) {
       if (isFatalClaudeError(error)) {
@@ -440,10 +461,26 @@ async function refineJob(ctx: JobContext): Promise<unknown> {
   if (!section) throw new HttpError(404, WRITER_MESSAGES.sectionNotInSpec);
   if (!draftFitsSection(draft, section)) throw new HttpError(409, replacedQuestionMessage(draft.title, section.title));
 
-  await ctx.progress(`Revising "${draft.title}"...`);
+  // What the revision starts from. It is saved only if the section still holds exactly this
+  // when Claude is done (refineSection changes `draft` in place, so keep copies first).
+  const title = draft.title;
+  const startedText = draft.current_draft;
+  const startedVersions = JSON.stringify(draft.versions ?? []);
+
+  await ctx.progress(`Revising "${title}"...`);
   const run = runFor(ctx, await ctx.claude());
   const revised = await refineSection(run, app, draft, section, profile, instruction);
-  await saveSectionDraft(ctx.userId, revised);
+  let changedMeanwhile = false as boolean;
+  const saved = await updateSectionDraft(ctx.userId, app.id, sectionId, (stored) => {
+    changedMeanwhile = stored.current_draft !== startedText || JSON.stringify(stored.versions ?? []) !== startedVersions;
+    return changedMeanwhile ? undefined : revised;
+  });
+  if (!saved) throw new HttpError(404, WRITER_MESSAGES.sectionDraftNotFound);
+  if (changedMeanwhile) {
+    ctx.note(`Refine of ${section.id} not saved: the section changed while Claude was revising it.`);
+    logger.warn('section_refine_not_saved', { correlation_id: app.correlation_id, app_id: app.id, section_id: section.id });
+    throw new HttpError(409, refineConflictMessage(title));
+  }
   await touchApplication(ctx.userId, app.id);
   ctx.note(`Refined ${section.id}: ${revised.word_count} words${revised.over_limit ? ', still OVER LIMIT' : ''}`);
   logger.info('section_refined', {

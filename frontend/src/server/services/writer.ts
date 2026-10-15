@@ -107,7 +107,14 @@ export const SECTION_NOTES = {
   handEdited: 'Edited by hand.',
   handEditClaims: 'The claim check is from the AI draft; re-check any numbers or names you added.',
   refinedClaims: 'Revised: the claim check is from the earlier draft. Re-check any new numbers or names.',
+  redraftKept:
+    'This section changed while it was being redrafted, so the saved text was kept. The new draft is the newest of the earlier versions.',
 } as const;
+
+/** A refine whose section changed while Claude was writing is not saved (the person's text wins). */
+export function refineConflictMessage(title: string): string {
+  return `"${title}" was changed while Claude was revising it, so the revision was not saved. Your text is kept; refine again if you still want it.`;
+}
 
 /** "[NEEDS INPUT: ...]" markers that drafting leaves where the profile lacked a fact (the writer page uses the same pattern). */
 const NEEDS_INPUT = /\[NEEDS INPUT[^\]]*\]/gi;
@@ -162,17 +169,41 @@ function plainForMatching(text: string): string {
     .replace(/\u00A0/g, ' ');
 }
 
-/** Deterministic banned-phrase scan (case-insensitive substring match), each phrase reported once. */
+/** A letter or digit in any script: what words are made of. */
+const WORD_CHAR = /[\p{L}\p{N}]/u;
+const phraseMatchers = new Map<string, RegExp>();
+
+/**
+ * Whole words only: "compassionate about" is not "passionate about", and a
+ * banned "just" never blocks "justice". An edge that is punctuation (the comma
+ * in "furthermore, ") needs no word boundary; any run of spaces or line breaks
+ * inside a phrase matches any other run.
+ */
+function phraseMatcher(needle: string): RegExp {
+  let matcher = phraseMatchers.get(needle);
+  if (!matcher) {
+    const chars = Array.from(needle);
+    const body = needle.split(/\s+/).map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+');
+    const start = WORD_CHAR.test(chars[0]) ? '(?<![\\p{L}\\p{N}])' : '';
+    const end = WORD_CHAR.test(chars[chars.length - 1]) ? '(?![\\p{L}\\p{N}])' : '';
+    matcher = new RegExp(`${start}${body}${end}`, 'u');
+    if (phraseMatchers.size > 1000) phraseMatchers.clear(); // org lists are short; never grow without bound
+    phraseMatchers.set(needle, matcher);
+  }
+  return matcher;
+}
+
+/** Deterministic banned-phrase scan (case-insensitive, whole words), each phrase reported once. */
 export function findBannedPhrases(text: string, extraBanned: unknown[] = []): string[] {
   const extra = extraBanned.filter((phrase): phrase is string => typeof phrase === 'string' && phrase.trim().length > 0);
   const haystack = plainForMatching(text);
   const seen = new Set<string>();
   const hits: string[] = [];
   for (const phrase of [...DEFAULT_BANNED_PHRASES, ...extra]) {
-    const needle = plainForMatching(phrase);
-    if (seen.has(needle)) continue;
+    const needle = plainForMatching(phrase).trim();
+    if (!needle || seen.has(needle)) continue;
     seen.add(needle);
-    if (haystack.includes(needle)) hits.push(phrase);
+    if (phraseMatcher(needle).test(haystack)) hits.push(phrase);
   }
   return hits;
 }

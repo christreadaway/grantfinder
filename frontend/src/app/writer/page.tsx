@@ -137,6 +137,12 @@ function placeholdersIn(text: string): string[] {
   return text.match(NEEDS_INPUT) ?? [];
 }
 
+/** The section a step's result is about (a refine returns the revised section). */
+function sectionIdOf(result: unknown): string | null {
+  const id = result && typeof result === 'object' ? (result as { section_id?: unknown }).section_id : null;
+  return typeof id === 'string' && id ? id : null;
+}
+
 /** A step's own message, e.g. {note: "Could not read <url>..."}. */
 function noteOf(result: unknown): string | null {
   if (result && typeof result === 'object' && 'note' in result) {
@@ -153,11 +159,21 @@ function logFailure(message: string, error: unknown): void {
   else console.error(message, error);
 }
 
+/** The value a plain map holds for a key (never an inherited one such as "constructor"). */
+function own<T>(map: Record<string, T>, key: string): T | undefined {
+  return Object.prototype.hasOwnProperty.call(map, key) ? map[key] : undefined;
+}
+
 function without<T>(map: Record<string, T>, key: string): Record<string, T> {
-  if (!(key in map)) return map;
+  if (!Object.prototype.hasOwnProperty.call(map, key)) return map;
   const next = { ...map };
   delete next[key];
   return next;
+}
+
+/** Line breaks as the engine saves them, so "the same text" means the same thing here and there. */
+function plainBreaks(text: string): string {
+  return text.replace(/\r\n?/g, '\n');
 }
 
 // =============================================================================
@@ -166,14 +182,20 @@ function without<T>(map: Record<string, T>, key: string): Record<string, T> {
 
 interface Unsaved {
   guidelines: string;
+  /** A strategy edited but not saved yet. */
+  strategy: string;
   intakeAnswers: Record<string, string>;
   refineInputs: Record<string, string>;
   voiceSample: string;
   /** section id -> text of an edit not saved yet (present = the section is in edit mode) */
   edits: Record<string, string>;
+  /** section id -> the saved text when Edit was clicked (shows when a redraft or another tab changed it since) */
+  editBases: Record<string, string>;
 }
 
-const NOTHING_UNSAVED: Unsaved = { guidelines: '', intakeAnswers: {}, refineInputs: {}, voiceSample: '', edits: {} };
+const NOTHING_UNSAVED: Unsaved = {
+  guidelines: '', strategy: '', intakeAnswers: {}, refineInputs: {}, voiceSample: '', edits: {}, editBases: {},
+};
 const unsavedKey = (appId: string) => `grantfinder.writer.unsaved.${appId}`;
 let storageWarned = false;
 
@@ -192,10 +214,12 @@ function readUnsaved(appId: string | null): Unsaved {
     const data = JSON.parse(raw) as Record<string, unknown> | null;
     return {
       guidelines: typeof data?.guidelines === 'string' ? data.guidelines : '',
+      strategy: typeof data?.strategy === 'string' ? data.strategy : '',
       intakeAnswers: textMap(data?.intakeAnswers, false),
       refineInputs: textMap(data?.refineInputs, false),
       voiceSample: typeof data?.voiceSample === 'string' ? data.voiceSample : '',
       edits: textMap(data?.edits, true),
+      editBases: textMap(data?.editBases, true),
     };
   } catch (error) {
     console.warn('[GrantFinder] Could not read the text kept from before the reload:', error);
@@ -206,12 +230,15 @@ function readUnsaved(appId: string | null): Unsaved {
 function writeUnsaved(appId: string, unsaved: Unsaved): void {
   const kept: Unsaved = {
     guidelines: unsaved.guidelines,
+    strategy: unsaved.strategy,
     intakeAnswers: textMap(unsaved.intakeAnswers, false),
     refineInputs: textMap(unsaved.refineInputs, false),
     voiceSample: unsaved.voiceSample,
     edits: unsaved.edits,
+    // A base only matters while its edit box is open.
+    editBases: Object.fromEntries(Object.entries(unsaved.editBases).filter(([id]) => own(unsaved.edits, id) !== undefined)),
   };
-  const empty = !kept.guidelines.trim() && !kept.voiceSample.trim() && !Object.keys(kept.intakeAnswers).length &&
+  const empty = !kept.guidelines.trim() && !kept.strategy.trim() && !kept.voiceSample.trim() && !Object.keys(kept.intakeAnswers).length &&
     !Object.keys(kept.refineInputs).length && !Object.keys(kept.edits).length;
   try {
     if (empty) window.sessionStorage.removeItem(unsavedKey(appId));
@@ -275,20 +302,45 @@ function WriterInner({ appId }: { appId: string | null }) {
   const [notice, setNotice] = useState<string | null>(null);
   const [jobProgress, setJobProgress] = useState<string | null>(null);
   const [guidelines, setGuidelines] = useState(restored.guidelines);
-  const [strategyText, setStrategyText] = useState('');
+  const [strategyText, setStrategyText] = useState(restored.strategy);
   const [intakeAnswers, setIntakeAnswers] = useState(restored.intakeAnswers);
   const [refineInputs, setRefineInputs] = useState(restored.refineInputs);
   const [voiceSample, setVoiceSample] = useState(restored.voiceSample);
   const [edits, setEdits] = useState(restored.edits);
+  const [editBases, setEditBases] = useState(restored.editBases);
   const [emailCopy, setEmailCopy] = useState<Record<string, 'copied' | 'failed'>>({});
 
   // Live status lines from background jobs ("Drafting section 2 of 6: Need")
   useEffect(() => onJobProgress((info) => setJobProgress(info.progress)), []);
 
+  // The strategy counts as unsaved only when it differs from the saved one (or the
+  // recommended one before confirming). While loading, keep whatever was restored.
+  const savedStrategy = state ? state.application.strategy || state.fit_analysis?.recommended_strategy || '' : null;
+  const unsavedStrategy = savedStrategy === null || (strategyText.trim() && strategyText.trim() !== savedStrategy.trim()) ? strategyText : '';
+
   // Typed text survives a reload of this tab.
   useEffect(() => {
-    if (appId) writeUnsaved(appId, { guidelines, intakeAnswers, refineInputs, voiceSample, edits });
-  }, [appId, guidelines, intakeAnswers, refineInputs, voiceSample, edits]);
+    if (appId) writeUnsaved(appId, { guidelines, strategy: unsavedStrategy, intakeAnswers, refineInputs, voiceSample, edits, editBases });
+  }, [appId, guidelines, unsavedStrategy, intakeAnswers, refineInputs, voiceSample, edits, editBases]);
+
+  // Sections whose edit box is open with text that differs from the saved text:
+  // drafting, scoring and export would ignore that text, so they wait for Save or Cancel.
+  const unsavedEdits = (state?.sections || []).filter((s) => {
+    const text = own(edits, s.section_id);
+    return text !== undefined && plainBreaks(text) !== plainBreaks(s.current_draft);
+  });
+  const hasUnsavedEdits = unsavedEdits.length > 0;
+
+  // Closing or reloading the tab with an unsaved edit asks first.
+  useEffect(() => {
+    if (!hasUnsavedEdits) return;
+    const warn = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = ''; // older browsers show the prompt only when this is set
+    };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [hasUnsavedEdits]);
 
   const applyState = useCallback((data: WriterState) => {
     setState(data);
@@ -328,8 +380,16 @@ function WriterInner({ appId }: { appId: string | null }) {
     setBusy(label);
     setJobProgress(running.progress);
     try {
-      const note = noteOf(await api.waitForJob(running.id, running.kind));
+      const result = await api.waitForJob(running.id, running.kind);
+      const note = noteOf(result);
       if (note) setNotice(note);
+      // A refine that finished in the background used the instruction kept from before
+      // the reload: clear it (unless the person has typed a new one since).
+      const refinedId = running.kind === 'writer.refine' ? sectionIdOf(result) : null;
+      if (refinedId) {
+        const keptInstruction = own(restored.refineInputs, refinedId);
+        setRefineInputs((current) => (own(current, refinedId) === keptInstruction ? without(current, refinedId) : current));
+      }
     } catch (e) {
       logFailure(`[GrantFinder] writer step "${label}" failed:`, e);
       setError(errorDetail(e, 'That step failed.'));
@@ -338,7 +398,7 @@ function WriterInner({ appId }: { appId: string | null }) {
       setBusy(null);
       setJobProgress(null);
     }
-  }, [appId, refresh]);
+  }, [appId, refresh, restored]);
 
   // Load the application first; only once that worked, look for a step still running.
   useEffect(() => {
@@ -427,6 +487,11 @@ function WriterInner({ appId }: { appId: string | null }) {
   const noticeIsWarning = notice !== null && WARNING_NOTICE.test(notice);
   const rankedFixes = scorecard?.ranked_fixes || [];
   const strengthLeads = analysis?.strength_leads || [];
+  const unsavedTitles = unsavedEdits.map((s) => s.title).join(', ');
+  const unsavedWhere = unsavedEdits.length === 1 ? 'that section' : 'those sections';
+  const unsavedExportMessage = hasUnsavedEdits
+    ? `Unsaved changes in ${unsavedTitles}: click Save on ${unsavedWhere} (or Cancel) before you export.`
+    : '';
 
   /**
    * Run one step: busy banner, errors shown, and the page reloaded either way
@@ -483,17 +548,50 @@ function WriterInner({ appId }: { appId: string | null }) {
 
   const refine = (s: SectionDraft) =>
     forSection(s.section_id, async () => {
-      const ok = await run('refine', () => api.refineSection(appId, s.section_id, refineInputs[s.section_id] || ''));
+      // A refusal (e.g. another step still running) shows as an error and keeps the instruction.
+      const ok = await run('refine', () => api.refineSection(appId, s.section_id, own(refineInputs, s.section_id) ?? ''));
       if (ok) setRefineInputs((current) => without(current, s.section_id));
       return ok;
     });
 
-  const saveEdit = (s: SectionDraft) =>
-    forSection(s.section_id, async () => {
-      const ok = await run('edit', () => api.editSection(appId, s.section_id, edits[s.section_id] ?? ''), () => `Saved your edit to "${s.title}".`);
-      if (ok) setEdits((current) => without(current, s.section_id));
+  /** Open the edit box with the saved text, and remember that text to notice later changes. */
+  const startEdit = (s: SectionDraft) => {
+    setEdits((current) => ({ ...current, [s.section_id]: s.current_draft }));
+    setEditBases((current) => ({ ...current, [s.section_id]: s.current_draft }));
+  };
+
+  const closeEdit = (sectionId: string) => {
+    setEdits((current) => without(current, sectionId));
+    setEditBases((current) => without(current, sectionId));
+  };
+
+  /** The saved text changed after Edit was clicked (a redraft, a restore, or another tab). */
+  const savedTextMoved = (s: SectionDraft) => {
+    const base = own(editBases, s.section_id);
+    return base !== undefined && plainBreaks(base) !== plainBreaks(s.current_draft);
+  };
+
+  const saveEdit = (s: SectionDraft) => {
+    if (savedTextMoved(s)) {
+      if (!window.confirm(`The saved text of "${s.title}" changed after you started editing (a redraft or another tab). Save your text anyway? The newer text stays in Earlier versions.`)) return;
+      // Asked once: the newer text is now the one this edit replaces.
+      setEditBases((current) => ({ ...current, [s.section_id]: s.current_draft }));
+    }
+    return forSection(s.section_id, async () => {
+      const ok = await run('edit', () => api.editSection(appId, s.section_id, own(edits, s.section_id) ?? ''), () => `Saved your edit to "${s.title}".`);
+      if (ok) closeEdit(s.section_id);
       return ok;
     });
+  };
+
+  /** Cancel asks first when the person typed something (compared with the text the box started from). */
+  const cancelEdit = (s: SectionDraft) => {
+    const typed = own(edits, s.section_id) ?? '';
+    const startedFrom = own(editBases, s.section_id) ?? s.current_draft;
+    if (plainBreaks(typed) !== plainBreaks(startedFrom) &&
+      !window.confirm(`Throw away your changes to "${s.title}"? They are not saved and cannot be recovered.`)) return;
+    closeEdit(s.section_id);
+  };
 
   const restoreVersion = (s: SectionDraft, text: string) => {
     if (!window.confirm(`Put this earlier version back as the text of "${s.title}"? The current text is kept in the earlier versions.`)) return;
@@ -547,6 +645,11 @@ function WriterInner({ appId }: { appId: string | null }) {
   };
 
   const download = async (format: ExportFormat) => {
+    if (unsavedExportMessage) {
+      // The file would hold the saved text, not what is in the open edit box.
+      setError(unsavedExportMessage);
+      return;
+    }
     setBusy(`export-${format}`);
     setError(null);
     setNotice(null);
@@ -577,8 +680,9 @@ function WriterInner({ appId }: { appId: string | null }) {
     const stale = staleIds.includes(s.section_id);
     // Limits belong to the question this draft answers; a stale draft has none.
     const limits = stale ? undefined : sectionSpecs.get(s.section_id);
-    const editing = Object.prototype.hasOwnProperty.call(edits, s.section_id);
-    const editText = edits[s.section_id] ?? '';
+    const editing = own(edits, s.section_id) !== undefined;
+    const editText = own(edits, s.section_id) ?? '';
+    const refineText = own(refineInputs, s.section_id) ?? '';
     const flagged = (s.claims || []).filter((c) => c.flagged);
     const placeholders = placeholdersIn(s.current_draft);
     const versions = s.versions || [];
@@ -611,6 +715,12 @@ function WriterInner({ appId }: { appId: string | null }) {
               }}
               className="w-full h-72 bg-black/30 border border-gray-700 rounded p-3 text-sm"
             />
+            {savedTextMoved(s) && (
+              <p className="text-amber-400 text-xs">
+                The saved text changed after you started editing (a redraft or another tab). Save replaces it; the newer
+                text stays in Earlier versions. Cancel shows it.
+              </p>
+            )}
             <div className="flex flex-wrap items-center justify-between gap-2">
               <EditCounts text={editText} limits={limits} />
               <div className="flex gap-2">
@@ -620,7 +730,7 @@ function WriterInner({ appId }: { appId: string | null }) {
                   {busy === 'edit' && mine ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />} Save
                 </button>
                 <button className={`btn btn-secondary text-xs ${OFF}`} disabled={busy !== null}
-                  onClick={() => setEdits((current) => without(current, s.section_id))}>
+                  onClick={() => cancelEdit(s)}>
                   Cancel
                 </button>
               </div>
@@ -648,8 +758,9 @@ function WriterInner({ appId }: { appId: string | null }) {
         )}
         <div className="flex flex-wrap gap-2">
           <input
+            aria-label={`Refine ${s.title}`}
             placeholder='Refine: e.g. "tighten by 40 words", "warm this up", "lead with the outcome"'
-            value={refineInputs[s.section_id] || ''}
+            value={refineText}
             onChange={(e) => {
               const value = e.target.value;
               setRefineInputs((current) => ({ ...current, [s.section_id]: value }));
@@ -657,18 +768,18 @@ function WriterInner({ appId }: { appId: string | null }) {
             className="flex-1 min-w-[12rem] bg-black/30 border border-gray-700 rounded p-2 text-xs"
           />
           <button className={`btn btn-secondary text-xs ${OFF}`}
-            disabled={busy !== null || editing || !(refineInputs[s.section_id] || '').trim()}
+            disabled={busy !== null || editing || !refineText.trim()}
             onClick={() => void refine(s)}>
             {busy === 'refine' && mine ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Wand2 className="w-3 h-3" /> Refine</>}
           </button>
-          <button className={`btn btn-secondary text-xs ${OFF}`} disabled={busy !== null || editing || blocking.length > 0}
-            title="Write this section again from scratch"
+          <button className={`btn btn-secondary text-xs ${OFF}`} disabled={busy !== null || editing || blocking.length > 0 || hasUnsavedEdits}
+            title={hasUnsavedEdits ? 'Save or cancel the open edit first' : 'Write this section again from scratch'}
             onClick={() => void forSection(s.section_id, () => draftSections(s.section_id))}>
             {busy === 'draft' && mine && <Loader2 className="w-3 h-3 animate-spin" />} Redraft
           </button>
           {!editing && (
             <button className={`btn btn-secondary text-xs ${OFF}`} disabled={busy !== null} title="Change the text yourself"
-              onClick={() => setEdits((current) => ({ ...current, [s.section_id]: s.current_draft }))}>
+              onClick={() => startEdit(s)}>
               <Pencil className="w-3 h-3" /> Edit
             </button>
           )}
@@ -764,6 +875,7 @@ function WriterInner({ appId }: { appId: string | null }) {
               Paste the full grant guidelines if you have them (best results). Leave blank to work from the grant record and its website.
             </p>
             <textarea
+              aria-label="Grant guidelines"
               value={guidelines}
               onChange={(e) => setGuidelines(e.target.value)}
               placeholder="Paste guidelines / RFP text here (optional)..."
@@ -805,6 +917,7 @@ function WriterInner({ appId }: { appId: string | null }) {
             <details open={spec.rubric_source === 'inferred'}>
               <summary className="cursor-pointer text-gray-400">Paste guidelines and re-analyze</summary>
               <textarea
+                aria-label="Grant guidelines"
                 value={guidelines}
                 onChange={(e) => setGuidelines(e.target.value)}
                 placeholder="Paste guidelines / RFP text here..."
@@ -861,8 +974,9 @@ function WriterInner({ appId }: { appId: string | null }) {
                 </div>
               )}
               <div>
-                <label className="text-sm font-semibold block mb-1">Narrative strategy (edit before confirming)</label>
+                <label htmlFor="writer-strategy" className="text-sm font-semibold block mb-1">Narrative strategy (edit before confirming)</label>
                 <textarea
+                  id="writer-strategy"
                   value={strategyText}
                   onChange={(e) => setStrategyText(e.target.value)}
                   className="w-full h-24 bg-black/30 border border-gray-700 rounded p-3 text-sm"
@@ -946,6 +1060,7 @@ function WriterInner({ appId }: { appId: string | null }) {
                   {req.status !== 'answered' && req.status !== 'confirmed_gap' && (
                     <div className="space-y-2">
                       <textarea
+                        aria-label={`Answer from ${req.stakeholder_role}`}
                         placeholder="Paste the stakeholder's answer here..."
                         value={intakeAnswers[req.id] || ''}
                         onChange={(e) => {
@@ -986,6 +1101,7 @@ function WriterInner({ appId }: { appId: string | null }) {
                 Drafts will match your real voice instead of a generic one.
               </p>
               <textarea
+                aria-label="Writing sample"
                 value={voiceSample}
                 onChange={(e) => setVoiceSample(e.target.value)}
                 placeholder="Paste a writing sample here..."
@@ -1014,16 +1130,21 @@ function WriterInner({ appId }: { appId: string | null }) {
               You changed the strategy above. It will be saved and used the next time you draft.
             </p>
           )}
+          {hasUnsavedEdits && (
+            <p className="text-amber-300 text-sm mb-3">
+              Unsaved changes in {unsavedTitles}: click Save on {unsavedWhere} (or Cancel) before you draft, score or export.
+            </p>
+          )}
           {sections.length > 0 && missingSections.length > 0 && (
             <div className="mb-3 px-3 py-2 rounded border border-yellow-800 text-yellow-300 text-sm">
               Not drafted yet: {missingSections.map((m) => m.title).join(', ')}.
-              <button className={`btn btn-primary text-xs ml-3 ${OFF}`} disabled={busy !== null || blocking.length > 0}
+              <button className={`btn btn-primary text-xs ml-3 ${OFF}`} disabled={busy !== null || blocking.length > 0 || hasUnsavedEdits}
                 onClick={() => void draftSections(undefined, true)}>
                 Draft missing sections
               </button>
             </div>
           )}
-          <button className={`btn btn-primary mb-4 ${OFF}`} disabled={busy !== null || blocking.length > 0} onClick={redraftAll}>
+          <button className={`btn btn-primary mb-4 ${OFF}`} disabled={busy !== null || blocking.length > 0 || hasUnsavedEdits} onClick={redraftAll}>
             {busy === 'draft' && activeSection === null && <Loader2 className="w-4 h-4 animate-spin" />}
             {sections.length > 0 ? 'Redraft All Sections' : 'Draft All Sections'}
           </button>
@@ -1037,7 +1158,7 @@ function WriterInner({ appId }: { appId: string | null }) {
       {sections.length > 0 && (
         <div className="card">
           <h2 className="text-xl font-bold mb-2">5 · Self-Score Against the Rubric</h2>
-          <button className={`btn btn-primary mb-4 ${OFF}`} disabled={busy !== null}
+          <button className={`btn btn-primary mb-4 ${OFF}`} disabled={busy !== null || hasUnsavedEdits}
             onClick={() => void run('score', () => api.scoreApplication(appId))}>
             {busy === 'score' ? <Loader2 className="w-4 h-4 animate-spin" /> : scorecard ? 'Re-Score Draft' : 'Score Draft'}
           </button>
@@ -1091,9 +1212,14 @@ function WriterInner({ appId }: { appId: string | null }) {
               {' '}They will appear in the exported file; fix them before you submit.
             </p>
           )}
+          {hasUnsavedEdits && (
+            <p role="alert" className="mb-3 px-3 py-2 rounded border border-red-800 bg-red-950/40 text-red-300 text-sm">
+              {unsavedExportMessage}
+            </p>
+          )}
           <div className="flex flex-wrap gap-2">
             {EXPORTS.map(([fmt, label]) => (
-              <button key={fmt} className={`btn btn-secondary ${OFF}`} disabled={busy !== null} onClick={() => void download(fmt)}>
+              <button key={fmt} className={`btn btn-secondary ${OFF}`} disabled={busy !== null || hasUnsavedEdits} onClick={() => void download(fmt)}>
                 {busy === `export-${fmt}` ? <Loader2 className="w-4 h-4 animate-spin" /> : label}
               </button>
             ))}

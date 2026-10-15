@@ -222,6 +222,28 @@ check(
   JSON.stringify(writer.findBannedPhrases("We Are Thrilled. In today’s fast-paced world, synergy!", ['synergy', 'we are thrilled', '  '])) ===
     JSON.stringify(['we are thrilled', "in today's fast-paced world", 'synergy']),
 );
+check(
+  'banned phrases match whole words only: "compassionate about" is not "passionate about", "justice" is not "just"',
+  writer.findBannedPhrases('We are compassionate about every family.').length === 0 &&
+    writer.findBannedPhrases('We work for justice and adjust our plans.', ['just']).length === 0 &&
+    writer.findBannedPhrases('Our state-of-the-artistry program.').length === 0,
+  [writer.findBannedPhrases('We are compassionate about every family.'), writer.findBannedPhrases('justice', ['just'])],
+);
+check(
+  'banned phrases still match as whole words: next to punctuation, across a line break, with a trailing comma phrase',
+  JSON.stringify(writer.findBannedPhrases('We just want to help.', ['just'])) === '["just"]' &&
+    JSON.stringify(writer.findBannedPhrases('Families who are passionate about reading.')) === '["passionate about"]' &&
+    JSON.stringify(writer.findBannedPhrases('A state-of-the-art lab.')) === '["state-of-the-art"]' &&
+    JSON.stringify(writer.findBannedPhrases('We are\nthrilled.')) === '["we are thrilled"]' &&
+    JSON.stringify(writer.findBannedPhrases('Furthermore, the lab stays open.')) === '["furthermore, "]' &&
+    JSON.stringify(writer.findBannedPhrases('(synergy)', ['  synergy '])) === '["  synergy "]',
+  [
+    writer.findBannedPhrases('We just want to help.', ['just']),
+    writer.findBannedPhrases('We are\nthrilled.'),
+    writer.findBannedPhrases('Furthermore, the lab stays open.'),
+    writer.findBannedPhrases('(synergy)', ['  synergy ']),
+  ],
+);
 check('pyJson uses Python separators', writer.pyJson(['a', { b: 1, c: [null, true] }]) === '["a", {"b": 1, "c": [null, true]}]');
 const salvaged = writer.readDraftAnswer('```json\n{"draft": "Our school\\nserves 214 students and');
 check('cut-off JSON draft is salvaged, not pasted as raw JSON', salvaged?.draft === 'Our school\nserves 214 students and' && salvaged?.truncated === true, salvaged);
@@ -904,6 +926,16 @@ check(
   overEdit.status === 200 && overEdit.data.over_limit === true && overEdit.data.word_count === 320 && s2Over.over_limit === true,
   [overEdit.status, overEdit.data?.over_limit, overEdit.data?.word_count, s2Over.over_limit],
 );
+const liveScorecard = (await api('GET', appPath, { token: tokenA })).data.scorecard;
+const storedScorecard = await writerRepo.getScorecard(userA, appId);
+type ComplianceRow = { section?: unknown; check?: unknown; passed?: unknown; detail?: unknown };
+const limitRow = (rows: ComplianceRow[] | undefined) => rows?.find((c) => c.section === 'Statement of Need' && c.check === 'word/char limit');
+check(
+  'the scorecard checklist follows the live text (the over-limit edit fails its limit check); the stored scorecard is untouched',
+  limitRow(liveScorecard?.compliance_results)?.passed === false && /^320 words/.test(String(limitRow(liveScorecard?.compliance_results)?.detail)) &&
+    limitRow(storedScorecard?.compliance_results)?.passed === true && liveScorecard.overall_score === storedScorecard?.overall_score,
+  [limitRow(liveScorecard?.compliance_results), limitRow(storedScorecard?.compliance_results)],
+);
 const blockedByEdit = await api('POST', `${appPath}/export`, { token: tokenA, json: { format: 'md' } });
 check(
   'export refuses the over-limit edit (409) and names the section',
@@ -925,6 +957,13 @@ check(
     blockedByDirtyEdit.data.detail ===
       'Cannot export: banned phrases remain in: Statement of Need ("we are thrilled"). Refine that section (for example "remove these phrases") or edit it by hand first.',
   blockedByDirtyEdit.data,
+);
+const compassionateEdit = await api('PUT', `${appPath}/sections/s2`, { token: tokenA, json: { text: 'Our teachers are compassionate about every family we serve.' } });
+const compassionateExport = await api('POST', `${appPath}/export`, { token: tokenA, json: { format: 'md' } });
+check(
+  'a hand edit saying "compassionate about" is not flagged as "passionate about", and it exports',
+  compassionateEdit.status === 200 && compassionateEdit.data.banned_phrase_hits.length === 0 && compassionateExport.status === 200,
+  [compassionateEdit.data?.banned_phrase_hits, compassionateExport.status, compassionateExport.data?.detail],
 );
 for (let i = 1; i <= 8; i++) {
   await api('PUT', `${appPath}/sections/s2`, { token: tokenA, json: { text: `Hand edit number ${i}.` } });

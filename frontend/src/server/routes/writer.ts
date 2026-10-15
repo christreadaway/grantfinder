@@ -31,6 +31,7 @@ import {
   applyHandEdit,
   assertDraftAllowed,
   blockingGaps,
+  complianceResults,
   countChars,
   findPlaceholders,
   limitsFor,
@@ -172,6 +173,9 @@ async function getApplicationState(ctx: RequestContext): Promise<Record<string, 
   ]);
   const voice = profile?.voice_profile ?? null;
   const coverage = spec ? draftsVsSpec(drafts, spec) : null;
+  // Over-limit flags, counts and banned phrases re-checked against the CURRENT
+  // requirements and banned phrases on every read (copies; nothing is saved).
+  const sections = liveCompliance(orderDrafts(drafts, spec), spec, profile);
   return {
     application: app,
     has_voice_profile: Boolean(voice && voice.style_guidelines),
@@ -181,13 +185,15 @@ async function getApplicationState(ctx: RequestContext): Promise<Record<string, 
     gaps,
     open_blocking_gaps: blockingGaps(gaps),
     intake_requests: intake,
-    // Over-limit flags, counts and banned phrases re-checked against the CURRENT
-    // requirements and banned phrases on every read (copies; nothing is saved).
-    sections: liveCompliance(orderDrafts(drafts, spec), spec, profile),
+    sections,
     // Required sections with no draft yet, and drafts the current requirements no longer ask for.
     missing_sections: coverage ? coverage.missing.map((section) => ({ id: section.id, title: section.title })) : [],
     stale_section_ids: coverage ? coverage.stale.map((draft) => draft.section_id) : [],
-    scorecard,
+    // The pass/fail checklist describes the text as it is now (a hand edit after scoring
+    // can go over a limit), from the same live check export uses. The score itself is kept.
+    scorecard: scorecard
+      ? { ...scorecard, compliance_results: complianceResults(spec ? draftsVsSpec(sections, spec).current : sections) }
+      : null,
   };
 }
 

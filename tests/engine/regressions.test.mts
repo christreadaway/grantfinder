@@ -211,6 +211,87 @@ check(
     editDuringRefine.data.running === undefined && refineDone?.status === 'done',
   [slowRefine.status, editDuringRefine.data, refineDone?.status],
 );
+
+// --- 8. A different step on the same sections while a redraft runs gets a plain 409 (never the redraft's
+// result, no Claude call); the identical click still waits for the running redraft.
+const promptCount = async (promptId: string) => (await mock.requests()).filter((r) => r.prompt_id === promptId).length;
+await mock.delay('section_draft_v1', 1500);
+const runningRedraft = await api('POST', `${base}/draft`, { token, json: { section_id: oldIds[0] } });
+const refineCallsBefore = await promptCount('section_refine_v1');
+const refineWhileDrafting = await api('POST', `${base}/sections/budget/refine`, { token, json: { instruction: 'warm it up' } });
+const sameRedraft = await api('POST', `${base}/draft`, { token, json: { section_id: oldIds[0] } });
+await mock.delay('section_draft_v1', 0);
+const redraftFinished = runningRedraft.status === 202 ? await waitJob(runningRedraft.data.job_id) : null;
+const refineCallsAfter = await promptCount('section_refine_v1');
+check(
+  'refine while a redraft runs -> plain 409 that says to wait (no running flag, no job id, no Claude call)',
+  runningRedraft.status === 202 && refineWhileDrafting.status === 409 &&
+    /^Another step that changes the same sections is still running \(started .+ ago\)\. Wait for it to finish, then try again\. What you typed is kept\.$/.test(
+      refineWhileDrafting.data.detail,
+    ) &&
+    refineWhileDrafting.data.running === undefined && refineWhileDrafting.data.job_id === undefined && refineCallsAfter === refineCallsBefore,
+  [refineWhileDrafting.status, refineWhileDrafting.data, refineCallsBefore, refineCallsAfter],
+);
+check(
+  'the identical redraft click still waits for the running one (409 running, same job id)',
+  sameRedraft.status === 409 && sameRedraft.data.running === true && sameRedraft.data.job_id === runningRedraft.data.job_id &&
+    redraftFinished?.status === 'done',
+  [sameRedraft.data, redraftFinished?.status],
+);
+
+// --- 9. Job saves are compare-and-swap: text saved while Claude works (e.g. a hand edit that slipped
+// past a job wrongly judged dead) is never overwritten. Simulated with a slow Claude and a direct write.
+const { saveSectionDraft } = await import('../../frontend/src/server/services/writerRepo.ts');
+const waitForPrompt = async (promptId: string, before: number) => {
+  for (let i = 0; i < 200 && (await promptCount(promptId)) <= before; i++) await new Promise((resolve) => setTimeout(resolve, 25));
+  return (await promptCount(promptId)) > before;
+};
+const HAND_TEXT = 'Typed by hand while Claude was revising.';
+const budgetBeforeRace = (await getSectionDraft(me.id, app.id, 'budget'))!;
+const refinesBeforeRace = await promptCount('section_refine_v1');
+await mock.delay('section_refine_v1', 1500);
+const racingRefine = await api('POST', `${base}/sections/budget/refine`, { token, json: { instruction: 'make it warmer' } });
+const refineReachedClaude = await waitForPrompt('section_refine_v1', refinesBeforeRace);
+await saveSectionDraft(me.id, { ...budgetBeforeRace, current_draft: HAND_TEXT, versions: [...budgetBeforeRace.versions, budgetBeforeRace.current_draft] });
+await mock.delay('section_refine_v1', 0);
+const racingRefineJob = racingRefine.status === 202 ? await waitJob(racingRefine.data.job_id) : null;
+const budgetAfterRefineRace = await getSectionDraft(me.id, app.id, 'budget');
+check(
+  'a refine whose section changed while Claude worked is not saved (409 says so); the text saved meanwhile stays',
+  racingRefine.status === 202 && refineReachedClaude && racingRefineJob?.status === 'failed' && racingRefineJob.error?.status === 409 &&
+    racingRefineJob.error?.detail ===
+      '"Budget Narrative" was changed while Claude was revising it, so the revision was not saved. Your text is kept; refine again if you still want it.' &&
+    budgetAfterRefineRace?.current_draft === HAND_TEXT,
+  [racingRefineJob?.status, racingRefineJob?.error, budgetAfterRefineRace?.current_draft],
+);
+
+const HAND_TEXT_2 = 'Typed by hand while the section was being redrafted.';
+const draftsBeforeRace = await promptCount('section_draft_v1');
+await mock.delay('section_draft_v1', 1500);
+const racingDraft = await api('POST', `${base}/draft`, { token, json: { section_id: 'budget' } });
+const draftReachedClaude = await waitForPrompt('section_draft_v1', draftsBeforeRace);
+const budgetMidDraft = (await getSectionDraft(me.id, app.id, 'budget'))!;
+await saveSectionDraft(me.id, { ...budgetMidDraft, current_draft: HAND_TEXT_2, versions: [...budgetMidDraft.versions, budgetMidDraft.current_draft] });
+await mock.delay('section_draft_v1', 0);
+const racingDraftJob = racingDraft.status === 202 ? await waitJob(racingDraft.data.job_id) : null;
+const budgetAfterDraftRace = await getSectionDraft(me.id, app.id, 'budget');
+const newestVersion = budgetAfterDraftRace?.versions[budgetAfterDraftRace.versions.length - 1] ?? '';
+check(
+  'a redraft that finishes after such a change keeps the saved text; the new draft is the newest earlier version, with a note',
+  racingDraft.status === 202 && draftReachedClaude && racingDraftJob?.status === 'done' && budgetAfterDraftRace?.current_draft === HAND_TEXT_2 &&
+    newestVersion.startsWith('[School Name] has taught the children of [City] since 1952.') && budgetAfterDraftRace.versions.includes(HAND_TEXT) &&
+    budgetAfterDraftRace.compliance_notes.includes(
+      'This section changed while it was being redrafted, so the saved text was kept. The new draft is the newest of the earlier versions.',
+    ),
+  [racingDraftJob?.status, budgetAfterDraftRace?.current_draft, newestVersion.slice(0, 80), budgetAfterDraftRace?.compliance_notes],
+);
+const normalRedraft = await call('POST', `${base}/draft`, { token, json: { section_id: 'budget' } });
+const budgetAfterNormal = await getSectionDraft(me.id, app.id, 'budget');
+check(
+  'without a change in between, a redraft replaces the text and keeps the old one in the history',
+  normalRedraft.status === 200 && budgetAfterNormal?.current_draft !== HAND_TEXT_2 && budgetAfterNormal?.versions.includes(HAND_TEXT_2) === true,
+  [normalRedraft.status, budgetAfterNormal?.current_draft.slice(0, 60)],
+);
 await mock.reset();
 
 mock.stop();

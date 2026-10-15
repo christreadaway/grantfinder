@@ -143,6 +143,21 @@ export async function updateSectionDraft(
   return update<SectionDraft>(sectionDraftKey(userId, appId, sectionId), (current) => (current ? fn(current) : undefined));
 }
 
+/**
+ * Like updateSectionDraft, but may also create the draft: `fn` gets what is
+ * stored now (null when nothing is) and returns what to store, or undefined to
+ * leave it. Background jobs save through this, so a hand edit that lands while
+ * Claude is writing is seen (compare-and-swap) instead of silently overwritten.
+ */
+export async function writeSectionDraft(
+  userId: string,
+  appId: string,
+  sectionId: string,
+  fn: (current: SectionDraft | null) => SectionDraft | undefined,
+): Promise<SectionDraft | null> {
+  return update<SectionDraft>(sectionDraftKey(userId, appId, sectionId), fn);
+}
+
 // =============================================================================
 // Scorecard (latest only)
 // =============================================================================
