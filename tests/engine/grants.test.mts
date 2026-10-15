@@ -783,13 +783,19 @@ const csv = await api('POST', '/api/export', { token: tokenA, json: { session_id
 const csvLines = csv.text.split('\r\n');
 check('CSV export: 200, text/csv, attachment with the Python file name', csv.status === 200 && csv.headers.get('content-type') === 'text/csv; charset=utf-8' && /^attachment; filename="grantfinder_matches_\d{8}_\d{6}\.csv"$/.test(csv.headers.get('content-disposition') || ''), [csv.status, csv.headers.get('content-type'), csv.headers.get('content-disposition')]);
 check('CSV starts with a UTF-8 byte-order mark (Excel)', csv.bytes[0] === 0xef && csv.bytes[1] === 0xbb && csv.bytes[2] === 0xbf);
-check('CSV header row', csvLines[0] === 'Rank,Grant Name,Funder,Amount,Deadline,Score (%),Tier,Category,Geo Qualified,Contact,URL,Explanation', csvLines[0]);
+check(
+  'CSV header row (the Python columns, then the grant facts)',
+  csvLines[0] ===
+    'Rank,Grant Name,Funder,Amount,Deadline,Score (%),Tier,Category,Geo Qualified,Contact,URL,Explanation,' +
+      'Geography,Religious Eligibility,Deadline Notes,Typical Award,Funder Priorities,Eligibility Notes,Last Verified',
+  csvLines[0],
+);
 check(
   'CSV row quoting like Python csv',
-  csvLines[1] === '1,Example Catholic Schools Technology Grant,Example Catholic Education Fund,"Up to $10,000",2026-12-01,92,excellent,catholic_school,Yes,grants@example.org,https://example.org/tech-grant,"Strong fit: technology needs, ""STEM"" plan, and eligibility."',
+  csvLines[1] === '1,Example Catholic Schools Technology Grant,Example Catholic Education Fund,"Up to $10,000",2026-12-01,92,excellent,catholic_school,Yes,grants@example.org,https://example.org/tech-grant,"Strong fit: technology needs, ""STEM"" plan, and eligibility.",,,,,,,',
   csvLines[1],
 );
-check('CSV: formula-looking text is neutralized, multi-line text quoted', csvLines[2].startsWith(`2,"'=SUM(1,2) Example Formula Grant"`) && csvLines[2].endsWith('"Line one\nline two"'), csvLines[2]);
+check('CSV: formula-looking text is neutralized, multi-line text quoted', csvLines[2].startsWith(`2,"'=SUM(1,2) Example Formula Grant"`) && csvLines[2].endsWith('"Line one\nline two",,,,,,,'), csvLines[2]);
 check('CSV: all 3 matches with include_all_matches', csvLines.length === 5 && csvLines[4] === '', csvLines.length);
 
 const csvShort = await api('POST', '/api/export', { token: tokenA, json: { session_id: 'session_export_1', format: 'csv' } });
@@ -829,7 +835,7 @@ check('export without sign-in -> 401', exportNoAuth.status === 401, exportNoAuth
 const formats = await api('GET', '/api/export/formats');
 check(
   'GET /api/export/formats (no sign-in, as before)',
-  formats.status === 200 && JSON.stringify(formats.data.formats.map((f: { id: string }) => f.id)) === JSON.stringify(['csv', 'md', 'pdf']) &&
+  formats.status === 200 && JSON.stringify(formats.data.formats.map((f: { id: string }) => f.id)) === JSON.stringify(['csv', 'md', 'pdf', 'ics']) &&
     formats.data.formats.every((f: { name: string; description: string }) => f.name && f.description),
   formats.data,
 );

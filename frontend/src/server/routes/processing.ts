@@ -13,6 +13,7 @@ import { requireApiKey } from '../auth';
 import { maxUploadBytes } from '../config';
 import { daysUntil, parseDeadline, todayIso } from '../deadlines';
 import { HttpError } from '../errors';
+import { grantDetails } from '../grantDetails';
 import {
   MATCH_CONTINUE_PATH,
   NO_GRANTS_FOR_MATCHING,
@@ -43,7 +44,7 @@ import {
 } from '../services/ai';
 import { documentExtension, extractDocumentText, INVALID_DOCUMENT_TYPE, isAllowedDocument } from '../services/documents';
 import { kv } from '../store';
-import type { GrantMatch, MatchResults, Questionnaire, QuestionnaireAnswer, QuestionnaireQuestion } from '../types';
+import type { Grant, GrantMatch, MatchResults, Questionnaire, QuestionnaireAnswer, QuestionnaireQuestion } from '../types';
 import { applyProfileUpdate, parseProfileBody } from './profile';
 
 export const NO_MATCH_RESULTS = 'No match results yet. Run matching first.';
@@ -346,6 +347,35 @@ export function withDeadlines(results: MatchResults, today = todayIso()): Omit<M
   };
 }
 
+/**
+ * Each match with its grant's current details (deadline, amount, link, geography, religious
+ * eligibility, funder priorities, last verified), so results saved before the starter database
+ * was refreshed still show the latest facts. A match whose grant is gone keeps what it saved.
+ */
+export function withGrantDetails(results: MatchResults, grants: Grant[]): MatchResults {
+  if (!Array.isArray(results.matches)) return results;
+  const byId = new Map(grants.map((grant) => [grant.id, grant]));
+  return {
+    ...results,
+    matches: results.matches.map((match) => {
+      const grant = byId.get(match.grant_id);
+      if (!grant) return match;
+      return {
+        ...match,
+        deadline: grant.deadline || match.deadline,
+        amount: grant.amount || match.amount,
+        url: grant.url || match.url,
+        ...grantDetails(grant),
+      };
+    }),
+  };
+}
+
+/** Saved results as the website reads them: current grant details, then today's deadlines. */
+async function readableResults(userId: string, results: MatchResults) {
+  return withDeadlines(withGrantDetails(results, await getGrants(userId)));
+}
+
 export function registerProcessingRoutes(router: Router): void {
   router.post('/api/processing/scan-website', scanWebsite);
   router.post('/api/processing/generate-questionnaire', generateQuestionnaire);
@@ -378,7 +408,7 @@ export function registerProcessingRoutes(router: Router): void {
     const sessionId = await latestMatchSessionId(user.id);
     const results = sessionId ? await getMatchResults(user.id, sessionId) : null;
     if (!results) throw new HttpError(404, NO_MATCH_RESULTS);
-    return withDeadlines(results);
+    return readableResults(user.id, results);
   });
 
   router.get('/api/processing/match-results/:sessionId', async (ctx) => {
@@ -387,7 +417,7 @@ export function registerProcessingRoutes(router: Router): void {
     const results = await getMatchResults(user.id, ctx.params.sessionId);
     if (!results) throw new HttpError(404, 'Session not found');
     if (results.user_id !== user.id) throw new HttpError(403, 'Not authorized');
-    return withDeadlines(results);
+    return readableResults(user.id, results);
   });
 
   router.post('/api/processing/shortlist/:grantId', toggleShortlist);

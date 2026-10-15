@@ -43,6 +43,15 @@ interface GrantMatch {
   explanation: string;
   evidence: string[];
   is_shortlisted: boolean;
+  // The grant's eligibility and verification details (missing on older results and some sources).
+  eligibility_notes?: string | null;
+  deadline_notes?: string | null;
+  geography?: string | null;
+  religious_eligibility?: 'eligible' | 'secular_purpose_only' | 'excluded' | 'unclear' | null;
+  focus_areas?: string[];
+  typical_award?: string | null;
+  last_verified?: string | null;
+  confidence?: 'verified' | 'partial' | null;
 }
 
 interface MatchResults {

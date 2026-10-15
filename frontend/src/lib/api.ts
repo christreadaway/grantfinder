@@ -705,7 +705,7 @@ class ApiClient {
   }
 
   // Export endpoints
-  async exportResults(sessionId: string, format: 'csv' | 'md' | 'pdf', includeAll: boolean = false) {
+  async exportResults(sessionId: string, format: 'csv' | 'md' | 'pdf' | 'ics', includeAll: boolean = false) {
     const response = await this.client.post('/api/export', {
       session_id: sessionId,
       format,

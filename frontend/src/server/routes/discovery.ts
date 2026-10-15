@@ -15,14 +15,15 @@ import type { GrantsGovJobInput, WebSearchJobInput } from '../handlers/discovery
 import { optionalString } from '../http';
 import { startJob } from '../jobs';
 import { logger } from '../log';
-import { getGrants, getProfile } from '../repo';
+import { todayIso } from '../deadlines';
+import { getGrants, getProfile, listApplications } from '../repo';
 import type { Router } from '../router';
 import {
   buildGrantsGovKeywords,
   discoveryResult,
   loadSeedGrants,
   mergeFoundationsIntoDatabase,
-  mergeIntoDatabase,
+  refreshSeedIntoDatabase,
 } from '../services/discovery';
 
 /** More keywords than this would keep the job running for many minutes. */
@@ -88,19 +89,34 @@ export function registerDiscoveryRoutes(router: Router): void {
       logger.error('seed_load_failed', { user_id: user.id, error });
       throw new HttpError(500, 'Failed to load starter database');
     }
-    const merge = await mergeIntoDatabase(user.id, seed.grants);
+    // Grants an application uses are closed, never deleted, if the starter database drops them.
+    const keepIds = new Set((await listApplications(user.id)).map((app) => app.grant_id));
+    const refresh = await refreshSeedIntoDatabase(user.id, seed.grants, seed.previousNames, keepIds, todayIso());
     const foundations = await mergeFoundationsIntoDatabase(user.id, seed.foundations);
     logger.info('seed_merged', {
       user_id: user.id,
       found: seed.grants.length,
-      added: merge.added,
-      duplicates: merge.duplicates,
-      total: merge.total,
+      added: refresh.added,
+      updated: refresh.updated,
+      retired: refresh.retired,
+      retired_names: refresh.retired_names,
+      duplicates: refresh.duplicates,
+      total: refresh.total,
       foundations_added: foundations.added,
     });
-    return discoveryResult('seed', seed.grants.length, merge, [
-      `Starter database also added ${foundations.added} foundations to monitor`,
-    ]);
+    const notes: string[] = [];
+    if (refresh.updated) notes.push(`Updated ${refresh.updated} starter grant${refresh.updated === 1 ? '' : 's'} with the latest deadlines and details.`);
+    if (refresh.retired) {
+      notes.push(
+        `Retired ${refresh.retired} grant${refresh.retired === 1 ? '' : 's'} no longer offered or not open to Catholic schools: ${refresh.retired_names.slice(0, 5).join('; ')}${refresh.retired > 5 ? '; ...' : ''}.`,
+      );
+    }
+    notes.push(`Starter database also added ${foundations.added} foundations to monitor`);
+    return {
+      ...discoveryResult('seed', seed.grants.length, { added: refresh.added, duplicates: refresh.duplicates, total: refresh.total }, notes),
+      updated: refresh.updated,
+      retired: refresh.retired,
+    };
   });
 
   /**

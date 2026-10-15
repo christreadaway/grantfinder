@@ -20,6 +20,14 @@ export const GRANT_STATUSES: GrantStatus[] = ['OPEN', 'Rolling', 'Check deadline
 export type GeoQualified = 'Yes' | 'No' | 'Yes - TX Only' | 'Check eligibility';
 export const GEO_QUALIFIED_VALUES: GeoQualified[] = ['Yes', 'No', 'Yes - TX Only', 'Check eligibility'];
 
+/**
+ * Whether a Catholic school or parish may apply. eligible: yes; secular_purpose_only: may apply,
+ * but the money can't pay for religious activity; excluded: the funder doesn't fund religious
+ * organizations (matching rules it out); unclear: not stated, check before applying.
+ */
+export type ReligiousEligibility = 'eligible' | 'secular_purpose_only' | 'excluded' | 'unclear';
+export const RELIGIOUS_ELIGIBILITY_VALUES: ReligiousEligibility[] = ['eligible', 'secular_purpose_only', 'excluded', 'unclear'];
+
 /** excellent 85-100, good 70-84, possible 50-69, weak 25-49, not_eligible 0-24 */
 export type MatchScoreTier = 'excellent' | 'good' | 'possible' | 'weak' | 'not_eligible';
 
@@ -65,7 +73,28 @@ export interface GrantBase {
   source: string;
   eligibility_notes?: string | null;
   funds_for: string[];
+  /** Every cycle, letter-of-inquiry step or invitation rule behind `deadline`. */
+  deadline_notes?: string | null;
+  /** Where applicants must be: "National", "Texas", "Central Texas (Travis, Williamson, Hays counties)". */
+  geography?: string | null;
+  religious_eligibility?: ReligiousEligibility | null;
+  /** The funder's current priorities for this program, in its own words where possible. */
+  focus_areas?: string[];
+  /** Typical or median award, when the funder publishes it. */
+  typical_award?: string | null;
+  /** YYYY-MM-DD the record was last checked against the funder's own site. */
+  last_verified?: string | null;
+  /** verified: every field confirmed; partial: some fields could not be confirmed (see the notes). */
+  confidence?: 'verified' | 'partial' | null;
+  /** Pages the record was checked against. */
+  sources?: string[];
 }
+
+/** The grant details a match carries so the results can show them (all optional: older results lack them). */
+export type GrantDetails = Pick<
+  GrantBase,
+  'eligibility_notes' | 'deadline_notes' | 'geography' | 'religious_eligibility' | 'focus_areas' | 'typical_award' | 'last_verified' | 'confidence'
+>;
 
 export interface Grant extends GrantBase {
   id: string;
@@ -208,7 +237,7 @@ export interface MatchScoreBreakdown {
   completeness: number; // 5%
 }
 
-export interface GrantMatch {
+export interface GrantMatch extends GrantDetails {
   grant_id: string;
   grant_name: string;
   funder: string;
@@ -295,6 +324,9 @@ export interface DiscoveryResult {
   duplicates: number;
   total_grants: number;
   notes: string[];
+  /** Starter database only: records refreshed in place, and records retired (no longer offered). */
+  updated?: number;
+  retired?: number;
 }
 
 // =============================================================================

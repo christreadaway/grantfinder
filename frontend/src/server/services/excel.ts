@@ -14,6 +14,7 @@ import crypto from 'node:crypto';
 import type { Cell, CellValue, Row, Worksheet } from 'exceljs';
 
 import { HttpError } from '../errors';
+import { parseGrantDetails } from '../grantDetails';
 import { assertZipWithinLimits } from '../zipguard';
 import { logger } from '../log';
 import {
@@ -148,6 +149,23 @@ const COLUMN_MAP: Record<string, string> = {
   tags: 'funds_for',
   'funds for': 'funds_for',
   funds_for: 'funds_for',
+  'religious eligibility': 'religious_eligibility',
+  religious_eligibility: 'religious_eligibility',
+  'faith-based eligibility': 'religious_eligibility',
+  'religious orgs eligible': 'religious_eligibility',
+  'deadline notes': 'deadline_notes',
+  deadline_notes: 'deadline_notes',
+  'cycle notes': 'deadline_notes',
+  'typical award': 'typical_award',
+  typical_award: 'typical_award',
+  'average award': 'typical_award',
+  'last verified': 'last_verified',
+  last_verified: 'last_verified',
+  verified: 'last_verified',
+  priorities: 'focus_areas',
+  'funding priorities': 'focus_areas',
+  region: 'region',
+  'service area': 'region',
 
   // Foundation columns (Python)
   'foundation name': 'foundation_name',
@@ -340,6 +358,21 @@ function parseGrantRow(row: RowData, userId: string, category: GrantCategory): U
   const fundsFor = tagList(field(row, 'funds_for'));
   const funderStats = field(row, 'funder_stats');
 
+  // A descriptive geography ("Central Texas (Travis, Hays)") is kept as written, beside the yes/no-style geo_qualified.
+  const regionText = field(row, 'region') || [geoText, restriction].find((text) => text && !/^(yes|no|y|n|true|false|check eligibility|yes - tx only)$/i.test(text.trim())) || '';
+  const details = parseGrantDetails({
+    deadline_notes: field(row, 'deadline_notes'),
+    geography: regionText,
+    religious_eligibility: field(row, 'religious_eligibility'),
+    focus_areas: field(row, 'focus_areas'),
+    typical_award: field(row, 'typical_award'),
+    last_verified: field(row, 'last_verified'),
+  });
+  for (const key of ['deadline_notes', 'geography', 'religious_eligibility', 'typical_award', 'last_verified'] as const) {
+    if (details[key]) provided.add(key);
+  }
+  if (details.focus_areas?.length) provided.add('focus_areas');
+
   if (statusText) provided.add('status');
   if (geoText || restriction) provided.add('geo_qualified');
   if (eligibilityNotes) provided.add('eligibility_notes');
@@ -361,6 +394,7 @@ function parseGrantRow(row: RowData, userId: string, category: GrantCategory): U
     source: 'upload',
     eligibility_notes: eligibilityNotes || null,
     funds_for: fundsFor,
+    ...details,
     id: newGrantId(),
     user_id: userId,
     created_at: new Date().toISOString(),

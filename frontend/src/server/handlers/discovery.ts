@@ -219,7 +219,13 @@ async function runWebSearch(ctx: JobContext): Promise<DiscoveryResult> {
     notes.push('Claude found no grants it could verify on the web');
   }
 
-  const grants = grantsFromWebEntries(ctx.userId, parsed.entries);
+  const found = grantsFromWebEntries(ctx.userId, parsed.entries);
+  // The prompt asks Claude to leave these out; any that slip through are never saved.
+  const grants = found.filter((grant) => grant.religious_eligibility !== 'excluded');
+  if (grants.length < found.length) {
+    const skipped = found.length - grants.length;
+    notes.push(`Skipped ${skipped} grant${skipped === 1 ? '' : 's'} that ${skipped === 1 ? "doesn't" : "don't"} fund religious organizations`);
+  }
   notes.push(`AI verified ${grants.length} opportunities`);
 
   await ctx.progress(`Saving ${grants.length} grants...`);

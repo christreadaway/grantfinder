@@ -16,6 +16,7 @@ import crypto from 'node:crypto';
 
 import { GRANTS_GOV_API_URL, GRANTS_GOV_MAX_RESULTS } from '../config';
 import seed from '../data/seed_grants.json';
+import { parseGrantDetails } from '../grantDetails';
 import { asRecord, asStringList, extractJsonArray } from '../json';
 import { logger } from '../log';
 import { updateFoundations, updateGrants } from '../repo';
@@ -132,6 +133,120 @@ export function mergeFoundations(current: Foundation[], incoming: Foundation[]):
     added += 1;
   }
   return { merged, added };
+}
+
+/** What loading the starter database changed in a user's grants. */
+export interface SeedRefreshOutcome {
+  added: number;
+  /** Starter records already there whose details changed (same id, so applications still point at them). */
+  updated: number;
+  /** Starter records the starter database no longer lists: removed, or closed when an application uses them. */
+  retired: number;
+  /** Already there and unchanged, or a grant the person added themselves under the same name (theirs is kept). */
+  duplicates: number;
+  total: number;
+  retired_names: string[];
+}
+
+const DATA_FIELDS_SKIPPED = new Set(['id', 'user_id', 'created_at']);
+const normalName = (name: string) => name.toLowerCase().replace(/[^a-z0-9]/g, '');
+const sameData = (a: Grant, b: Grant) => {
+  const pick = (grant: Grant) =>
+    JSON.stringify(Object.keys(grant).filter((key) => !DATA_FIELDS_SKIPPED.has(key)).sort().map((key) => [key, grant[key as keyof Grant]]));
+  return pick(a) === pick(b);
+};
+
+/**
+ * Bring a user's starter grants up to date with the starter database (pure; inputs unchanged):
+ * - a starter grant already there (same name, or a name it was renamed from) gets the new details
+ *   but keeps its id and created_at, so applications, shortlists and results still point at it;
+ * - a new starter grant is added, unless the person already added a grant with the same name and
+ *   funder themselves (theirs is kept);
+ * - a starter grant the database no longer lists (the program ended, or Catholic schools turned
+ *   out not to be eligible) is removed, or, when an application uses it (`keepIds`), kept and
+ *   marked CLOSED with a note saying why.
+ * Grants from uploads, Grants.gov or web discovery are never changed.
+ */
+export function refreshSeedGrants(
+  current: Grant[],
+  incoming: Grant[],
+  previousNames: ReadonlyMap<string, readonly string[]>,
+  keepIds: ReadonlySet<string>,
+  today: string,
+): { merged: Grant[]; outcome: SeedRefreshOutcome } {
+  const seedByName = new Map<string, Grant>();
+  for (const grant of current) if (grant.source === 'seed') seedByName.set(normalName(grant.grant_name), grant);
+  const ownKeys = existingKeys(current.filter((grant) => grant.source !== 'seed'));
+  const replaced = new Map<string, Grant>();
+  const added: Grant[] = [];
+  let updated = 0;
+  let duplicates = 0;
+
+  for (const grant of incoming) {
+    const names = [grant.grant_name, ...(previousNames.get(grant.grant_name) ?? [])].map(normalName);
+    const existing = names.map((name) => seedByName.get(name)).find((found) => found && !replaced.has(found.id));
+    if (existing) {
+      const next: Grant = { ...grant, id: existing.id, user_id: existing.user_id, created_at: existing.created_at };
+      replaced.set(existing.id, next);
+      if (sameData(existing, next)) duplicates += 1;
+      else updated += 1;
+      continue;
+    }
+    const key = dedupKey(grant.grant_name, grant.funder);
+    if (ownKeys.has(key)) {
+      duplicates += 1;
+      continue;
+    }
+    ownKeys.add(key);
+    added.push(grant);
+  }
+
+  const retiredNames: string[] = [];
+  const merged: Grant[] = [];
+  for (const grant of current) {
+    const next = replaced.get(grant.id);
+    if (next) {
+      merged.push(next);
+      continue;
+    }
+    if (grant.source !== 'seed') {
+      merged.push(grant);
+      continue;
+    }
+    retiredNames.push(grant.grant_name);
+    if (keepIds.has(grant.id)) {
+      const note = `No longer in GrantFinder's starter database as of ${today}: the program ended or Catholic schools aren't eligible. Check the funder's site before applying.`;
+      merged.push({
+        ...grant,
+        status: 'CLOSED',
+        eligibility_notes: grant.eligibility_notes?.startsWith('No longer in GrantFinder') ? grant.eligibility_notes : [note, grant.eligibility_notes].filter(Boolean).join(' '),
+      });
+    }
+  }
+  merged.push(...added);
+  return {
+    merged,
+    outcome: { added: added.length, updated, retired: retiredNames.length, duplicates, total: merged.length, retired_names: retiredNames },
+  };
+}
+
+/** refreshSeedGrants against the stored grants (compare-and-swap). */
+export async function refreshSeedIntoDatabase(
+  userId: string,
+  incoming: Grant[],
+  previousNames: ReadonlyMap<string, readonly string[]>,
+  keepIds: ReadonlySet<string>,
+  today: string,
+): Promise<SeedRefreshOutcome> {
+  let outcome: SeedRefreshOutcome = { added: 0, updated: 0, retired: 0, duplicates: 0, total: 0, retired_names: [] };
+  const saved = await updateGrants(userId, (current) => {
+    const result = refreshSeedGrants(current, incoming, previousNames, keepIds, today);
+    outcome = result.outcome;
+    const changed = result.outcome.added > 0 || result.outcome.updated > 0 || result.outcome.retired > 0;
+    return changed ? result.merged : undefined;
+  });
+  outcome.total = saved.length;
+  return outcome;
 }
 
 export interface MergeOutcome {
@@ -254,6 +369,7 @@ export function makeGrant(
     source,
     eligibility_notes: notesText(data.eligibility_notes),
     funds_for: tagList(data.funds_for),
+    ...parseGrantDetails(data),
     id: newGrantId(),
     user_id: userId,
     created_at: new Date().toISOString(),
@@ -269,13 +385,21 @@ interface SeedFile {
   foundations?: unknown[];
 }
 
-/** The built-in curated grant database, as fresh records for this user. */
-export function loadSeedGrants(userId: string): { grants: Grant[]; foundations: Foundation[] } {
+/**
+ * The built-in curated grant database, as fresh records for this user, plus the names each
+ * grant used to have ("renamed_from" in the file), so a reload updates the old record in place.
+ */
+export function loadSeedGrants(userId: string): { grants: Grant[]; foundations: Foundation[]; previousNames: Map<string, string[]> } {
   const data = seed as unknown as SeedFile;
   const grants: Grant[] = [];
+  const previousNames = new Map<string, string[]>();
   for (const entry of data.grants ?? []) {
-    const grant = makeGrant(userId, 'seed', asRecord(entry));
-    if (grant) grants.push(grant);
+    const record = asRecord(entry);
+    const grant = makeGrant(userId, 'seed', record);
+    if (!grant) continue;
+    grants.push(grant);
+    const before = tagList(record.renamed_from);
+    if (before.length) previousNames.set(grant.grant_name, before);
   }
 
   const foundations: Foundation[] = [];
@@ -302,7 +426,7 @@ export function loadSeedGrants(userId: string): { grants: Grant[]; foundations: 
   }
 
   logger.info('seed_grants_loaded', { grants: grants.length, foundations: foundations.length });
-  return { grants, foundations };
+  return { grants, foundations, previousNames };
 }
 
 // =============================================================================
@@ -489,6 +613,10 @@ export async function searchGrantsGov(
         source: 'grants_gov',
         eligibility_notes: 'Federal grant - verify nonprofit/faith-based eligibility in the listing.',
         funds_for: [],
+        geography: 'National (federal)',
+        religious_eligibility: 'unclear',
+        focus_areas: [],
+        sources: [],
         id: newGrantId(),
         user_id: userId,
         created_at: new Date().toISOString(),
@@ -518,10 +646,15 @@ export const WEB_DISCOVERY_SCHEMA_HINT = `[
     "grant_name": "Name of the grant program",
     "funder": "Funding organization",
     "category": "church_parish | catholic_school | mixed | non_catholic",
-    "deadline": "YYYY-MM-DD, 'Rolling', or 'Check website'",
+    "deadline": "YYYY-MM-DD (next posted date), 'Annual: Month D' (same date every year), 'Rolling', or 'Check website'",
+    "deadline_notes": "Cycles, letter-of-inquiry step, invitation-only rules",
     "amount": "e.g. 'Up to $15,000' or 'Varies'",
+    "typical_award": "Typical award if the funder publishes it, else 'Not published'",
     "description": "1-3 sentences on what it funds and who qualifies",
+    "focus_areas": ["the funder's current priorities, in its words"],
     "eligibility_notes": "Key requirements/restrictions",
+    "religious_eligibility": "eligible | secular_purpose_only | excluded | unclear",
+    "geography": "National | a state | a region, county list or diocese list",
     "url": "Direct link to the grant page",
     "geo_qualified": "Yes | No | Check eligibility",
     "funds_for": ["tags", "like", "facilities"]
@@ -563,6 +696,7 @@ Search for:
 
 Rules:
 - Only include grants you found real evidence for on the web (a funder page or credible listing). Never invent grants, amounts, or deadlines.
+- Skip programs that exclude religious organizations, religious schools or private schools, or that are closed to this organization's location. Set religious_eligibility from what the funder states: "eligible", "secular_purpose_only" (may apply, but the money can't support religious activity), or "unclear" when it isn't stated.
 - If you can't verify a deadline, use "Check website".
 - Include the direct URL you found for each grant.
 - Aim for ${aim} high-quality opportunities.

@@ -261,6 +261,50 @@ body {
   font-weight: 500;
 }
 
+/* Grant facts on results: religious eligibility, geography, last verified */
+.info-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 1px 8px;
+  border-radius: 9999px;
+  border: 1px solid transparent;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.info-chip.good {
+  background: rgba(34, 197, 94, 0.14);
+  border-color: rgba(34, 197, 94, 0.45);
+  color: #86efac;
+}
+
+.info-chip.caution {
+  background: rgba(245, 158, 11, 0.14);
+  border-color: rgba(245, 158, 11, 0.45);
+  color: #fcd34d;
+}
+
+.info-chip.bad {
+  background: rgba(239, 68, 68, 0.14);
+  border-color: rgba(239, 68, 68, 0.45);
+  color: #fca5a5;
+}
+
+.info-chip.muted {
+  background: rgba(107, 114, 128, 0.18);
+  border-color: rgba(107, 114, 128, 0.45);
+  color: #d1d5db;
+}
+
+/* Light mode: the same chips and badges with dark text, so they stay readable on white */
+.light .info-chip.good { color: #166534; }
+.light .info-chip.caution, .light .deadline-badge.near, .light .due-text.near { color: #92400e; }
+.light .info-chip.bad, .light .deadline-badge.soon, .light .due-text.soon { color: #991b1b; }
+.light .info-chip.muted, .light .deadline-badge.later, .light .due-text.later { color: #374151; }
+.light .deadline-badge.past { color: #4b5563; }
+
 .due-text.soon { color: #fca5a5; }
 .due-text.near { color: #fcd34d; }
 .due-text.later { color: #d1d5db; }

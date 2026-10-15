@@ -6,6 +6,7 @@ import {
   Search, Upload, Globe, FileText, MessageSquare, Play,
   CheckCircle, AlertCircle, Loader2, ChevronRight, Settings,
   LogOut, Database, BarChart3, Download, Bug, PenLine, XCircle, Star,
+  CalendarPlus, MapPin, BadgeCheck,
 } from 'lucide-react';
 import api, { blobErrorDetail, errorDetail, isSessionEnded, onJobProgress } from '@/lib/api';
 import { copyText, saveFile } from '@/lib/download';
@@ -14,7 +15,7 @@ import PasteMaterial from '../PasteMaterial';
 
 type SetupStep = 'api-key' | 'grants' | 'website' | 'questionnaire' | 'documents' | 'processing' | 'results';
 type DiscoverySource = 'seed' | 'grants_gov' | 'web_discovery';
-type ExportFormat = 'csv' | 'md';
+type ExportFormat = 'csv' | 'md' | 'ics';
 type MatchResultsData = NonNullable<ReturnType<typeof useStore.getState>['matchResults']>;
 type JobSummary = Awaited<ReturnType<typeof api.listJobs>>[number];
 
@@ -106,6 +107,9 @@ interface DiscoveryResult {
   added: number;
   total_grants: number;
   notes?: string[];
+  /** Starter database only: grants refreshed in place and grants retired. */
+  updated?: number;
+  retired?: number;
 }
 
 /** Netlify accepts uploads up to about 4 MB; checking here gives a clear message instantly. */
@@ -426,6 +430,69 @@ function topPicksOf(matches: MatchItem[]): MatchItem[] {
 }
 
 /** "N days left" on a match card: nothing for rolling or unknown deadlines. */
+const RELIGIOUS_CHIP: Record<string, { label: string; tone: 'good' | 'caution' | 'muted' | 'bad'; title: string }> = {
+  eligible: { label: 'Catholic schools eligible', tone: 'good', title: 'The funder accepts applications from Catholic schools and parishes.' },
+  secular_purpose_only: {
+    label: 'Non-religious uses only',
+    tone: 'caution',
+    title: 'Catholic schools may apply, but the money can only pay for non-religious purposes (for example tutoring, meals, safety or buildings).',
+  },
+  unclear: { label: 'Religious eligibility not stated', tone: 'muted', title: 'The funder does not say. Ask before you apply.' },
+  excluded: { label: "Doesn't fund religious orgs", tone: 'bad', title: 'The funder does not fund religious organizations or schools.' },
+};
+
+/**
+ * What a grant's record says about who can apply and how current it is: religious eligibility,
+ * where applicants must be, when it was last checked, the typical award, deadline details, the
+ * funder's priorities and the eligibility rules. Renders nothing for fields a record lacks.
+ */
+function GrantFacts({ match, compact = false }: { match: MatchItem; compact?: boolean }) {
+  const religious = match.religious_eligibility ? RELIGIOUS_CHIP[match.religious_eligibility] : null;
+  const chips = (
+    <div className="flex flex-wrap items-center gap-2">
+      {religious && (
+        <span className={`info-chip ${religious.tone}`} title={religious.title}>{religious.label}</span>
+      )}
+      {match.geography && (
+        <span className="info-chip muted" title="Where applicants must be">
+          <MapPin className="w-3 h-3 shrink-0" aria-hidden="true" />
+          <span className="min-w-0 break-words">{match.geography}</span>
+        </span>
+      )}
+      {match.last_verified && (
+        <span
+          className="info-chip muted"
+          title={match.confidence === 'partial'
+            ? "Some details could not be confirmed on the funder's site; check before applying."
+            : "Checked against the funder's own site on this date."}
+        >
+          <BadgeCheck className="w-3 h-3 shrink-0" aria-hidden="true" />
+          {match.confidence === 'partial' ? 'Partly verified' : 'Verified'} {formatDate(match.last_verified)}
+        </span>
+      )}
+    </div>
+  );
+  if (compact) return religious || match.geography || match.last_verified ? <div className="mt-2">{chips}</div> : null;
+  const focus = (match.focus_areas ?? []).filter(Boolean);
+  return (
+    <div className="mb-4 space-y-2 text-sm">
+      {chips}
+      {match.typical_award && (
+        <p className="break-words"><span className="text-gray-400">Typical award:</span> {match.typical_award}</p>
+      )}
+      {match.deadline_notes && (
+        <p className="break-words"><span className="text-gray-400">Deadline details:</span> {match.deadline_notes}</p>
+      )}
+      {focus.length > 0 && (
+        <p className="break-words"><span className="text-gray-400">What they fund now:</span> {focus.join('; ')}</p>
+      )}
+      {match.eligibility_notes && (
+        <p className="break-words"><span className="text-gray-400">Who can apply:</span> {match.eligibility_notes}</p>
+      )}
+    </div>
+  );
+}
+
 function DeadlineBadge({ match }: { match: MatchItem }) {
   if (match.deadline_passed) return <span className="deadline-badge past">Past deadline</span>;
   const days = daysLeftOf(match);
@@ -1138,7 +1205,8 @@ export default function Dashboard() {
     setStepError(null);
     try {
       const data = await api.exportResults(matchResults.session_id, format, true);
-      saveFile(data, `grant_matches.${format}`, format === 'csv' ? 'text/csv;charset=utf-8' : 'text/markdown;charset=utf-8');
+      if (format === 'ics') saveFile(data, 'grant_deadlines.ics', 'text/calendar;charset=utf-8');
+      else saveFile(data, `grant_matches.${format}`, format === 'csv' ? 'text/csv;charset=utf-8' : 'text/markdown;charset=utf-8');
     } catch (error) {
       console.error(`[GrantFinder] Export (${format}) failed:`, error);
       setStepError(await blobErrorDetail(error, 'The export failed. Please try again.'));
@@ -1993,6 +2061,18 @@ export default function Dashboard() {
                       : <Download className="w-5 h-5 shrink-0" aria-hidden="true" />}
                     Export Report (Markdown)
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => downloadResults('ics')}
+                    disabled={exporting !== null}
+                    className="btn btn-secondary sm:flex-1"
+                    title="Every upcoming due date for your excellent, good and possible matches, with reminders two weeks and three days before. Opens in Google Calendar, Outlook or Apple Calendar."
+                  >
+                    {exporting === 'ics'
+                      ? <Loader2 className="w-5 h-5 shrink-0 animate-spin" aria-hidden="true" />
+                      : <CalendarPlus className="w-5 h-5 shrink-0" aria-hidden="true" />}
+                    Add Deadlines to Calendar
+                  </button>
                 </div>
                 {busyBanner}
               </div>
@@ -2031,6 +2111,12 @@ export default function Dashboard() {
                               <p className={`mt-1 text-sm ${days !== null && days >= 0 ? `due-text ${deadlineTone(days)}` : 'text-gray-400'}`}>
                                 {dueText(match)}
                               </p>
+                              {match.amount && match.amount !== 'Varies' && (
+                                <p className="mt-1 text-sm text-gray-400 break-words">
+                                  {match.amount}{match.typical_award ? ` · typical ${match.typical_award}` : ''}
+                                </p>
+                              )}
+                              <GrantFacts match={match} compact />
                               <div className="mt-3 flex flex-wrap gap-2">
                                 {pickUrl && (
                                   <a
@@ -2138,6 +2224,7 @@ export default function Dashboard() {
                         </span>
                       </div>
                     </div>
+                    <GrantFacts match={match} />
                     <p className="text-gray-400 mb-4 break-words">{match.explanation}</p>
                     <div className="flex flex-wrap items-center justify-between gap-3">
                       {grantUrl && (

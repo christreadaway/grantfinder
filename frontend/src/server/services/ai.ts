@@ -20,6 +20,7 @@ import type { Claude } from '../claude';
 import { MAX_QUESTIONNAIRE_QUESTIONS, testMode } from '../config';
 import { deadlinePassed, todayIso } from '../deadlines';
 import { ClaudeError, errorMessage, isFatalClaudeError } from '../errors';
+import { grantDetails } from '../grantDetails';
 import { asInt, asNumber, asRecord, asString, asStringList, clamp, extractJsonArray, extractJsonObject } from '../json';
 import { logger } from '../log';
 import { getFoundations, getGrants, listMatchSessionIds } from '../repo';
@@ -811,12 +812,18 @@ function matchBase(grant: Grant): Omit<GrantMatch, 'score' | 'score_tier' | 'sco
     contact: asString(grant.contact),
     category: (asString(grant.category) || 'mixed') as GrantCategory,
     geo_qualified: (asString(grant.geo_qualified) || 'Check eligibility') as GeoQualified,
+    ...grantDetails(grant),
   };
 }
 
+/** Why a funder that doesn't fund religious organizations is ruled out (every GrantFinder user is a Catholic parish or school). */
+export const RELIGIOUS_EXCLUDED_REASON =
+  'Not eligible: this funder does not fund religious organizations or religious schools (per the grant database). No need to apply.';
+
 /**
- * Hard disqualifiers in code, before any (billed) AI call: Texas-only grants
- * for organizations outside Texas, "No" geography, CLOSED, deadline passed.
+ * Hard disqualifiers in code, before any (billed) AI call: funders that exclude
+ * religious organizations, Texas-only grants for organizations outside Texas,
+ * "No" geography, CLOSED, deadline passed.
  * Returns the not-eligible match, or null to send the grant to Claude.
  */
 export function deterministicPrefilter(grant: Grant, profile: OrganizationProfile, today = todayIso()): GrantMatch | null {
@@ -833,6 +840,7 @@ export function deterministicPrefilter(grant: Grant, profile: OrganizationProfil
     is_shortlisted: false,
   });
 
+  if (grant.religious_eligibility === 'excluded') return disqualified(RELIGIOUS_EXCLUDED_REASON);
   if (geo === 'yes - tx only' && state && !TX_STATE_VALUES.has(state)) {
     return disqualified(
       `Geographic restriction: this grant is limited to Texas organizations, and your organization is in ${profile.state}.`,
@@ -977,6 +985,12 @@ export function buildMatchPrompt(grants: Grant[], profile: OrganizationProfile, 
     category: grant.category,
     url: grant.url,
     contact: grant.contact,
+    // Only what the record has, so older grants don't fill the prompt with nulls.
+    ...(grant.geography ? { geography: grant.geography } : {}),
+    ...(grant.religious_eligibility ? { religious_eligibility: grant.religious_eligibility } : {}),
+    ...(grant.deadline_notes ? { deadline_notes: grant.deadline_notes } : {}),
+    ...(grant.focus_areas?.length ? { funder_priorities: grant.focus_areas } : {}),
+    ...(grant.typical_award ? { typical_award: grant.typical_award } : {}),
   }));
   return `Score each grant for this Catholic organization.
 
@@ -990,7 +1004,7 @@ ${JSON.stringify(grantsData, null, 2)}
 
 For EACH grant, calculate a probability score (0-100%) using these weights:
 - Eligibility fit (40%): Does org meet hard requirements? (501c3, geography, Catholic status)
-- Need alignment (30%): Does org have documented need matching grant purpose?
+- Need alignment (30%): Does org have documented need matching grant purpose and the funder's current priorities (funder_priorities, when given)?
 - Capacity signals (15%): Size, staffing, volunteer base indicate ability to use grant
 - Timing (10%): Deadline is feasible, project readiness
 - Completeness (5%): Do we have enough info to assess accurately?
@@ -1018,6 +1032,11 @@ Return a JSON array with one object per grant:
         "evidence": ["Specific evidence from profile that influenced score"]
     }
 ]
+
+Reading the grant fields:
+- geography: where applicants must be. If the organization is outside it, score eligibility_fit near 0.
+- religious_eligibility: "eligible" = Catholic schools and parishes may apply; "secular_purpose_only" = they may apply, but only for a non-religious purpose (such as tutoring, food, safety or facilities), so judge need alignment on the org's secular needs; "unclear" = not stated, lower completeness and say "confirm religious eligibility" in the explanation.
+- deadline_notes: letter-of-inquiry steps, cycles, invitation-only rules. An invitation-only program scores low on timing.
 
 Be conservative - if information is missing, lower the completeness score.
 Return ONLY the JSON array.`;
