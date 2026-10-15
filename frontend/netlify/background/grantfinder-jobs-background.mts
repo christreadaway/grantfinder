@@ -3,6 +3,11 @@
  * 15 minutes. The "-background" suffix in the file name is what makes Netlify
  * run it in the background: callers get 202 immediately.
  *
+ * OPTIONAL: scripts/netlify-functions.mjs copies this file into
+ * netlify/functions/ only when GRANTFINDER_BACKGROUND_JOBS=true, because a
+ * deploy containing a background function fails on Netlify plans without them
+ * (e.g. legacy Starter). Without it, jobs run in direct mode (src/server/jobs.ts).
+ *
  * Only the engine's own API routes can start it: each request carries an
  * HMAC signature made with SECRET_KEY (see src/server/jobs.ts).
  */

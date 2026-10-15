@@ -1,11 +1,17 @@
 /**
- * Background jobs: every Claude call runs here, never inside a web request.
+ * Jobs: every Claude call runs here, never inside the route that asked for it.
  *
- * Why: Netlify stops a normal function after 60 seconds, and scoring grants
- * or drafting a whole application takes minutes. So an API route records a
- * job and returns 202 {job_id} at once; the work runs in a Netlify background
- * function (up to 15 minutes); the website polls GET /api/jobs/{id}.
- * Locally (npm run dev, tests) the same job runs inside the server process.
+ * An API route checks what it can, records a job and returns 202 {job_id} at
+ * once; the website polls GET /api/jobs/{id}. Where the work runs depends on
+ * the job mode (config.ts jobMode()):
+ * - direct (Netlify default, every plan): the website calls
+ *   POST /api/jobs/{id}/run, which runs the job inside that request. Netlify
+ *   stops a request at 60 seconds, so a direct job stops its Claude calls at
+ *   about 50 seconds; long steps save their progress and hand the website a
+ *   follow-up request (a result with __continue) to finish the rest.
+ * - background (Netlify, GRANTFINDER_BACKGROUND_JOBS=true): a Netlify
+ *   background function runs it, up to 15 minutes.
+ * - local (npm run dev, tests): inside the same server process.
  *
  * Each job record keeps its own AI call log and notes, which is what the
  * debug report and the writer's debug bundle show.
@@ -14,7 +20,7 @@ import crypto from 'node:crypto';
 
 import { getApiKey } from './auth';
 import { Claude } from './claude';
-import { JOB_MAX_RUNTIME_MS, JOB_START_GRACE_MS, onNetlify, secretKey } from './config';
+import { directJobBudgetMs, JOB_MAX_RUNTIME_MS, JOB_START_GRACE_MS, jobMode, secretKey, type JobMode } from './config';
 import { HttpError, toHttpError } from './errors';
 import { jsonResponse, type RequestContext } from './http';
 import { logger } from './log';
@@ -37,6 +43,8 @@ export interface Job {
   application_id: string | null;
   /** Jobs sharing this key never run twice at once (e.g. drafting one application). */
   exclusive_key?: string | null;
+  /** Where the job runs (see jobMode()); older records have none and ran in the background. */
+  mode?: JobMode;
   correlation_id: string;
   ai_calls: AICallLog[];
   notes: string[];
@@ -76,6 +84,18 @@ export interface PublicJob {
   updated_at: string;
   started_at: string | null;
   finished_at: string | null;
+  /** 'direct': the website must call POST /api/jobs/{id}/run to run this job. */
+  run?: 'direct';
+}
+
+/**
+ * A handler result may carry `__continue`: the website then makes this request
+ * (which starts the next job) and uses that job's result instead. Direct-mode
+ * jobs use it to finish work that doesn't fit in one 60-second request.
+ */
+export interface JobContinuation {
+  path: string;
+  body: Record<string, unknown>;
 }
 
 export interface JobContext {
@@ -91,6 +111,12 @@ export interface JobContext {
   progress(message: string): Promise<void>;
   /** Add a line to this job's notes (shown in debug reports). */
   note(line: string): void;
+  /** Where this job runs. */
+  mode: JobMode;
+  /** When this run's Claude calls are cut off (ms since epoch). */
+  deadline: number;
+  /** Milliseconds left before the cutoff: start another Claude call only if it can finish in time. */
+  timeLeftMs(): number;
 }
 
 export type JobHandler = (ctx: JobContext) => Promise<unknown>;
@@ -180,6 +206,7 @@ export async function createJob(
     progress: 'Waiting to start...',
     application_id: options.applicationId ?? null,
     exclusive_key: options.exclusiveKey ?? null,
+    mode: jobMode(),
     correlation_id: options.correlationId || newCorrelationId(),
     ai_calls: [],
     notes: [],
@@ -191,7 +218,7 @@ export async function createJob(
     finished_at: null,
   };
   await kv().set(jobKey(userId, job.id), job);
-  logger.info('job_created', { job_id: job.id, kind, user_id: userId, correlation_id: job.correlation_id, application_id: job.application_id });
+  logger.info('job_created', { job_id: job.id, kind, mode: job.mode, user_id: userId, correlation_id: job.correlation_id, application_id: job.application_id });
   return job;
 }
 
@@ -203,9 +230,15 @@ async function failJob(userId: string, jobId: string, status: number, detail: st
   });
 }
 
-/** Hand the job to the Netlify background function, or run it in-process locally. */
+/**
+ * Start the job where its mode says: in-process (local), the Netlify
+ * background function (background), or nowhere yet (direct: the website's
+ * POST /api/jobs/{id}/run request runs it).
+ */
 export async function dispatchJob(job: Job, origin: string): Promise<void> {
-  if (!onNetlify()) {
+  const mode = job.mode ?? 'background';
+  if (mode === 'direct') return;
+  if (mode === 'local') {
     setTimeout(() => {
       runJob(job.user_id, job.id).catch((error) => logger.error('job_runner_crashed', { job_id: job.id, error }));
     }, 0);
@@ -237,7 +270,7 @@ export async function dispatchJob(job: Job, origin: string): Promise<void> {
       job.user_id,
       job.id,
       503,
-      "Couldn't start the background worker. Redeploy the site on Netlify; if it keeps happening, open the debug report.",
+      "Couldn't start the background worker. If this Netlify account's plan doesn't include background functions, remove GRANTFINDER_BACKGROUND_JOBS from the site's environment variables and redeploy (GrantFinder then works without them). Otherwise redeploy the site; if it keeps happening, open the debug report.",
       `dispatch to ${url} failed: ${message}`,
     );
   }
@@ -279,21 +312,25 @@ export async function startJob(
       throw new HttpError(
         409,
         `This step is already running (started ${ago} ago). It will finish on its own; the page updates when it does.`,
-        { job_id: active.id, kind: active.kind, running: true },
+        { job_id: active.id, kind: active.kind, running: true, ...(active.mode === 'direct' ? { run: 'direct' } : {}) },
       );
     }
   }
   const job = await createJob(user.id, kind, input, { ...options, exclusiveKey });
   await dispatchJob(job, ctx.origin);
-  return jsonResponse({ job_id: job.id, status: job.status, kind }, 202);
+  return jsonResponse({ job_id: job.id, status: job.status, kind, ...(job.mode === 'direct' ? { run: 'direct' } : {}) }, 202);
 }
 
 // =============================================================================
 // Running
 // =============================================================================
 
-/** Run a queued job. Safe to call twice: only the first caller claims it. */
-export async function runJob(userId: string, jobId: string): Promise<void> {
+/**
+ * Run a queued job. Safe to call twice: only the first caller claims it.
+ * budgetMs (direct mode) cuts Claude calls off that long after this call
+ * starts; otherwise they stop a little before Netlify's 15-minute limit.
+ */
+export async function runJob(userId: string, jobId: string, options: { budgetMs?: number } = {}): Promise<void> {
   const invokedAt = Date.now();
   const key = jobKey(userId, jobId);
   const claim = crypto.randomBytes(8).toString('hex');
@@ -309,9 +346,11 @@ export async function runJob(userId: string, jobId: string): Promise<void> {
 
   const { JOB_HANDLERS } = await import('./jobHandlers');
   const handler = JOB_HANDLERS[claimed.kind];
-  // Stop Claude calls a little before Netlify's 15-minute cutoff so the job
-  // can still save what finished and report what didn't.
-  const hardStop = AbortSignal.timeout(Math.max(30_000, invokedAt + JOB_MAX_RUNTIME_MS - 75_000 - Date.now()));
+  // Stop Claude calls a little before the platform's cutoff (60 seconds for a
+  // direct job's request, 15 minutes in the background) so the job can still
+  // save what finished and report what didn't.
+  const deadline = options.budgetMs ? invokedAt + options.budgetMs : invokedAt + JOB_MAX_RUNTIME_MS - 75_000;
+  const hardStop = AbortSignal.timeout(Math.max(options.budgetMs ? 1_000 : 30_000, deadline - Date.now()));
   // Heartbeat: shows the job is alive even during one long Claude call, so a
   // job whose worker died is detected in minutes, not after 16.
   const heartbeat = setInterval(() => {
@@ -381,9 +420,12 @@ export async function runJob(userId: string, jobId: string): Promise<void> {
       notes.push(`${new Date().toISOString()} ${line}`);
       if (notes.length > 200) notes.splice(0, notes.length - 200);
     },
+    mode: claimed.mode ?? 'background',
+    deadline,
+    timeLeftMs: () => Math.max(0, deadline - Date.now()),
   };
 
-  logger.info('job_started', { job_id: jobId, kind: claimed.kind, user_id: userId, correlation_id: claimed.correlation_id });
+  logger.info('job_started', { job_id: jobId, kind: claimed.kind, mode: claimed.mode ?? 'background', user_id: userId, correlation_id: claimed.correlation_id });
   try {
     if (!handler) throw new Error(`No handler registered for job kind "${claimed.kind}"`);
     const result = await handler(ctx);
@@ -442,9 +484,35 @@ export async function runJob(userId: string, jobId: string): Promise<void> {
 // Reading
 // =============================================================================
 
-/** Jobs that died without reporting (crash, 15-minute cutoff, lost dispatch) read as failed. */
+/** Direct jobs run inside one request, which Netlify stops at 60 seconds. */
+const DIRECT_STALE_MS = 75_000;
+
+/** Jobs that died without reporting (crash, time limit, lost dispatch) read as failed. */
 function withStaleCheck(job: Job): Job {
   const now = Date.now();
+  if (job.mode === 'direct') {
+    const quiet = now - Date.parse(job.updated_at) > DIRECT_STALE_MS;
+    const long = job.started_at !== null && now - Date.parse(job.started_at) > DIRECT_STALE_MS;
+    if (job.status === 'running' && (quiet || long)) {
+      return {
+        ...job,
+        status: 'failed',
+        error: {
+          status: 504,
+          detail:
+            'This step was stopped by Netlify (each step can run for about a minute on this site). Try it again: anything that finished was saved. If it keeps happening, use "Copy debug report".',
+        },
+      };
+    }
+    if (job.status === 'queued' && now - Date.parse(job.created_at) > JOB_START_GRACE_MS) {
+      return {
+        ...job,
+        status: 'failed',
+        error: { status: 503, detail: 'This step never started (the page was closed or lost its connection first). Try it again.' },
+      };
+    }
+    return job;
+  }
   const tooLong = job.started_at !== null && now - Date.parse(job.started_at) > JOB_MAX_RUNTIME_MS + 60_000;
   const silent = now - Date.parse(job.updated_at) > 3 * 60_000; // no heartbeat for 3 minutes
   if (job.status === 'running' && (tooLong || silent)) {
@@ -483,7 +551,23 @@ export function toPublicJob(job: Job): PublicJob {
     updated_at: checked.updated_at,
     started_at: checked.started_at,
     finished_at: checked.finished_at,
+    ...(checked.mode === 'direct' ? { run: 'direct' as const } : {}),
   };
+}
+
+/**
+ * POST /api/jobs/{id}/run: run a queued direct-mode job inside this request
+ * (within Netlify's 60 seconds) and return it finished. A job already running
+ * or finished is just returned; the website keeps polling it.
+ */
+export async function runDirectJob(userId: string, jobId: string): Promise<Job | null> {
+  const job = await getJob(userId, jobId);
+  if (!job) return null;
+  if (job.status === 'queued' && job.mode === 'direct') {
+    await runJob(userId, jobId, { budgetMs: directJobBudgetMs() });
+    return getJob(userId, jobId);
+  }
+  return job;
 }
 
 export async function getJob(userId: string, jobId: string): Promise<Job | null> {

@@ -169,6 +169,38 @@ export const GRANTS_GOV_MAX_RESULTS = 50;
 export const WEB_DISCOVERY_MAX_SEARCHES = 8;
 export const WEBSITE_CRAWL_MAX_PAGES = 6;
 
+/**
+ * How AI jobs run.
+ * - 'direct' (Netlify default): inside a normal request that the website makes
+ *   right after starting the job. Works on every Netlify plan (no background
+ *   functions needed); each request must finish within Netlify's 60 seconds,
+ *   so long steps save their progress and the website continues them.
+ * - 'background' (Netlify, GRANTFINDER_BACKGROUND_JOBS=true): a Netlify
+ *   background function, up to 15 minutes per step. Needs a Netlify plan that
+ *   includes background functions (the current credit-based plans do; legacy
+ *   Starter does not, and a deploy containing one fails there).
+ * - 'local' (your Mac, tests): in the same server process.
+ * GRANTFINDER_JOB_MODE=direct forces direct mode anywhere (used by tests).
+ */
+export type JobMode = 'direct' | 'background' | 'local';
+
+export function jobMode(): JobMode {
+  if ((process.env.GRANTFINDER_JOB_MODE || '').trim().toLowerCase() === 'direct') return 'direct';
+  if (!onNetlify()) return 'local';
+  return (process.env.GRANTFINDER_BACKGROUND_JOBS || '').trim().toLowerCase() === 'true' ? 'background' : 'direct';
+}
+
+/**
+ * Netlify stops a normal request at 60 seconds. A direct-mode step stops its
+ * Claude calls at this point (from the start of its request) so it can still
+ * save what finished and say what didn't. GRANTFINDER_DIRECT_JOB_BUDGET_MS
+ * overrides it (tests).
+ */
+export function directJobBudgetMs(): number {
+  const override = Number(process.env.GRANTFINDER_DIRECT_JOB_BUDGET_MS);
+  return Number.isFinite(override) && override > 0 ? override : 50_000;
+}
+
 /** Background jobs: Netlify stops background functions at 15 minutes. */
 export const JOB_MAX_RUNTIME_MS = 15 * 60 * 1000;
 /** A queued job nobody picked up within this window is reported as failed. */

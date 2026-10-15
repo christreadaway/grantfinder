@@ -39,3 +39,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Copied in by scripts/netlify-functions.mjs during Netlify builds when GRANTFINDER_BACKGROUND_JOBS=true
+/netlify/functions/grantfinder-jobs-background.mts

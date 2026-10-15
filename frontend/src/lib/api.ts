@@ -159,25 +159,28 @@ class ApiClient {
       return config;
     });
 
-    // Background jobs: turn 202 {job_id} into the finished result. A 409 that
-    // says the same step is already running (a double click, or a click after
-    // reloading mid-step) waits for that run instead of failing or paying twice.
+    // Jobs: turn 202 {job_id} into the finished result. A 409 that says the
+    // same step is already running (a double click, or a click after
+    // reloading mid-step) waits for that run instead of failing or paying
+    // twice. A result carrying __continue (a long step that saved part of its
+    // work) is followed by its next request automatically.
     this.client.interceptors.response.use(
       async (response: AxiosResponse) => {
-        const data = response.data as { job_id?: string; kind?: string } | undefined;
+        const data = response.data as { job_id?: string; kind?: string; run?: string } | undefined;
         if (response.status === 202 && data?.job_id && response.config.responseType !== 'blob') {
-          const result = await this.waitForJob(data.job_id, data.kind || 'job');
-          return { ...response, status: 200, statusText: 'OK', data: result };
+          const result = await this.pollJob(data.job_id, data.kind || 'job', data.run === 'direct');
+          return { ...response, status: 200, statusText: 'OK', data: await this.followContinuation(result, response.config) };
         }
         return response;
       },
-      async (error: AxiosError<{ job_id?: string; kind?: string; running?: boolean }>) => {
+      async (error: AxiosError<{ job_id?: string; kind?: string; running?: boolean; run?: string }>) => {
         const data = error?.response?.data;
         if (error?.response?.status === 409 && data?.running && data.job_id && error.config?.responseType !== 'blob') {
           console.info(`[GrantFinder] ${data.kind || 'step'} is already running (job ${data.job_id}); waiting for it.`);
           emitProgress({ jobId: data.job_id, kind: data.kind || 'job', status: 'running', progress: 'Already running from an earlier click; waiting for it to finish...' });
-          const result = await this.waitForJob(data.job_id, data.kind || 'job');
-          return { data: result, status: 200, statusText: 'OK', headers: {}, config: error.config } as AxiosResponse;
+          const result = await this.pollJob(data.job_id, data.kind || 'job', data.run === 'direct');
+          const followed = error.config ? await this.followContinuation(result, error.config) : result;
+          return { data: followed, status: 200, statusText: 'OK', headers: {}, config: error.config } as AxiosResponse;
         }
         return Promise.reject(error);
       },
@@ -205,25 +208,68 @@ class ApiClient {
   }
 
   /**
-   * Poll a background job until it is done (returns its result) or failed
-   * (throws its detail). The step runs on the server either way, so a Wi-Fi
-   * drop, a sleeping laptop, or a passing Netlify error only pauses the
+   * A long step that saved part of its work returns {..., __continue: {path,
+   * body}}: make that request (it starts the next part, and is followed the
+   * same way) and hand back the final result. At most 30 parts.
+   */
+  private async followContinuation(result: unknown, config: { headers?: unknown }): Promise<unknown> {
+    const next = (result as { __continue?: { path?: unknown; body?: unknown } } | null)?.__continue;
+    if (!next || typeof next.path !== 'string' || !next.path.startsWith('/api/')) return result;
+    const headers = (config.headers ?? {}) as Record<string, unknown>;
+    const depth = Number(headers['x-grantfinder-part'] ?? 0) + 1;
+    if (depth > 30) {
+      console.warn('[GrantFinder] Stopped following a step after 30 parts.');
+      return result;
+    }
+    console.info(`[GrantFinder] Continuing a long step (part ${depth + 1}): ${next.path}`);
+    const response = await this.client.post(next.path, next.body ?? {}, { headers: { 'x-grantfinder-part': String(depth) } });
+    return response.data;
+  }
+
+  /**
+   * Wait for a job a page found still running (e.g. after a reload): its
+   * result, with any follow-up parts of a long step done too.
+   */
+  async waitForJob(jobId: string, kind: string, direct = false): Promise<unknown> {
+    return this.followContinuation(await this.pollJob(jobId, kind, direct), {});
+  }
+
+  /**
+   * Poll a job until it is done (returns its result) or failed (throws its
+   * detail). In direct mode (any Netlify plan) this also starts the job with
+   * POST /api/jobs/{id}/run, which runs it inside that request; polling shows
+   * its progress meanwhile. The step runs on the server either way, so a
+   * Wi-Fi drop, a sleeping laptop, or a passing Netlify error only pauses the
    * checking: polling gives up only after 3 minutes without one good answer
    * while the browser is online.
    */
-  async waitForJob(jobId: string, kind: string): Promise<unknown> {
+  private async pollJob(jobId: string, kind: string, direct = false): Promise<unknown> {
     const started = Date.now();
     let delay = 1000;
     // When the current run of failed checks began (null while checks succeed).
     // Measured from the first failure, not the last success, so a laptop that
     // slept for an hour and fails one check on waking doesn't give up at once.
     let failingSince: number | null = null;
-    console.info(`[GrantFinder] ${kind} started (job ${jobId})`);
+    let runInFlight = false;
+    let lastRunAt = 0;
+    const startRun = () => {
+      if (runInFlight) return;
+      runInFlight = true;
+      lastRunAt = Date.now();
+      this.client
+        .post(`/api/jobs/${jobId}/run`, {}, { timeout: 90_000 })
+        .catch((error) => console.warn(`[GrantFinder] Running ${kind} (job ${jobId}) did not answer; still checking its status.`, error))
+        .finally(() => {
+          runInFlight = false;
+        });
+    };
+    console.info(`[GrantFinder] ${kind} started (job ${jobId})${direct ? ' (runs in this request)' : ''}`);
     emitProgress({ jobId, kind, status: 'queued', progress: 'Starting...' });
+    if (direct) startRun();
     for (;;) {
       await sleep(delay);
       delay = Math.min(3000, delay + 250);
-      let job: { status: JobProgress['status']; progress: string | null; result?: unknown; error?: { status: number; detail: string } | null };
+      let job: { status: JobProgress['status']; progress: string | null; result?: unknown; error?: { status: number; detail: string } | null; run?: string };
       try {
         job = (await this.client.get(`/api/jobs/${jobId}`, { timeout: 20000 })).data;
         failingSince = null;
@@ -259,6 +305,9 @@ class ApiClient {
         console.error(`[GrantFinder] ${kind} failed (job ${jobId}): ${detail}`);
         throw apiError(job.error?.status || 500, detail);
       }
+      // A direct-mode job nobody is running yet (its first run request was
+      // lost, or the page reloaded before starting it): start it from here.
+      if (job.run === 'direct' && job.status === 'queued' && !runInFlight && Date.now() - lastRunAt > 5000) startRun();
       if (Date.now() - started > JOB_POLL_LIMIT_MS) {
         throw apiError(504, 'This step is taking much longer than expected. Reload the page in a minute; if it is still not done, use "Copy debug report" and paste it into Claude Code.');
       }

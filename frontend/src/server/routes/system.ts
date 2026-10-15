@@ -2,9 +2,9 @@
  * /api/health, /api/jobs, /api/debug/report.
  */
 import { hasApiKey } from '../auth';
-import { allowGuestLogin, APP_VERSION, claudeModel, googleClientId, onNetlify, storeKind } from '../config';
+import { allowGuestLogin, APP_VERSION, claudeModel, googleClientId, jobMode, onNetlify, storeKind } from '../config';
 import { HttpError } from '../errors';
-import { listJobs, getJob, toPublicJob, type Job } from '../jobs';
+import { listJobs, getJob, runDirectJob, toPublicJob, type Job } from '../jobs';
 import { logger } from '../log';
 import { getGrants, getProfile, listApplications } from '../repo';
 import type { Router } from '../router';
@@ -58,6 +58,9 @@ export function registerSystemRoutes(router: Router): void {
       version: APP_VERSION,
       runtime: onNetlify() ? 'netlify' : 'local',
       store: storeKind(),
+      // direct: every AI step runs inside a normal request (any Netlify plan);
+      // background: Netlify background functions (GRANTFINDER_BACKGROUND_JOBS=true).
+      jobs: jobMode(),
       model: claudeModel(),
       services: { api: true, database: storeOk },
     };
@@ -66,6 +69,14 @@ export function registerSystemRoutes(router: Router): void {
   router.get('/api/jobs/:jobId', async (ctx) => {
     const user = await ctx.user();
     const job = await getJob(user.id, ctx.params.jobId);
+    if (!job) throw new HttpError(404, 'Job not found');
+    return toPublicJob(job);
+  });
+
+  /** Direct mode: run a queued job inside this request (see jobs.ts runDirectJob). */
+  router.post('/api/jobs/:jobId/run', async (ctx) => {
+    const user = await ctx.user();
+    const job = await runDirectJob(user.id, ctx.params.jobId);
     if (!job) throw new HttpError(404, 'Job not found');
     return toPublicJob(job);
   });
@@ -94,7 +105,7 @@ export function registerSystemRoutes(router: Router): void {
       '# GrantFinder debug report',
       '',
       `- Generated: ${new Date().toISOString()}`,
-      `- Version ${APP_VERSION} | runtime ${onNetlify() ? 'Netlify' : 'local'} | storage ${storeKind()} | model ${claudeModel()}`,
+      `- Version ${APP_VERSION} | runtime ${onNetlify() ? 'Netlify' : 'local'} | AI steps run ${jobMode()} | storage ${storeKind()} | model ${claudeModel()}`,
       `- Sign-in options: Google ${googleClientId() ? 'on' : 'off'}, guest ${allowGuestLogin() ? 'on' : 'off'}`,
       `- User \`${user.id}\` | Claude key saved: ${keySaved ? 'yes' : 'NO'}`,
       `- Profile: ${profile ? `yes (${profile.sources.length} sources, ${profile.questionnaire_answers.length} questionnaire answers, ${profile.evidence.length} evidence items)` : 'NO'}`,

@@ -143,12 +143,22 @@ export async function api(method: string, urlPath: string, options: ApiOptions =
   } catch {
     data = null;
   }
+  // Direct job mode (GRANTFINDER_JOB_MODE=direct): like the website, start the
+  // job with POST /api/jobs/{id}/run right away, without waiting for it.
+  const started = data as { job_id?: string; run?: string } | null;
+  if ((response.status === 202 || response.status === 409) && started?.run === 'direct' && started.job_id) {
+    const runHeaders: Record<string, string> = {};
+    if (options.token) runHeaders.authorization = `Bearer ${options.token}`;
+    void (await engine())(new Request(`http://localhost:3000/api/jobs/${started.job_id}/run`, { method: 'POST', headers: runHeaders })).catch(() => {});
+  }
   return { status: response.status, data, text, headers: response.headers, bytes };
 }
 
 /**
  * Like the website: when a route answers 202 {job_id}, poll the job and
  * return {status: 200, data: result} or {status: error.status, data: {detail}}.
+ * A result carrying __continue (a long step done in parts) is followed the
+ * same way the website follows it.
  */
 export async function call(method: string, urlPath: string, options: ApiOptions = {}, timeoutMs = 90000): Promise<ApiResult & { jobId?: string }> {
   const first = await api(method, urlPath, options);
@@ -159,7 +169,11 @@ export async function call(method: string, urlPath: string, options: ApiOptions 
     await new Promise((resolve) => setTimeout(resolve, 100));
     const poll = await api('GET', `/api/jobs/${jobId}`, { token: options.token });
     if (poll.status !== 200) return { ...poll, jobId };
-    if (poll.data.status === 'done') return { ...poll, status: 200, data: poll.data.result, jobId };
+    if (poll.data.status === 'done') {
+      const next = poll.data.result?.__continue;
+      if (next?.path) return call('POST', next.path, { token: options.token, json: next.body ?? {} }, timeoutMs);
+      return { ...poll, status: 200, data: poll.data.result, jobId };
+    }
     if (poll.data.status === 'failed') return { ...poll, status: poll.data.error?.status ?? 500, data: { detail: poll.data.error?.detail }, jobId };
   }
   throw new Error(`job ${jobId} for ${method} ${urlPath} did not finish in ${timeoutMs}ms`);

@@ -1,12 +1,15 @@
-# GrantFinder runs entirely on Netlify:
+# GrantFinder runs entirely on Netlify, on any plan:
 #   - the website and the engine API (Next.js app in /frontend, API at /api/*)
-#   - long AI jobs in a background function (frontend/netlify/functions/)
+#   - AI steps run inside normal requests by default; with
+#     GRANTFINDER_BACKGROUND_JOBS=true (plans that include background
+#     functions) they run in frontend/netlify/background/ for up to 15 minutes
 #   - data in Netlify Blobs (no database to set up)
 # Required environment variable: SECRET_KEY. See docs/deployment.md.
 
 [build]
   base = "frontend"
-  command = "npm run build"
+  # The script adds the background worker only when GRANTFINDER_BACKGROUND_JOBS=true.
+  command = "node scripts/netlify-functions.mjs && npm run build"
   publish = ".next"
 
 [build.environment]

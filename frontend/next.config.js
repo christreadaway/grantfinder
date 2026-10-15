@@ -1,8 +1,9 @@
 /** @type {import('next').NextConfig} */
 
-// GrantFinder runs entirely on Netlify: this Next.js app serves the website
-// AND the engine (src/server, mounted at /api/*), and a Netlify background
-// function (netlify/functions/) runs the long AI jobs.
+// GrantFinder runs entirely on Netlify, on any plan: this Next.js app serves
+// the website AND the engine (src/server, mounted at /api/*). AI steps run
+// inside normal requests, or in the optional background function
+// (netlify/background/) when GRANTFINDER_BACKGROUND_JOBS=true.
 //
 // Netlify sets NETLIFY=true during builds. SECRET_KEY signs every sign-in and
 // encrypts saved Claude API keys, so refuse to build a site without it rather
