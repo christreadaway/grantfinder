@@ -245,6 +245,99 @@ check(
 silentSite.closeAllConnections();
 silentSite.close();
 
+// --- 7. Funder history inside one request: research has at most 3 searches and 1 continuation, then
+// continues to the profile build in a request of its own; time limits end in plain messages.
+const { FUNDER_MESSAGES } = await import('../../frontend/src/server/services/writer.ts');
+await saveGrants(me.id, [
+  { ...grantFields, id: 'grant_slow_site', grant_name: 'Slow Website Grant', url: `http://127.0.0.1:${silentPort}/guidelines` },
+  { ...grantFields, id: 'grant_direct_test', grant_name: 'Direct Mode Test Grant', url: '' },
+  { ...grantFields, id: 'grant_direct_funder', grant_name: 'Direct Funder Grant', funder: '[Funder Name]', url: '' },
+  { ...grantFields, id: 'grant_direct_funder_blank', grant_name: 'Blank Funder Grant', funder: '[Other Funder Name]', url: '' },
+]);
+const funderApp = await api('POST', '/api/writer/applications', { token, json: { grant_id: 'grant_direct_funder' } });
+const funderBase = `/api/writer/applications/${funderApp.data.id}`;
+const blankFunderApp = await api('POST', '/api/writer/applications', { token, json: { grant_id: 'grant_direct_funder_blank' } });
+const blankFunderBase = `/api/writer/applications/${blankFunderApp.data.id}`;
+const FUNDER_NOTES = 'From the 990-PF: [Other School Name] received $15,000 for K-3 reading intervention in 2024.';
+const PARTIAL =
+  'PAST GRANTS (so far)\n- [Other School Name] | 2024 | $15,000 | K-3 reading intervention | https://example.org/funder/partial-report\n' +
+  'PARTIAL-RESEARCH-MARKER: still checking the 2023 990-PF.';
+await mock.fixtures({
+  funder_research_v1: {
+    turns: [
+      { text: PARTIAL, stop_reason: 'pause_turn', web_searches: 2 },
+      { text: ' Still searching.', stop_reason: 'pause_turn', web_searches: 1 },
+    ],
+  },
+});
+before = (await mock.requests()).length;
+const paused = await runInParts(`${funderBase}/funder-profile`, { notes_text: FUNDER_NOTES, research_web: true });
+const pausedCalls = (await mock.requests()).slice(before).filter((r) => r.prompt_id === 'funder_research_v1');
+const pausedRecord = (await api('GET', funderBase, { token })).data.funder_profile;
+check(
+  'research still searching after its one continuation: 2 requests (3 searches at most), what it found is kept, and the build runs in a second part',
+  paused.final.status === 200 && pausedCalls.length === 2 && pausedCalls[1].turns === 2 && paused.parts.length === 2 &&
+    paused.parts[0].next?.path === `${funderBase}/funder-profile` && paused.parts[0].next?.body.research_web === false &&
+    pausedRecord?.research_sources.includes('https://example.org/funder/partial-report') && Boolean(pausedRecord?.profile),
+  [paused.final, pausedCalls.length, paused.parts.map((p) => p.next), pausedRecord?.research_sources],
+);
+check(
+  '...and the result says the research stopped early',
+  paused.final.data?.note === FUNDER_MESSAGES.researchStoppedEarly,
+  paused.final.data?.note,
+);
+const { getJob } = await import('../../frontend/src/server/jobs.ts');
+const researchJob = await getJob(me.id, paused.parts[0].jobId);
+check(
+  'the research step notes its direct-mode limits',
+  (researchJob?.notes ?? []).some((note: string) => note.includes('Funder research: at most 3 web searches and 1 continuation (runs inside one request, about a minute)')),
+  researchJob?.notes,
+);
+
+// Research cut off by the step's time limit (3 s step, Claude takes 6 s).
+await mock.fixtures({ funder_research_v1: { text: PARTIAL, web_searches: 1 } });
+process.env.GRANTFINDER_DIRECT_JOB_BUDGET_MS = '3000';
+await mock.delay('funder_research_v1', 6000);
+let started = Date.now();
+const cutWithNotes = await runInParts(`${funderBase}/funder-profile`, { research_web: true });
+const cutSeconds = (Date.now() - started) / 1000;
+check(
+  'research stopped by the time limit, with notes to build from: the profile is still built, and the result says why',
+  cutWithNotes.final.status === 200 && cutWithNotes.parts.length === 2 && cutWithNotes.final.data?.note === FUNDER_MESSAGES.researchOutOfTimeKept &&
+    cutSeconds < 15,
+  [cutWithNotes.final, cutSeconds],
+);
+const cutBlank = await runInParts(`${blankFunderBase}/funder-profile`, { notes_text: '', research_web: true });
+check(
+  'research stopped by the time limit, with nothing else to build from: a plain message (504), nothing saved',
+  cutBlank.final.status === 504 && cutBlank.final.data?.detail === FUNDER_MESSAGES.researchOutOfTime && cutBlank.parts.length === 1,
+  cutBlank.final,
+);
+await mock.delay('funder_research_v1', 0);
+await mock.delay('funder_profile_v1', 6000);
+const cutBuild = await runInParts(`${funderBase}/funder-profile`, {});
+check(
+  'a profile build stopped by the time limit: a plain message (504); the earlier profile is kept',
+  cutBuild.final.status === 504 && cutBuild.final.data?.detail === FUNDER_MESSAGES.buildOutOfTime &&
+    Boolean((await api('GET', funderBase, { token })).data.funder_profile?.profile),
+  cutBuild.final,
+);
+await mock.delay('funder_profile_v1', 0);
+
+// Inside one request the profile reads at most 50,000 characters of material, and says what was cut.
+process.env.GRANTFINDER_DIRECT_JOB_BUDGET_MS = '45000';
+before = (await mock.requests()).length;
+const longNotes = 'Grant to [Other School Name] for reading. '.repeat(1430);
+const bigBuild = await runInParts(`${funderBase}/funder-profile`, { notes_text: longNotes });
+const bigPrompt = (await mock.requests()).slice(before).find((r) => r.prompt_id === 'funder_profile_v1')?.prompt ?? '';
+check(
+  'inside one request the profile reads at most 50,000 characters of material, and the result names what was cut',
+  bigBuild.final.status === 200 && longNotes.length === 60_060 &&
+    /=== Pasted notes \(the first [\d,]+ of 60,000 characters\) ===/.test(bigPrompt) &&
+    String(bigBuild.final.data?.note).includes('Only part of your pasted notes fit in one request'),
+  [bigBuild.final.status, bigBuild.final.data?.note, (/=== Pasted notes.*===/.exec(bigPrompt) || [])[0]],
+);
+
 await mock.reset();
 mock.stop();
 finish();

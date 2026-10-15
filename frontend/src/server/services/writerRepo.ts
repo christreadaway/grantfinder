@@ -12,13 +12,16 @@
  *   writer/{userId}/apps/{appId}/sections/{sectionId}   SectionDraft (one key per section, so
  *                                                       parallel drafting saves each one at once)
  *   writer/{userId}/apps/{appId}/scorecard              Scorecard
+ *   writer/{userId}/funder/{grantId}                    FunderRecord (funder history: notes, files,
+ *                                                       web research and the profile built from them;
+ *                                                       shared by every application to that grant)
  *
  * Every read-modify-write goes through store.update() (compare-and-swap),
  * because routes and background jobs touch the same records concurrently.
  */
 import { applicationKey } from '../repo';
 import { getMany, keyPart, kv, update } from '../store';
-import type { Application, FitAnalysis, Gap, GrantSpec, IntakeRequest, Scorecard, SectionDraft } from '../types';
+import type { Application, FitAnalysis, FunderRecord, Gap, GrantSpec, IntakeRequest, Scorecard, SectionDraft } from '../types';
 
 const userBase = (userId: string) => `writer/${keyPart(userId)}`;
 const appBase = (userId: string, appId: string) => `${userBase(userId)}/apps/${keyPart(appId)}`;
@@ -31,6 +34,7 @@ export const sectionsPrefix = (userId: string, appId: string) => `${appBase(user
 export const sectionDraftKey = (userId: string, appId: string, sectionId: string) =>
   `${sectionsPrefix(userId, appId)}${keyPart(sectionId)}`;
 export const scorecardKey = (userId: string, appId: string) => `${appBase(userId, appId)}/scorecard`;
+export const funderKey = (userId: string, grantId: string) => `${userBase(userId)}/funder/${keyPart(grantId)}`;
 
 // =============================================================================
 // Applications (records live in repo.ts's layout; these are the writes)
@@ -168,4 +172,25 @@ export async function getScorecard(userId: string, appId: string): Promise<Score
 
 export async function saveScorecard(userId: string, scorecard: Scorecard): Promise<void> {
   await kv().set(scorecardKey(userId, scorecard.application_id), scorecard);
+}
+
+// =============================================================================
+// Funder history (one record per grant, shared by every application to it)
+// =============================================================================
+
+export async function getFunderRecord(userId: string, grantId: string): Promise<FunderRecord | null> {
+  return kv().get<FunderRecord>(funderKey(userId, grantId));
+}
+
+/**
+ * Read-modify-write the grant's funder record (compare-and-swap; may create
+ * it). `fn` gets what is stored now (null when nothing is) and returns what to
+ * store, or undefined to leave it. Returns the stored record afterwards.
+ */
+export async function updateFunderRecord(
+  userId: string,
+  grantId: string,
+  fn: (current: FunderRecord | null) => FunderRecord | undefined,
+): Promise<FunderRecord | null> {
+  return update<FunderRecord>(funderKey(userId, grantId), fn);
 }

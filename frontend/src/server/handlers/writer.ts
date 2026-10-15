@@ -10,22 +10,35 @@
  *
  * Must not import docx or services/writerExport.ts (keeps the background function small).
  */
+import type { Claude, ClaudeCallResult } from '../claude';
 import { testMode } from '../config';
 import { ClaudeError, errorMessage, HttpError, isFatalClaudeError } from '../errors';
 import type { JobContext, JobContinuation, JobHandler } from '../jobs';
 import { asRecord, asString, asStringList } from '../json';
 import { logger } from '../log';
-import { updateProfile } from '../repo';
+import { getProfile, updateProfile } from '../repo';
 import { getGrantOrFoundation } from '../services/ai';
 import {
   addNote,
   analyzeFit,
   analyzeVoice,
   assertDraftAllowed,
+  buildFunderProfile,
   draftSection,
+  emptyFunderRecord,
   enrichGrantSpec,
   fetchGuidelines,
+  FUNDER_MATERIAL_LIMIT,
+  FUNDER_MATERIAL_LIMIT_DIRECT,
+  FUNDER_MESSAGES,
+  FUNDER_RESEARCH_DIRECT,
+  FUNDER_RESEARCH_MAX_SEARCHES,
+  FUNDER_RESEARCH_PROMPT_ID,
+  funderMaterial,
+  funderRecordView,
+  funderResearchPrompt,
   generateIntakePackets,
+  hasFunderMaterial,
   loadApplication,
   loadWriterProfile,
   draftFitsSection,
@@ -35,14 +48,18 @@ import {
   refineConflictMessage,
   replacedQuestionMessage,
   refineSection,
+  researchNotes,
+  researchSources,
   scoreDraft,
   SECTION_NOTES,
+  usefulResearch,
   WRITER_MESSAGES,
   type WriterAI,
   type WriterRun,
 } from '../services/writer';
 import {
   getFitAnalysis,
+  getFunderRecord,
   getGaps,
   getGrantSpec,
   getIntakeRequests,
@@ -53,12 +70,13 @@ import {
   saveGrantSpec,
   saveScorecard,
   touchApplication,
+  updateFunderRecord,
   updateGaps,
   updateIntakeRequests,
   updateSectionDraft,
   writeSectionDraft,
 } from '../services/writerRepo';
-import type { RequiredSection, SectionDraft } from '../types';
+import type { FunderProfile, RequiredSection, SectionDraft } from '../types';
 
 /** Sections drafted at the same time. */
 const DRAFT_CONCURRENCY = 3;
@@ -108,6 +126,21 @@ function appIdOf(ctx: JobContext): string {
   return appId;
 }
 
+/** The grant's funder profile, if one was built (fit, drafting and scoring use it). */
+async function funderProfileFor(ctx: JobContext, grantId: string): Promise<FunderProfile | null> {
+  const profile = (await getFunderRecord(ctx.userId, grantId))?.profile ?? null;
+  if (profile) {
+    const verified = profile.comparable_grants.filter((grantMade) => grantMade.verified).length;
+    ctx.note(`Funder history included (built ${profile.generated_at}; ${verified} comparable grant(s) found in the material).`);
+  }
+  return profile;
+}
+
+/** A Claude call stopped by this step's own time limit (direct mode: about a minute per step). */
+function stoppedByTimeLimit(ctx: JobContext, error: unknown): boolean {
+  return ctx.mode === 'direct' && error instanceof ClaudeError && error.kind === 'timeout' && timeLeft(ctx) < 1_000;
+}
+
 /** The plain-English reason a section failed, for the summary message. */
 function failureDetail(error: unknown): string {
   if (error instanceof HttpError || error instanceof ClaudeError) return error.detail;
@@ -153,10 +186,12 @@ async function grantSpecJob(ctx: JobContext): Promise<unknown> {
   if (!grant) throw new HttpError(404, WRITER_MESSAGES.underlyingGrantMissing);
 
   const pasted = asString(input(ctx).guidelines_text);
+  const sourceFile = asString(input(ctx).source_file);
   let guidelines: string | null = pasted.trim() ? pasted : null;
-  let note: string | null = null;
+  // A message from the route (e.g. only part of a long guidelines file was read).
+  let note: string | null = asString(input(ctx).notice) || null;
   if (guidelines) {
-    ctx.note(`Guidelines pasted (${guidelines.length} characters).`);
+    ctx.note(sourceFile ? `Guidelines from the file "${sourceFile}" (${guidelines.length} characters).` : `Guidelines pasted (${guidelines.length} characters).`);
   } else if (grant.url && grant.url.trim()) {
     // Fall back to the source grantfinder already has (HTML or PDF, SSRF-safe).
     await ctx.progress('Reading the grant guidelines from the funder website...');
@@ -189,9 +224,227 @@ async function grantSpecJob(ctx: JobContext): Promise<unknown> {
     sections: spec.required_sections.length,
     rubric: spec.rubric.length,
     rubric_source: spec.rubric_source,
-    guidelines: pasted.trim() ? 'pasted' : guidelines ? 'fetched' : 'none',
+    guidelines: pasted.trim() ? (sourceFile ? 'file' : 'pasted') : guidelines ? 'fetched' : 'none',
   });
   return { grant_spec: spec, note };
+}
+
+// =============================================================================
+// 4.2b Funder history: web research, then the funder profile
+// =============================================================================
+
+type Tool = ReturnType<Claude['webSearchTool']>;
+const BASIC_WEB_SEARCH_TYPE = 'web_search_20250305';
+
+function toolType(tool: Tool): string {
+  return (tool as { type?: string }).type ?? '';
+}
+
+function basicWebSearchTool(maxUses: number): Tool {
+  return { type: BASIC_WEB_SEARCH_TYPE, name: 'web_search', max_uses: maxUses } as Tool;
+}
+
+/** Web searches Claude ran: the usage counter, or the search blocks if usage is missing. */
+function countSearches(response: ClaudeCallResult): number {
+  const blocks = response.content.filter(
+    (block) => block.type === 'server_tool_use' && (block as { name?: string }).name === 'web_search',
+  ).length;
+  return Math.max(response.webSearches, blocks);
+}
+
+/** Messages carried to the end of a run ("your notes were cut"), joined; null when there are none. */
+function joinNotices(...notices: Array<string | null | undefined>): string | null {
+  const text = notices
+    .map((notice) => (notice ?? '').trim())
+    .filter(Boolean)
+    .join(' ');
+  return text || null;
+}
+
+/** "a", "a and b", "a, b and c" */
+function joinNames(names: string[]): string {
+  return names.length <= 1 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+}
+
+/** The next part after research: build the profile (a request of its own, so the build gets a whole step too). */
+function buildAfterResearch(appId: string, notice: string | null): JobContinuation {
+  return {
+    path: `/api/writer/applications/${appId}/funder-profile`,
+    body: { research_web: false, ...(notice ? { research_note: notice } : {}) },
+  };
+}
+
+/**
+ * Funder research (funder_research_v1 with web search): what this funder has
+ * actually funded, saved on the grant's funder record as plain findings with
+ * source URLs. The result carries __continue, so the website builds the
+ * profile next. When the search finds nothing usable (or runs out of time)
+ * the build still runs from the notes and files already there; with nothing
+ * at all to build from, the step fails with a plain message.
+ */
+async function funderResearchJob(ctx: JobContext): Promise<unknown> {
+  const app = await loadApplication(ctx.userId, appIdOf(ctx));
+  const grant = await getGrantOrFoundation(ctx.userId, app.grant_id);
+  if (!grant) throw new HttpError(404, WRITER_MESSAGES.underlyingGrantMissing);
+  const orgProfile = await getProfile(ctx.userId);
+  const notice = asString(input(ctx).notice) || null;
+  const direct = ctx.mode === 'direct';
+  const budget = timeLeft(ctx);
+  const maxSearches = direct ? FUNDER_RESEARCH_DIRECT.maxSearches : FUNDER_RESEARCH_MAX_SEARCHES;
+  ctx.note(
+    `Funder research: at most ${maxSearches} web searches` +
+      (direct ? ` and ${FUNDER_RESEARCH_DIRECT.maxContinuations} continuation (runs inside one request, about a minute)` : ''),
+  );
+
+  const ai: Claude = await ctx.claude();
+  const primaryTool = ai.webSearchTool(maxSearches);
+  const request = {
+    stage: 'funder',
+    promptId: FUNDER_RESEARCH_PROMPT_ID,
+    prompt: funderResearchPrompt(grant, orgProfile, maxSearches),
+    maxTokens: 4000,
+    ...(direct ? { maxContinuations: FUNDER_RESEARCH_DIRECT.maxContinuations } : {}),
+  };
+  await ctx.progress(
+    direct
+      ? 'Claude is searching the web for what this funder has funded (up to about a minute)...'
+      : 'Claude is searching the web for what this funder has funded (usually 1-2 minutes)...',
+  );
+  let response: ClaudeCallResult | null = null;
+  try {
+    response = await ai.call({ ...request, tools: [primaryTool] });
+  } catch (error) {
+    // Some accounts or models reject the newest web search tool: retry once with the basic one.
+    // Only for a plain "bad request" (key, billing and model problems fail at once), and in
+    // direct mode only while most of the step's minute is left (the rejection is instant).
+    const retryable = error instanceof ClaudeError && error.kind === 'bad_request' && toolType(primaryTool) !== BASIC_WEB_SEARCH_TYPE;
+    if (retryable && (!direct || timeLeft(ctx) >= budget * 0.6)) {
+      logger.warn('funder_research_tool_retry', {
+        correlation_id: app.correlation_id,
+        app_id: app.id,
+        tool: toolType(primaryTool),
+        error: error.detail.slice(0, 300),
+      });
+      ctx.note(`Web search tool ${toolType(primaryTool)} was rejected (${error.detail.slice(0, 200)}); retrying with ${BASIC_WEB_SEARCH_TYPE}`);
+      await ctx.progress('Retrying with the basic web search tool...');
+      try {
+        response = await ai.call({ ...request, tools: [basicWebSearchTool(maxSearches)] });
+      } catch (retryError) {
+        if (!stoppedByTimeLimit(ctx, retryError)) throw retryError;
+      }
+    } else if (!stoppedByTimeLimit(ctx, error)) {
+      throw error;
+    }
+  }
+
+  const searches = response ? countSearches(response) : 0;
+  const findings = response ? response.text.trim() : '';
+  // Still searching when it had to stop (direct mode allows one continuation of a paused search).
+  const stillSearching = response !== null && response.stopReason === 'pause_turn';
+  if (!response || !usefulResearch(findings)) {
+    const outOfTime = !response || (direct && stillSearching);
+    logger.warn(outOfTime ? 'funder_research_out_of_time' : 'funder_research_empty', {
+      correlation_id: app.correlation_id,
+      app_id: app.id,
+      searches,
+      chars: findings.length,
+      stop_reason: response?.stopReason ?? null,
+    });
+    ctx.note(
+      outOfTime
+        ? `Web research stopped at the time limit after ${searches} search(es), before Claude wrote up anything usable`
+        : `Web research found nothing usable (${findings.length} characters, ${searches} search(es), stop reason ${response?.stopReason ?? 'none'})`,
+    );
+    // Earlier notes, files or research are kept and still make a profile.
+    if (!hasFunderMaterial(await getFunderRecord(ctx.userId, app.grant_id))) {
+      throw new HttpError(outOfTime ? 504 : 422, outOfTime ? FUNDER_MESSAGES.researchOutOfTime : FUNDER_MESSAGES.researchNothing);
+    }
+    const kept = outOfTime ? FUNDER_MESSAGES.researchOutOfTimeKept : FUNDER_MESSAGES.researchNothingKept;
+    return { research: { saved: false, searches, sources: 0, chars: 0 }, __continue: buildAfterResearch(app.id, joinNotices(notice, kept)) };
+  }
+
+  const sources = researchSources(findings, response.content);
+  const notes = researchNotes(findings, sources);
+  const now = new Date().toISOString();
+  await updateFunderRecord(ctx.userId, app.grant_id, (current) => ({
+    ...(current ?? emptyFunderRecord(app.grant_id, now)),
+    research_notes: notes,
+    research_sources: sources,
+    researched_at: now,
+    material_updated_at: now,
+    updated_at: now,
+  }));
+  if (stillSearching) ctx.note(`Claude was still searching when it had to stop (after ${searches} search(es)); kept what it had found.`);
+  if (response.stopReason === 'max_tokens') ctx.note('The research answer was cut off (max_tokens); kept what arrived.');
+  ctx.note(`Web research saved: ${notes.length} characters, ${sources.length} source URL(s), ${searches} search(es).`);
+  logger.info('funder_research_saved', {
+    correlation_id: app.correlation_id,
+    app_id: app.id,
+    searches,
+    sources: sources.length,
+    chars: notes.length,
+    stopped_early: stillSearching,
+  });
+  return {
+    research: { saved: true, searches, sources: sources.length, chars: notes.length },
+    __continue: buildAfterResearch(app.id, joinNotices(notice, stillSearching ? FUNDER_MESSAGES.researchStoppedEarly : null)),
+  };
+}
+
+/**
+ * Funder profile (funder_profile_v1, no tools) from the grant record, the
+ * grant spec, the org profile and the grant's funder material: pasted notes,
+ * uploaded files and web research. Fit analysis, drafting and scoring read it.
+ */
+async function funderProfileJob(ctx: JobContext): Promise<unknown> {
+  const app = await loadApplication(ctx.userId, appIdOf(ctx));
+  const grant = await getGrantOrFoundation(ctx.userId, app.grant_id);
+  if (!grant) throw new HttpError(404, WRITER_MESSAGES.underlyingGrantMissing);
+  const orgProfile = await loadWriterProfile(ctx.userId);
+  const spec = await getGrantSpec(ctx.userId, app.grant_id);
+  // The profile is as new as the material it read: material saved after this marks it out of date.
+  const readAt = new Date().toISOString();
+  const record = await getFunderRecord(ctx.userId, app.grant_id);
+  if (!record || !hasFunderMaterial(record)) throw new HttpError(400, FUNDER_MESSAGES.noMaterial);
+
+  const direct = ctx.mode === 'direct';
+  const material = funderMaterial(record, grant, direct ? FUNDER_MATERIAL_LIMIT_DIRECT : FUNDER_MATERIAL_LIMIT);
+  ctx.note(
+    `Funder material: ${material.chars} characters from ${material.sources.length} source(s)` +
+      (material.cut.length ? `; cut to fit: ${material.cut.join(', ')}` : '') +
+      (spec ? '' : '; grant requirements not analyzed yet'),
+  );
+  await ctx.progress('Building the funder profile from your notes, files and research...');
+  const run = runFor(ctx, await ctx.claude());
+  let built: Awaited<ReturnType<typeof buildFunderProfile>>;
+  try {
+    built = await buildFunderProfile(run, grant, spec, orgProfile, material, readAt);
+  } catch (error) {
+    if (!stoppedByTimeLimit(ctx, error)) throw error;
+    logger.warn('funder_profile_out_of_time', { correlation_id: app.correlation_id, app_id: app.id, material_chars: material.chars });
+    throw new HttpError(504, FUNDER_MESSAGES.buildOutOfTime);
+  }
+  const saved = await updateFunderRecord(ctx.userId, app.grant_id, (current) => ({
+    ...(current ?? record),
+    profile: built.profile,
+    updated_at: new Date().toISOString(),
+  }));
+  await touchApplication(ctx.userId, app.id);
+  const comparables = built.profile.comparable_grants;
+  logger.info('funder_profile_built', {
+    correlation_id: app.correlation_id,
+    app_id: app.id,
+    comparables: comparables.length,
+    verified: comparables.filter((grantMade) => grantMade.verified).length,
+    dropped_without_recipient: built.dropped,
+    ask_recommendation: Boolean(built.profile.ask_recommendation),
+    material_chars: material.chars,
+  });
+  const note = joinNotices(
+    asString(input(ctx).notice),
+    material.cut.length ? `Only part of ${joinNames(material.cut)} fit in one request; the profile was built from the first part.` : null,
+  );
+  return { funder_profile: funderRecordView(saved), ...(note ? { note } : {}) };
 }
 
 // =============================================================================
@@ -204,9 +457,11 @@ async function analyzeJob(ctx: JobContext): Promise<unknown> {
   const spec = await getGrantSpec(ctx.userId, app.grant_id);
   if (!spec) throw new HttpError(400, WRITER_MESSAGES.specFirst);
 
-  await ctx.progress('Comparing your profile with the grant rubric...');
+  const funder = await funderProfileFor(ctx, app.grant_id);
+
+  await ctx.progress(funder ? 'Comparing your profile with the grant rubric and the funder history...' : 'Comparing your profile with the grant rubric...');
   const run = runFor(ctx, await ctx.claude());
-  const { analysis, gaps } = await analyzeFit(run, profile, spec, app.id);
+  const { analysis, gaps } = await analyzeFit(run, profile, spec, app.id, funder);
   await saveFitAnalysis(ctx.userId, analysis);
   await saveGaps(ctx.userId, app.id, gaps);
   await touchApplication(ctx.userId, app.id, { status: 'analysis' });
@@ -216,6 +471,7 @@ async function analyzeJob(ctx: JobContext): Promise<unknown> {
     criteria: analysis.fit_map.length,
     gaps: gaps.length,
     high_gaps: gaps.filter((gap) => gap.severity === 'high').length,
+    funder_history: Boolean(funder),
   });
   return { fit_analysis: analysis, gaps };
 }
@@ -320,6 +576,7 @@ async function draftJob(ctx: JobContext): Promise<unknown> {
   }
   const analysis = await getFitAnalysis(ctx.userId, app.id);
   const confirmedGaps = gaps.filter((gap) => gap.status === 'confirmed_gap');
+  const funder = await funderProfileFor(ctx, app.grant_id);
 
   // Sections that have no draft yet go first, so a run cut short still fills the holes.
   const existing = covered;
@@ -343,7 +600,7 @@ async function draftJob(ctx: JobContext): Promise<unknown> {
   /** Draft one section and save it the moment it is finished, so nothing finished is ever lost. */
   const draftOne = async (section: RequiredSection): Promise<void> => {
     try {
-      const draft = await draftSection(run, app, section, spec, profile, analysis, confirmedGaps);
+      const draft = await draftSection(run, app, section, spec, profile, analysis, confirmedGaps, funder);
       const prior = priorDrafts.get(section.id);
       // Compare-and-swap: if the section's text changed after this run read it (a hand edit
       // that slipped in), that text stays current and the new draft goes into its history.
@@ -493,9 +750,11 @@ async function scoreJob(ctx: JobContext): Promise<unknown> {
   const drafts = spec ? draftsVsSpec(await listSectionDrafts(ctx.userId, app.id), spec).current : [];
   if (!spec || !drafts.length) throw new HttpError(400, WRITER_MESSAGES.draftFirst);
 
+  const funder = await funderProfileFor(ctx, app.grant_id);
+
   await ctx.progress('Scoring the draft against the rubric...');
   const run = runFor(ctx, await ctx.claude());
-  const scorecard = await scoreDraft(run, app, spec, drafts);
+  const scorecard = await scoreDraft(run, app, spec, drafts, funder);
   await saveScorecard(ctx.userId, scorecard);
   await touchApplication(ctx.userId, app.id, { status: 'review' });
   logger.info('scorecard_generated', {
@@ -559,6 +818,8 @@ async function refineJob(ctx: JobContext): Promise<unknown> {
 export const writerJobs: Record<string, JobHandler> = {
   'writer.voice_analyze': voiceAnalyzeJob,
   'writer.grant_spec': grantSpecJob,
+  'writer.funder_research': funderResearchJob,
+  'writer.funder_profile': funderProfileJob,
   'writer.analyze': analyzeJob,
   'writer.intake_generate': intakeGenerateJob,
   'writer.draft': draftJob,

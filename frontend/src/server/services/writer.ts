@@ -5,6 +5,8 @@
  * Each stage is one purpose-built Claude task with its own prompt (text kept
  * verbatim from the Python):
  *   Extract  grant_spec_v1, voice_profile_v1
+ *   Funder   funder_research_v1 (web search), funder_profile_v1: what the grantor
+ *            has actually funded, used by Map, Draft and Score
  *   Map      fit_gap_v1
  *   Route    intake_packets_v1
  *   Draft    section_draft_v1
@@ -33,9 +35,14 @@ import { getApplication, getProfile } from '../repo';
 import type {
   Application,
   ClaimFlag,
+  ComparableGrant,
   CriterionScore,
   FitAnalysis,
   FitEntry,
+  FunderPriority,
+  FunderProfile,
+  FunderRecord,
+  FunderRecordView,
   Gap,
   Grant,
   GrantSpec,
@@ -46,6 +53,7 @@ import type {
   Scorecard,
   SectionDraft,
 } from '../types';
+import { cutText } from './ai';
 
 /** PRD 5.2: a deadline within this many days marks the application urgent. */
 export const URGENCY_WINDOW_DAYS = 10;
@@ -875,6 +883,525 @@ Rules:
 }
 
 // =============================================================================
+// Stage: Funder History - what the grantor has actually funded
+// =============================================================================
+//
+// The grant spec says what the funder ASKS for; the funder history says what
+// it actually FUNDS. One record per grant (writerRepo funder key) holds what
+// the person pasted, files they added, and Claude's web research; the profile
+// built from it (funder_profile_v1) feeds the fit analysis, drafting and
+// scoring. Never invented: comparable grants need a named recipient, and a
+// recipient that does not appear in the material is shown flagged and never
+// reaches a drafting prompt.
+
+export const FUNDER_RESEARCH_PROMPT_ID = 'funder_research_v1';
+export const FUNDER_PROFILE_PROMPT_ID = 'funder_profile_v1';
+
+/** Pasted funder notes are kept up to this many characters. */
+export const FUNDER_NOTES_LIMIT = 60_000;
+/** Text kept from one uploaded funder file (like documents elsewhere). */
+export const FUNDER_FILE_TEXT_LIMIT = 60_000;
+/** Files one funder history can hold (a file with the same name replaces the old one). */
+export const FUNDER_MAX_FILES = 6;
+/** Web research findings kept. */
+export const FUNDER_RESEARCH_LIMIT = 30_000;
+/** Funder material sent to Claude for one profile. A step inside one Netlify request sends less, so the call fits its minute. */
+export const FUNDER_MATERIAL_LIMIT = 80_000;
+export const FUNDER_MATERIAL_LIMIT_DIRECT = 50_000;
+/** Web research inside one request (direct mode): like AI web discovery, a few searches and one continuation. */
+export const FUNDER_RESEARCH_DIRECT = { maxSearches: 3, maxContinuations: 1 } as const;
+/** Web research in a long background run. */
+export const FUNDER_RESEARCH_MAX_SEARCHES = 6;
+/** Comparable grants kept from one profile. */
+const MAX_COMPARABLES = 10;
+/** Research shorter than this (or "NOTHING FOUND") found nothing usable. */
+const MIN_USEFUL_RESEARCH_CHARS = 120;
+
+const withCommas = (n: number) => n.toLocaleString('en-US');
+
+export const FUNDER_MESSAGES = {
+  noMaterial:
+    'Add something about this funder first: paste what you know, add a file, or click "Research the web and build".',
+  busy:
+    'Funder research or a funder profile build is still running for this grant. Wait for it to finish, then try again. What you typed is kept.',
+  tooManyFiles: `This funder history already has ${FUNDER_MAX_FILES} files. Remove one before adding another.`,
+  fileNotFound: 'That file is not in this funder history. Reload the page to see the current files.',
+  researchOutOfTime:
+    'Web research needs more time than this site allows for one step (about a minute), so it stopped before Claude wrote up what it found. ' +
+    'Try again, or paste what you know about this funder and click "Build Funder Profile".',
+  researchNothing:
+    'Claude found nothing about this funder on the web. Paste what you know (past grantees, annual report or 990-PF grant lists, notes from calls) and click "Build Funder Profile".',
+  researchStoppedEarly: 'Web research stopped before Claude finished searching; the funder profile uses what it found so far.',
+  researchOutOfTimeKept: 'Web research ran out of time before it found anything new; the funder profile was built from what you already had.',
+  researchNothingKept: 'Web research found nothing new about this funder; the funder profile was built from what you already had.',
+  notesCut: `Your pasted notes were longer than ${withCommas(FUNDER_NOTES_LIMIT)} characters; only the first ${withCommas(FUNDER_NOTES_LIMIT)} are kept. Add a long grant list as a file instead.`,
+  buildOutOfTime:
+    'Building the funder profile took longer than this site allows for one step (about a minute). Try again; if it keeps happening, shorten the pasted notes or remove a large file.',
+} as const;
+
+export function emptyFunderRecord(grantId: string, now: string): FunderRecord {
+  return {
+    grant_id: grantId,
+    notes_text: '',
+    source_files: [],
+    research_notes: '',
+    research_sources: [],
+    researched_at: null,
+    profile: null,
+    material_updated_at: null,
+    updated_at: now,
+  };
+}
+
+/** Anything to build a profile from: notes, a file, or earlier web research. */
+export function hasFunderMaterial(record: FunderRecord | null): boolean {
+  return Boolean(record && (record.notes_text.trim() || record.source_files.length || record.research_notes.trim()));
+}
+
+/** The notes, files or research changed after the profile was built. */
+export function funderProfileOutdated(record: FunderRecord): boolean {
+  return Boolean(record.profile && record.material_updated_at && record.material_updated_at > record.profile.generated_at);
+}
+
+/** What the website gets: the record without the big texts. */
+export function funderRecordView(record: FunderRecord | null): FunderRecordView | null {
+  if (!record) return null;
+  return {
+    grant_id: record.grant_id,
+    notes_text: record.notes_text,
+    source_files: record.source_files.map((file) => ({ name: file.name, chars: file.chars, added_at: file.added_at })),
+    research_chars: record.research_notes.length,
+    research_sources: record.research_sources,
+    researched_at: record.researched_at,
+    profile: record.profile,
+    profile_outdated: funderProfileOutdated(record),
+    material_updated_at: record.material_updated_at,
+    updated_at: record.updated_at,
+  };
+}
+
+/** Lowercase letters and digits, single-spaced: how names are compared with the material ("[St. Name]" = "st name"). */
+function matchable(text: string): string {
+  return text
+    .normalize('NFKD')
+    .replace(/\p{M}+/gu, '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+}
+
+/** `needle` appears in `haystack` (both matchable) as whole words. */
+function containsWords(haystack: string, needle: string): boolean {
+  return needle !== '' && ` ${haystack} `.includes(` ${needle} `);
+}
+
+/** The funder material for one profile, fitted to the prompt. */
+export interface FunderMaterial {
+  /** The block sent to Claude. */
+  text: string;
+  /** Everything Claude saw (material and grant record), matchable: names in the profile must appear here. */
+  searchable: string;
+  /** Where the material came from: "pasted notes", file names, research URLs. */
+  sources: string[];
+  /** Parts cut to fit, as the person knows them ("your pasted notes", "\"report.pdf\""). */
+  cut: string[];
+  /** Characters of material sent. */
+  chars: number;
+}
+
+export function funderMaterial(record: FunderRecord, grant: Grant | null, limit: number): FunderMaterial {
+  // name: how the person knows it; label: the heading Claude sees.
+  const parts: Array<{ name: string; label: string; text: string }> = [];
+  if (record.notes_text.trim()) parts.push({ name: 'your pasted notes', label: 'Pasted notes', text: record.notes_text.trim() });
+  for (const file of record.source_files) {
+    if (file.text.trim()) parts.push({ name: `"${file.name}"`, label: `File: ${file.name}`, text: file.text.trim() });
+  }
+  if (record.research_notes.trim()) {
+    parts.push({
+      name: 'the web research',
+      label: 'Web research (Claude searched the web earlier; source URLs inline)',
+      text: record.research_notes.trim(),
+    });
+  }
+  // Share the room fairly: short parts go whole, long ones are cut to an equal share of what is left.
+  const order = parts.map((part, index) => ({ index, length: part.text.length })).sort((a, b) => a.length - b.length);
+  const room = new Array<number>(parts.length).fill(0);
+  let remaining = limit;
+  order.forEach((item, position) => {
+    room[item.index] = Math.min(item.length, Math.floor(remaining / (order.length - position)));
+    remaining -= room[item.index];
+  });
+  const cut: string[] = [];
+  const sent = parts.map((part, index) => {
+    if (room[index] >= part.text.length) return { text: part.text, header: `=== ${part.label} ===` };
+    cut.push(part.name);
+    return {
+      text: cutText(part.text, room[index]),
+      header: `=== ${part.label} (the first ${withCommas(room[index])} of ${withCommas(part.text.length)} characters) ===`,
+    };
+  });
+  const grantText = grant
+    ? [grant.grant_name, grant.funder, grant.description, grant.eligibility_notes ?? '', grant.amount, grant.funder_stats ?? ''].join('\n')
+    : '';
+  const sources = [
+    ...(record.notes_text.trim() ? ['pasted notes'] : []),
+    ...record.source_files.map((file) => file.name),
+    ...record.research_sources,
+  ];
+  return {
+    text: sent.map((part) => `${part.header}\n${part.text}`).join('\n\n'),
+    searchable: matchable([...sent.map((part) => part.text), grantText].join('\n')),
+    sources: Array.from(new Set(sources)),
+    cut,
+    chars: sent.reduce((sum, part) => sum + part.text.length, 0),
+  };
+}
+
+function funderGrantRecord(grant: Grant): Record<string, unknown> {
+  return {
+    grant_name: grant.grant_name,
+    funder: grant.funder,
+    amount: grant.amount,
+    deadline: grant.deadline,
+    description: grant.description,
+    eligibility_notes: grant.eligibility_notes ?? null,
+    funder_stats: grant.funder_stats ?? null,
+    url: grant.url,
+  };
+}
+
+/** Who is applying, for judging what is comparable (and whether it was funded before). */
+function applicantSlice(profile: OrganizationProfile): Record<string, unknown> {
+  return {
+    organization_name: profile.organization_name,
+    organization_type: profile.organization_type,
+    city: profile.city,
+    state: profile.state,
+    diocese: profile.diocese ?? null,
+    has_school: profile.has_school,
+    student_count: profile.student_count ?? null,
+    annual_budget: profile.annual_budget ?? null,
+    program_needs: profile.program_needs,
+    facility_needs: profile.facility_needs,
+    current_initiatives: profile.current_initiatives,
+    previous_grants: profile.previous_grants,
+    prior_grants_detail: profile.prior_grants_detail,
+  };
+}
+
+/** funder_research_v1: web search for what this funder has funded (plain-text findings with source URLs). */
+export function funderResearchPrompt(grant: Grant, profile: OrganizationProfile | null, maxSearches: number): string {
+  const applicant = profile
+    ? { organization_type: profile.organization_type, city: profile.city, state: profile.state, diocese: profile.diocese ?? null, has_school: profile.has_school }
+    : { organization_type: 'Catholic parish and/or school' };
+  const place = profile && (profile.city || profile.state) ? ` near ${[profile.city, profile.state].filter(Boolean).join(', ')}` : '';
+  return `You are researching a grant funder's giving history so a Catholic parish or school can write an application that matches what this funder actually funds, not only its written guidelines.
+
+FUNDER: ${grant.funder || '(not named in the grant record)'}
+GRANT: ${grant.grant_name}
+GRANT WEBSITE: ${grant.url?.trim() || 'none on record'}
+
+GRANT RECORD:
+${pretty(funderGrantRecord(grant))}
+
+APPLICANT (only to judge what is comparable; do not research the applicant):
+${pretty(applicant)}
+
+Use web search (at most ${maxSearches} searches) to find what this funder has actually funded:
+- past grantees and grant amounts: annual reports, the funder's website, IRS Form 990-PF grant lists, news from recipients
+- stated priorities, geographic focus, exclusions, and how applications are reviewed
+- grants to Catholic schools, parishes, or similar organizations${place}
+
+Write plain-text findings (no JSON) in these short sections:
+FUNDER OVERVIEW
+PAST GRANTS (one line each: recipient exactly as the source writes it | year | amount | purpose | source URL)
+PRIORITIES AND PATTERNS
+EXCLUSIONS AND PROCESS
+SOURCES (every URL you used)
+
+Rules:
+- Report only what a source says, with its URL. Never invent grantees, amounts, years, priorities or contacts; write "not found" instead.
+- Keep it under 1,500 words.
+- If you find nothing about this funder, answer exactly: NOTHING FOUND`;
+}
+
+/** Plain findings worth keeping (not "NOTHING FOUND", not a one-line apology). */
+export function usefulResearch(text: string): boolean {
+  const trimmed = text.trim();
+  return trimmed.length >= MIN_USEFUL_RESEARCH_CHARS && !/^NOTHING FOUND\b/i.test(trimmed);
+}
+
+const URL_PATTERN = /https?:\/\/[^\s<>"'`|)\]]+/gi;
+
+/** Source URLs in the findings and in the answer's citations (real web search answers cite sources). */
+export function researchSources(text: string, content: unknown[] = []): string[] {
+  const found: string[] = [];
+  for (const block of content) {
+    const citations = (block as { citations?: unknown } | null)?.citations;
+    if (!Array.isArray(citations)) continue;
+    for (const citation of citations) {
+      const url = (citation as { url?: unknown } | null)?.url;
+      if (typeof url === 'string') found.push(url);
+    }
+  }
+  for (const match of text.matchAll(URL_PATTERN)) found.push(match[0]);
+  const urls: string[] = [];
+  for (const raw of found) {
+    const cleaned = raw.trim().replace(/[.,;:!?'"]+$/, '');
+    try {
+      const url = new URL(cleaned);
+      if ((url.protocol === 'http:' || url.protocol === 'https:') && !urls.includes(url.href)) urls.push(url.href);
+    } catch {
+      // not a web address
+    }
+  }
+  return urls.slice(0, 25);
+}
+
+/** The findings to save: the text, plus cited URLs it does not mention, cut to the research limit. */
+export function researchNotes(text: string, sources: string[]): string {
+  const body = text.trim();
+  const unlisted = sources.filter((url) => !body.includes(url));
+  const withSources = unlisted.length ? `${body}\n\nSOURCES CITED\n${unlisted.join('\n')}` : body;
+  return cutText(withSources, FUNDER_RESEARCH_LIMIT);
+}
+
+/** funder_profile_v1: the funder profile from the material (JSON). */
+export function funderProfilePrompt(grant: Grant, spec: GrantSpec | null, profile: OrganizationProfile, material: FunderMaterial): string {
+  const requirements = spec
+    ? pretty({
+        funder_priorities: spec.funder_priorities,
+        rubric: rubricJson(spec.rubric),
+        funder_language_cues: spec.funder_language_cues,
+      })
+    : 'Not analyzed yet.';
+  return `You are a grant strategist building a Funder Profile: what this funder has actually funded, so a Catholic parish or school can match its application to the funder's real giving history, not only its written guidelines.
+
+GRANT RECORD (from grantfinder discovery):
+${pretty(funderGrantRecord(grant))}
+
+WHAT THE GUIDELINES ASK FOR (already extracted):
+${requirements}
+
+APPLICANT (judge what is comparable to this organization):
+${pretty(applicantSlice(profile))}
+
+FUNDER MATERIAL (the applicant's notes, files and earlier web research):
+${material.text}
+
+Return ONLY a JSON object:
+{
+  "summary": "2-4 sentences: who this funder really funds, how much, and what that means for this application",
+  "priorities": [{"priority": "what they fund in practice", "evidence": "where the material shows it"}],
+  "giving_patterns": {"typical_range": "e.g. $5,000-$25,000, or empty if the material doesn't show it", "median_award": null, "grants_per_year": null, "geography": "where they give", "recipient_types": ["kinds of organizations they fund"]},
+  "comparable_grants": [
+    {"recipient": "exactly as written in the material", "year": null, "amount": null, "purpose": "what the grant paid for", "why_comparable": "how it resembles this applicant or request"}
+  ],
+  "exclusions": ["what they don't fund, or rules that could disqualify this applicant"],
+  "process_requirements": ["how they decide and what they require: letter of inquiry, site visit, one request a year"],
+  "ask_recommendation": {"range": "$X-$Y", "rationale": "why, citing the comparable grants or the stated range"},
+  "language_cues": ["words the funder uses about its own giving"],
+  "positioning": ["3-6 concrete recommendations for framing this application to match what they fund"],
+  "unknowns": ["what the material doesn't show that would change the strategy"],
+  "sources": ["pasted notes", "file name", "https://..."]
+}
+
+Rules:
+- Use ONLY the funder material and the grant record. Never invent grantees, amounts, years, priorities, people or contacts.
+- comparable_grants: at most ${MAX_COMPARABLES}, only grants the material states, with the recipient copied exactly as written. Most comparable first. If the material names no grants, return [].
+- ask_recommendation: null unless the material shows award sizes; the rationale must cite the comparable grants or the stated range.
+- Mark anything you infer (rather than read) with "(inferred)".
+- Never say the applicant has a relationship with this funder or was funded by it before, unless the APPLICANT section says so.`;
+}
+
+/** Text or null (null, "n/a", "unknown" and friends are null). Numbers become text ("2024", "$15,000" for amounts). */
+function optionalText(value: unknown, money = false): string | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return money ? `$${withCommas(value)}` : String(value);
+  return refText(value);
+}
+
+/** A recipient as written, or null when the entry names none ("", "unknown", "various", "not named"). */
+function recipientName(value: unknown): string | null {
+  const text = refText(value);
+  if (!text) return null;
+  if (/^(various|multiple|several|many|(an? )?unnamed|undisclosed|not (named|listed|stated|given|disclosed))\b/i.test(text)) return null;
+  return text;
+}
+
+/** Parse funder_profile_v1. Null when the answer holds nothing usable. `dropped` = comparable grants with no recipient. */
+export function parseFunderProfile(
+  text: string,
+  material: Pick<FunderMaterial, 'searchable' | 'sources'>,
+  generatedAt: string,
+): { profile: FunderProfile; dropped: number } | null {
+  const data = parseObject(text);
+  if (!data) return null;
+
+  const priorities: FunderPriority[] = [];
+  for (const item of listOf(data.priorities)) {
+    if (typeof item === 'string') {
+      if (item.trim()) priorities.push({ priority: item.trim(), evidence: '' });
+      continue;
+    }
+    const p = asRecord(item);
+    const priority = joinText(p.priority).trim();
+    if (priority) priorities.push({ priority, evidence: joinText(p.evidence).trim() });
+  }
+
+  let dropped = 0;
+  const comparables: ComparableGrant[] = [];
+  for (const item of listOf(data.comparable_grants)) {
+    const c = asRecord(item);
+    const recipient = recipientName(c.recipient);
+    // Never invented: a grant with no named recipient is not a comparable grant.
+    if (!recipient) {
+      dropped++;
+      continue;
+    }
+    if (comparables.length >= MAX_COMPARABLES) continue;
+    comparables.push({
+      recipient,
+      year: optionalText(c.year),
+      amount: optionalText(c.amount, true),
+      purpose: joinText(c.purpose).trim(),
+      why_comparable: joinText(c.why_comparable).trim(),
+      verified: containsWords(material.searchable, matchable(recipient)),
+    });
+  }
+
+  const patterns = asRecord(data.giving_patterns);
+  const ask = asRecord(data.ask_recommendation);
+  const askRange = joinText(ask.range).trim();
+  const askRationale = joinText(ask.rationale).trim();
+
+  // Sources: where the material came from, plus any other source Claude names that appears in it.
+  const known = new Set(material.sources.map((source) => source.toLowerCase()));
+  const sources = [...material.sources];
+  for (const source of stringList(data.sources)) {
+    const trimmed = source.trim();
+    if (!trimmed || known.has(trimmed.toLowerCase())) continue;
+    if (containsWords(material.searchable, matchable(trimmed))) {
+      known.add(trimmed.toLowerCase());
+      sources.push(trimmed);
+    }
+  }
+
+  const profile: FunderProfile = {
+    summary: joinText(data.summary).trim(),
+    priorities: priorities.slice(0, 12),
+    giving_patterns: {
+      typical_range: joinText(patterns.typical_range).trim(),
+      median_award: optionalText(patterns.median_award, true),
+      grants_per_year: optionalText(patterns.grants_per_year),
+      geography: joinText(patterns.geography).trim(),
+      recipient_types: stringList(patterns.recipient_types).slice(0, 12),
+    },
+    comparable_grants: comparables,
+    exclusions: stringList(data.exclusions).slice(0, 12),
+    process_requirements: stringList(data.process_requirements).slice(0, 12),
+    ask_recommendation: askRange && askRationale ? { range: askRange, rationale: askRationale } : null,
+    language_cues: stringList(data.language_cues).slice(0, 15),
+    positioning: stringList(data.positioning).slice(0, 8),
+    unknowns: stringList(data.unknowns).slice(0, 12),
+    sources: sources.slice(0, 30),
+    generated_at: generatedAt,
+  };
+  if (!profile.summary && !profile.priorities.length && !profile.comparable_grants.length && !profile.positioning.length) return null;
+  return { profile, dropped };
+}
+
+/** Build the funder profile (one Claude call, no tools). `generatedAt` = when the material was read. */
+export async function buildFunderProfile(
+  run: WriterRun,
+  grant: Grant,
+  spec: GrantSpec | null,
+  profile: OrganizationProfile,
+  material: FunderMaterial,
+  generatedAt: string,
+): Promise<{ profile: FunderProfile; dropped: number }> {
+  const prompt = funderProfilePrompt(grant, spec, profile, material);
+  const res = await run.ai.call({ stage: 'funder', promptId: FUNDER_PROFILE_PROMPT_ID, prompt, maxTokens: 5000 });
+  const parsed = parseFunderProfile(res.text, material, generatedAt);
+  if (!parsed) throw unreadableAnswer(run, FUNDER_PROFILE_PROMPT_ID, res, 'funder profile');
+  if (parsed.dropped) run.note?.(`${FUNDER_PROFILE_PROMPT_ID}: left out ${parsed.dropped} comparable grant(s) that named no recipient.`);
+  const unverified = parsed.profile.comparable_grants.filter((grantMade) => !grantMade.verified);
+  if (unverified.length) {
+    run.note?.(
+      `${FUNDER_PROFILE_PROMPT_ID}: ${unverified.length} comparable grant(s) name a recipient not found in the material ` +
+        '(shown flagged, never used for drafting).',
+    );
+  }
+  return parsed;
+}
+
+/** Comparable grants whose recipient appears in the material: the only ones a later prompt sees. */
+function verifiedComparables(funder: FunderProfile): ComparableGrant[] {
+  return funder.comparable_grants.filter((grantMade) => grantMade.verified);
+}
+
+/** The funder history block for the fit analysis (fit_gap_v1). */
+function funderBlockForFit(funder: FunderProfile): string {
+  return `FUNDER HISTORY (what this funder has actually funded, from the applicant's notes, files and web research; "(inferred)" marks inferences):
+${pretty({
+  summary: funder.summary,
+  priorities: funder.priorities,
+  typical_award: funder.giving_patterns.typical_range || null,
+  geography: funder.giving_patterns.geography || null,
+  recipient_types: funder.giving_patterns.recipient_types,
+  comparable_grants: verifiedComparables(funder),
+  exclusions: funder.exclusions,
+  process_requirements: funder.process_requirements,
+  ask_recommendation: funder.ask_recommendation,
+  positioning: funder.positioning,
+})}`;
+}
+
+const FIT_FUNDER_RULES = `
+- FUNDER HISTORY is what this funder has actually funded. The recommended_strategy must say how to match it: lead with what resembles the comparable grants, follow the positioning advice, and keep the ask inside the typical range.
+- You may add one fit_map entry with criterion_id "funder_history" and criterion_name "Fit with what this funder has funded", rating how closely this applicant and request resemble the funder's past grants.
+- Add gaps for the funder's process requirements the profile does not show it can meet, and for exclusions that may apply. Use severity "high" when an exclusion clearly applies to this applicant or request.
+- The funder history is about the funder, never evidence about the applicant.`;
+
+/** The funder history block for drafting (section_draft_v1). */
+function funderBlockForDraft(funder: FunderProfile): string {
+  return `FUNDER HISTORY (emphasize what this funder demonstrably funds; it guides emphasis and scale, it is NOT a source of facts about the organization):
+${pretty({
+  summary: funder.summary,
+  positioning: funder.positioning,
+  priorities: funder.priorities.map((item) => item.priority),
+  comparable_grants: verifiedComparables(funder).map(({ recipient, year, amount, purpose }) => ({ recipient, year, amount, purpose })),
+  ask_recommendation: funder.ask_recommendation,
+})}`;
+}
+
+/** The funder history block for self-scoring (self_score_v1). */
+function funderBlockForScore(funder: FunderProfile): string {
+  return `FUNDER HISTORY (what this funder has actually funded):
+${pretty({
+  summary: funder.summary,
+  priorities: funder.priorities.map((item) => item.priority),
+  typical_award: funder.giving_patterns.typical_range || null,
+  ask_recommendation: funder.ask_recommendation,
+  comparable_grants: verifiedComparables(funder).map(({ recipient, year, amount, purpose }) => ({ recipient, year, amount, purpose })),
+  exclusions: funder.exclusions,
+})}
+
+Also judge how closely this draft matches what this funder has funded before, and whether the amount asked fits their typical range. If that is the biggest weakness, make it the top_fix.`;
+}
+
+/** The grant spec's language cues plus the funder history's, each once (case-insensitive), spec first. */
+function mergedLanguageCues(specCues: string[], funder: FunderProfile | null): string[] {
+  if (!funder) return specCues;
+  const seen = new Set<string>();
+  return [...specCues, ...funder.language_cues].filter((cue) => {
+    const key = cue.trim().toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+// =============================================================================
 // Stage: Map - fit/gap analysis (PRD 4.3, the core value)
 // =============================================================================
 
@@ -883,7 +1410,11 @@ export async function analyzeFit(
   profile: OrganizationProfile,
   spec: GrantSpec,
   applicationId: string,
+  funder: FunderProfile | null = null,
 ): Promise<{ analysis: FitAnalysis; gaps: Gap[] }> {
+  // Without a funder profile the prompt is exactly the original one.
+  const funderBlock = funder ? `\n\n${funderBlockForFit(funder)}` : '';
+  const funderRules = funder ? FIT_FUNDER_RULES : '';
   const prompt = `You are a seasoned grant strategist. Cross-reference this organization against this grant's rubric and requirements.
 
 ORGANIZATION PROFILE:
@@ -895,7 +1426,7 @@ ${pretty(rubricJson(spec.rubric))}
 REQUIRED SECTIONS:
 ${pretty(spec.required_sections.map(sectionJson))}
 
-FUNDER PRIORITIES: ${pyJson(spec.funder_priorities)}
+FUNDER PRIORITIES: ${pyJson(spec.funder_priorities)}${funderBlock}
 
 Return ONLY a JSON object:
 {
@@ -917,7 +1448,7 @@ Return ONLY a JSON object:
 Rules:
 - Evidence must be REAL facts present in the profile. Never invent evidence.
 - severity "high" = the application cannot honestly be drafted without it (required field/criterion with nothing to support it).
-- Include the "you never named the lead" class of gaps: people, letters, data points quietly required.`;
+- Include the "you never named the lead" class of gaps: people, letters, data points quietly required.${funderRules}`;
 
   const res = await run.ai.call({ stage: 'map', promptId: 'fit_gap_v1', prompt, maxTokens: 6000 });
   const data = parseObject(res.text);
@@ -1095,6 +1626,7 @@ export async function draftSection(
   profile: OrganizationProfile,
   analysis: FitAnalysis | null,
   confirmedGaps: Gap[],
+  funder: FunderProfile | null = null,
 ): Promise<SectionDraft> {
   let limitText = '';
   if (section.word_limit) {
@@ -1123,6 +1655,13 @@ ${pyJson(analysis.honesty_ledger)}`;
       pyJson(confirmedGaps.map((gap) => gap.description));
   }
 
+  // Without a funder profile the prompt is exactly the original one.
+  const funderBlock = funder ? `\n\n${funderBlockForDraft(funder)}` : '';
+  const funderRules = funder
+    ? `\n- Never say or imply that the organization has a relationship with ${application.funder} or was funded by it before, unless the ORGANIZATION PROFILE says so.` +
+      "\n- Use FUNDER HISTORY for emphasis and scale only: don't name the funder's other grantees, and never present their grants as this organization's."
+    : '';
+
   const prompt = `Write one section of a grant application to ${application.funder} for "${application.grant_name}".
 
 SECTION: ${section.title}
@@ -1134,16 +1673,16 @@ ${pretty(profileSlice(profile))}
 
 ${strategyBlock}
 
-${confirmedBlock}
+${confirmedBlock}${funderBlock}
 
-FUNDER LANGUAGE CUES (mirror naturally, no keyword stuffing): ${pyJson(spec.funder_language_cues)}
+FUNDER LANGUAGE CUES (mirror naturally, no keyword stuffing): ${pyJson(mergedLanguageCues(spec.funder_language_cues, funder))}
 
 ${voiceBlock(profile)}
 
 ABSOLUTE RULES:
 - Never fabricate facts, numbers, partnerships, names, or credentials. Every factual claim must come from the profile.
 - Where the profile lacks something this section needs, write [NEEDS INPUT: what's missing] inline rather than inventing.
-- Every major claim should serve a rubric criterion.
+- Every major claim should serve a rubric criterion.${funderRules}
 
 Return ONLY a JSON object:
 {
@@ -1357,13 +1896,21 @@ export function complianceResults(drafts: SectionDraft[]): Array<Record<string, 
   return results;
 }
 
-export async function scoreDraft(run: WriterRun, application: Application, spec: GrantSpec, drafts: SectionDraft[]): Promise<Scorecard> {
+export async function scoreDraft(
+  run: WriterRun,
+  application: Application,
+  spec: GrantSpec,
+  drafts: SectionDraft[],
+  funder: FunderProfile | null = null,
+): Promise<Scorecard> {
   const sectionsText = drafts.map((d) => `=== ${d.title} (${d.word_count} words) ===\n${d.current_draft}`).join('\n\n');
+  // Without a funder profile the prompt is exactly the original one.
+  const funderBlock = funder ? `\n\n${funderBlockForScore(funder)}` : '';
 
   const prompt = `You are a skeptical grant reviewer for ${application.funder}. Score this draft application against the rubric. Be honest - your job is to find what costs points BEFORE the funder does.
 
 RUBRIC (source: ${spec.rubric_source}):
-${pretty(rubricJson(spec.rubric))}
+${pretty(rubricJson(spec.rubric))}${funderBlock}
 
 DRAFT APPLICATION:
 ${sectionsText.slice(0, 60000)}

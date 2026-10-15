@@ -1108,6 +1108,20 @@ async function writerFlow(page, S, urgency) {
     check('the grant record reached Claude (deadline)', specs[0] && specs[0].prompt.includes('Annual: October 15'));
   });
 
+  await step('Writer 1b: Funder History turns pasted notes into a funder profile', async () => {
+    const before = await requestCount();
+    await page.getByRole('textbox', { name: 'Funder history notes' }).fill(
+      'FUNDER-NOTES-MARKER 2024 annual report: [Other School Name] received $15,000 for K-3 reading intervention materials. [Parish Name] Food Pantry received $10,000 in 2023.');
+    await page.getByRole('button', { name: /Build Funder Profile/ }).click();
+    await page.getByText('Comparable grants they made').waitFor({ timeout: JOB_TIMEOUT });
+    const funderText = await card(page, /1b · Funder History/).innerText();
+    check('funder profile summary shown', funderText.includes('FUNDER-SUMMARY-MARKER'), funderText.slice(0, 300));
+    check('comparable grants listed', /\[Other School Name\]/.test(funderText) && /K-3 reading/.test(funderText), funderText.slice(0, 800));
+    check('suggested ask shown', /Suggested ask/.test(funderText), funderText.slice(0, 800));
+    const calls = await promptsFor('funder_profile_v1', before);
+    check('the pasted funder notes reached Claude', calls.length === 1 && calls[0].prompt.includes('FUNDER-NOTES-MARKER'), calls.length);
+  });
+
   await step('Writer 2: Run Fit Analysis', async () => {
     const before = await requestCount();
     await page.getByRole('button', { name: 'Run Fit Analysis' }).click();
@@ -1124,6 +1138,7 @@ async function writerFlow(page, S, urgency) {
     check('every open gap can be waived', (await page.getByRole('button', { name: 'waive', exact: true }).count()) === FX.GAPS.length);
     const fits = await promptsFor('fit_gap_v1', before);
     check('fit prompt grounded in the profile (documents + questionnaire)', fits.length === 1 && fits[0].prompt.includes('Gym roof leaks') && fits[0].prompt.includes('FREEFORM-MARKER'), fits.length);
+    check('fit prompt uses the funder history', fits.length === 1 && fits[0].prompt.includes('FUNDER HISTORY') && fits[0].prompt.includes('FUNDER-SUMMARY-MARKER'), fits.length);
     const draftNow = await apiJob('POST', `/api/writer/applications/${S.appId}/draft`, { token: S.token, json: { section_id: null } });
     check('drafting before the strategy is confirmed is refused (409)', draftNow.status === 409 && /strategy/i.test(draftNow.data?.detail || ''), `${draftNow.status} ${draftNow.data?.detail}`);
   });
@@ -1250,6 +1265,7 @@ async function writerFlow(page, S, urgency) {
       !lateEditPossible || drafts.every((d) => d.prompt.includes('LATE-EDIT-MARKER')),
       'the strategy box stays editable after "Strategy confirmed", but the edit is not saved or used by drafting');
     check('draft prompts carry the captured voice', drafts.every((d) => d.prompt.includes(FX.MARKERS.voice)), drafts.length);
+    check('draft prompts carry the funder history', drafts.every((d) => d.prompt.includes('FUNDER HISTORY') && d.prompt.includes('ASK-MARKER')), drafts.length);
     check('draft prompts say what the org does NOT have (confirmed gap)', drafts.every((d) => d.prompt.includes('Name and qualifications of the project lead') && /does NOT have/i.test(d.prompt)), drafts.length);
     check('draft prompts carry the stakeholder answer', drafts.every((d) => d.prompt.includes('ANSWER-MARKER')), drafts.length);
     const app = await appApi();

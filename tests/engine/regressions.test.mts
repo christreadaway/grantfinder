@@ -292,6 +292,52 @@ check(
   normalRedraft.status === 200 && budgetAfterNormal?.current_draft !== HAND_TEXT_2 && budgetAfterNormal?.versions.includes(HAND_TEXT_2) === true,
   [normalRedraft.status, budgetAfterNormal?.current_draft.slice(0, 60)],
 );
+
+// --- 10. One funder history step at a time per grant: the identical click waits for the running build;
+// research, a different build or a file while it runs get a plain 409 (nothing saved, no Claude call).
+// Drafting has its own lock, so it is not held up by a funder build.
+const { FUNDER_MESSAGES } = await import('../../frontend/src/server/services/writer.ts');
+const { getFunderRecord } = await import('../../frontend/src/server/services/writerRepo.ts');
+const FUNDER_NOTES = 'Past grants: [Other School Name] received $15,000 for K-3 reading in 2024.';
+const researchCallsBefore = await promptCount('funder_research_v1');
+await mock.delay('funder_profile_v1', 1500);
+const runningBuild = await api('POST', `${base}/funder-profile`, { token, json: { notes_text: FUNDER_NOTES } });
+const sameBuild = await api('POST', `${base}/funder-profile`, { token, json: { notes_text: FUNDER_NOTES } });
+const researchWhileBuilding = await api('POST', `${base}/funder-profile`, { token, json: { notes_text: FUNDER_NOTES, research_web: true } });
+const otherNotesWhileBuilding = await api('POST', `${base}/funder-profile`, { token, json: { notes_text: 'Different notes typed meanwhile.' } });
+const busyFile = new FormData();
+busyFile.append('file', new File(['[Other School Name] $15,000'], 'grants.txt', { type: 'text/plain' }));
+const fileWhileBuilding = await api('POST', `${base}/funder-profile/upload`, { token, form: busyFile });
+const draftWhileBuilding = await api('POST', `${base}/draft`, { token, json: { section_id: 'budget' } });
+await mock.delay('funder_profile_v1', 0);
+const buildFinished = runningBuild.status === 202 ? await waitJob(runningBuild.data.job_id) : null;
+const draftFinished = draftWhileBuilding.status === 202 ? await waitJob(draftWhileBuilding.data.job_id) : null;
+const funderAfter = await getFunderRecord(me.id, 'grant_kenedy_test');
+check(
+  'the identical "Build Funder Profile" click while it runs -> 409 running with the same job id',
+  runningBuild.status === 202 && sameBuild.status === 409 && sameBuild.data.running === true && sameBuild.data.job_id === runningBuild.data.job_id &&
+    buildFinished?.status === 'done',
+  [runningBuild.data, sameBuild.data, buildFinished?.status],
+);
+check(
+  'research or a file while a build runs -> plain 409 that says to wait (no running flag); no research call, no file saved',
+  researchWhileBuilding.status === 409 && researchWhileBuilding.data.detail === FUNDER_MESSAGES.busy && researchWhileBuilding.data.running === undefined &&
+    fileWhileBuilding.status === 409 && fileWhileBuilding.data.detail === FUNDER_MESSAGES.busy &&
+    (await promptCount('funder_research_v1')) === researchCallsBefore && funderAfter?.source_files.length === 0,
+  [researchWhileBuilding.data, fileWhileBuilding.data, funderAfter?.source_files.length],
+);
+check(
+  'a build with different notes while one runs -> plain 409 (different details); those notes are not saved',
+  otherNotesWhileBuilding.status === 409 && otherNotesWhileBuilding.data.running === undefined &&
+    /already running with different details/.test(otherNotesWhileBuilding.data.detail) && funderAfter?.notes_text === FUNDER_NOTES &&
+    Boolean(funderAfter?.profile),
+  [otherNotesWhileBuilding.data, funderAfter?.notes_text],
+);
+check(
+  'drafting is not held up by a funder build (different lock)',
+  draftWhileBuilding.status === 202 && draftFinished?.status === 'done',
+  [draftWhileBuilding.data, draftFinished?.status],
+);
 await mock.reset();
 
 mock.stop();

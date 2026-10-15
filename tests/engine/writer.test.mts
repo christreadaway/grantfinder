@@ -1398,6 +1398,488 @@ check(
 );
 
 // ---------------------------------------------------------------------------
+// 4.2b Funder history: notes, files and web research -> funder profile -> fit, draft, score
+// ---------------------------------------------------------------------------
+
+const FUNDER_FIXTURES: Record<string, unknown> = JSON.parse(
+  fs.readFileSync(path.join(repoRoot, 'tests', 'mock-claude', 'fixtures', 'funder.json'), 'utf8'),
+);
+const restoreFunder = (...ids: string[]) => mock.fixtures(Object.fromEntries(ids.map((id) => [id, FUNDER_FIXTURES[id]])));
+const directMode = process.env.GRANTFINDER_JOB_MODE === 'direct';
+const callsSince = async (promptId: string, before: number) => (await mock.requests()).slice(before).filter((r) => r.prompt_id === promptId);
+const requestCount = async () => (await mock.requests()).length;
+const FM = writer.FUNDER_MESSAGES;
+
+// Its own account, so the counts and logs checked for user A elsewhere stay as they were.
+const tokenD = await guest();
+await saveKey(tokenD);
+const userD: string = (await api('GET', '/api/auth/me', { token: tokenD })).data.id;
+await repo.saveProfile(userD, profileFor(userD));
+await repo.saveGrants(userD, [
+  makeGrant(userD, 'grant_funder', {
+    grant_name: 'Literacy Seed Grant',
+    funder: '[Funder Name]',
+    amount: '$5,000 to $25,000',
+    description: 'Catholic elementary education in Texas.',
+    deadline: 'Rolling',
+  }),
+  makeGrant(userD, 'grant_funder_blank', { grant_name: 'Blank Funder Grant', funder: '[Other Funder Name]', deadline: 'Rolling' }),
+]);
+const funderApp = (await api('POST', '/api/writer/applications', { token: tokenD, json: { grant_id: 'grant_funder' } })).data;
+const funderPath = `/api/writer/applications/${funderApp.id}`;
+const funderSpec = await run('POST', `${funderPath}/grant-spec`, tokenD, { guidelines_text: 'Literacy seed grant: background, need, project, evaluation.' });
+check('funder app: requirements ready', funderSpec.status === 200, funderSpec.data);
+
+// --- Routes: sign-in, validation, ownership, key, nothing to build from
+let mark = await requestCount();
+const fpUnauth = await api('POST', `${funderPath}/funder-profile`, { json: { notes_text: 'x' } });
+const fpUnauthUpload = await api('POST', `${funderPath}/funder-profile/upload`, { form: new FormData() });
+const fpUnauthDelete = await api('DELETE', `${funderPath}/funder-profile/files/a.txt`);
+check('funder routes need sign-in (401)', [fpUnauth, fpUnauthUpload, fpUnauthDelete].every((r) => r.status === 401), [fpUnauth.status, fpUnauthUpload.status, fpUnauthDelete.status]);
+const fpUnknownApp = await api('POST', '/api/writer/applications/app_nope/funder-profile', { token: tokenD, json: { notes_text: 'x' } });
+check('funder profile for an unknown application -> 404', fpUnknownApp.status === 404 && fpUnknownApp.data.detail === 'Application not found', fpUnknownApp.data);
+const fpBadNotes = await api('POST', `${funderPath}/funder-profile`, { token: tokenD, json: { notes_text: 42 } });
+const fpBadFlag = await api('POST', `${funderPath}/funder-profile`, { token: tokenD, json: { notes_text: 'x', research_web: 'maybe' } });
+check(
+  'notes_text must be text and research_web true or false (422)',
+  fpBadNotes.status === 422 && fpBadNotes.data.detail === 'Field "notes_text" must be text.' &&
+    fpBadFlag.status === 422 && fpBadFlag.data.detail === 'Field "research_web" must be true or false.',
+  [fpBadNotes.data, fpBadFlag.data],
+);
+const fpNothing = await api('POST', `${funderPath}/funder-profile`, { token: tokenD, json: { notes_text: '   ' } });
+check('nothing to build from (no notes, files or research) -> 400 that says what to add', fpNothing.status === 400 && fpNothing.data.detail === FM.noMaterial, fpNothing.data);
+check('...and no Claude call was made for any of these', (await requestCount()) === mark, (await mock.requests()).slice(mark).map((r) => r.prompt_id));
+
+// --- Build from pasted notes
+const FUNDER_NOTES =
+  'NOTES-MARKER-5521 From the 2023 990-PF: [Other School Name] received $15,000 for K-3 reading intervention; ' +
+  '[Parish Name] Food Pantry received $8,000 for weekend meal bags. The program officer said they like measurable reading gains.';
+mark = await requestCount();
+const fpBuilt = await run('POST', `${funderPath}/funder-profile`, tokenD, { notes_text: FUNDER_NOTES });
+const fpView = fpBuilt.data?.funder_profile;
+const fpProfile = fpView?.profile;
+const fpProfileCalls = await callsSince('funder_profile_v1', mark);
+check(
+  'Build Funder Profile: one funder_profile_v1 call (no tools, no web research); the profile is saved and returned',
+  fpBuilt.status === 200 && String(fpProfile?.summary).includes('FUNDER-SUMMARY-MARKER') && fpProfileCalls.length === 1 &&
+    fpProfileCalls[0].tools.length === 0 && (await callsSince('funder_research_v1', mark)).length === 0,
+  [fpBuilt.status, fpBuilt.data, fpProfileCalls.length],
+);
+const fpPrompt = fpProfileCalls[0]?.prompt ?? '';
+check(
+  'the profile prompt holds the pasted notes, the grant record, the extracted requirements and the applicant',
+  fpPrompt.includes('=== Pasted notes ===\nNOTES-MARKER-5521') && fpPrompt.includes('"grant_name": "Literacy Seed Grant"') &&
+    fpPrompt.includes('"funder": "[Funder Name]"') && fpPrompt.includes('WHAT THE GUIDELINES ASK FOR (already extracted):') &&
+    fpPrompt.includes('"funder_priorities": [') && fpPrompt.includes('"organization_name": "[School Name]"') &&
+    fpPrompt.includes('Never invent grantees'),
+  fpPrompt.slice(0, 400),
+);
+const fpComparables: Array<{ recipient: string; year: string | null; amount: string | null; verified: boolean }> = fpProfile?.comparable_grants ?? [];
+check(
+  'never invented: comparable grants that name no recipient ("" or "unknown") are dropped',
+  fpComparables.length === 3 && !JSON.stringify(fpProfile).includes('INVENTED-NO-RECIPIENT-MARKER') &&
+    !JSON.stringify(fpProfile).includes('INVENTED-UNKNOWN-RECIPIENT-MARKER'),
+  fpComparables,
+);
+check(
+  'recipients found word for word in the material are verified; one that is not stays visible, flagged',
+  fpComparables.find((c) => c.recipient === '[Other School Name]')?.verified === true &&
+    fpComparables.find((c) => c.recipient === '[Parish Name] Food Pantry')?.verified === true &&
+    fpComparables.find((c) => c.recipient === '[Unlisted School Name]')?.verified === false,
+  fpComparables,
+);
+check(
+  'numbers become text: year 2024 -> "2024", amount 8000 -> "$8,000", 40 grants a year -> "40"; a priority given as text is kept',
+  fpComparables[0]?.year === '2024' && fpComparables[1]?.amount === '$8,000' && fpProfile?.giving_patterns.grants_per_year === '40' &&
+    fpProfile?.priorities.length === 3 && fpProfile?.priorities[2].priority === 'Tuition assistance (inferred)',
+  [fpComparables, fpProfile?.giving_patterns, fpProfile?.priorities],
+);
+check(
+  'ask recommendation kept with its rationale; sources: "pasted notes" plus only sources found in the material',
+  fpProfile?.ask_recommendation?.range === '$12,000 to $18,000' && /ASK-MARKER/.test(fpProfile?.ask_recommendation?.rationale ?? '') &&
+    JSON.stringify(fpProfile?.sources) === JSON.stringify(['pasted notes']),
+  fpProfile?.sources,
+);
+const fpState1 = (await api('GET', funderPath, { token: tokenD })).data;
+check(
+  'GET state: funder_profile has the notes, files, research size and profile; not out of date; no fit analysis yet',
+  fpState1.funder_profile?.notes_text === FUNDER_NOTES && fpState1.funder_profile.source_files.length === 0 &&
+    fpState1.funder_profile.research_chars === 0 && fpState1.funder_profile.profile_outdated === false &&
+    fpState1.funder_profile.profile?.summary === fpProfile?.summary && fpState1.funder_profile_newer_than_fit === false,
+  fpState1.funder_profile,
+);
+const mainState = (await api('GET', appPath, { token: tokenA })).data;
+check('an application with no funder history: funder_profile null, nothing newer than its fit', mainState.funder_profile === null && mainState.funder_profile_newer_than_fit === false, [mainState.funder_profile, mainState.funder_profile_newer_than_fit]);
+
+// --- Add a file: the text is kept on the record (never sent back) and the profile is built again with it
+const textFile = (name: string, text: string) => {
+  const form = new FormData();
+  form.append('file', new File([text], name, { type: 'text/plain' }));
+  return form;
+};
+const REPORT = 'ANNUAL-REPORT-MARKER Grants paid in 2024: [Other School Name], $15,000, reading intervention. [Third School Name], $25,000, science lab.';
+const reportForm = textFile('annual-report.txt', REPORT);
+reportForm.append('notes_text', FUNDER_NOTES);
+mark = await requestCount();
+const fpUploaded = await finishJob(await api('POST', `${funderPath}/funder-profile/upload`, { token: tokenD, form: reportForm }), tokenD);
+const uploadPrompt = (await callsSince('funder_profile_v1', mark))[0]?.prompt ?? '';
+check(
+  'Add a file: the text file is added and the profile is built again from notes and file',
+  fpUploaded.status === 200 && fpUploaded.data.funder_profile.source_files.length === 1 &&
+    fpUploaded.data.funder_profile.source_files[0].name === 'annual-report.txt' && fpUploaded.data.funder_profile.source_files[0].chars === REPORT.length &&
+    uploadPrompt.includes(`=== File: annual-report.txt ===\n${REPORT}`) && uploadPrompt.includes('NOTES-MARKER-5521'),
+  [fpUploaded.status, fpUploaded.data, uploadPrompt.slice(0, 200)],
+);
+const fpStateAfterFile = await api('GET', funderPath, { token: tokenD });
+check(
+  'file texts never go back to the website (state and step result hold names and sizes only)',
+  !JSON.stringify(fpUploaded.data).includes('ANNUAL-REPORT-MARKER') && !fpStateAfterFile.text.includes('ANNUAL-REPORT-MARKER') &&
+    (await writerRepo.getFunderRecord(userD, 'grant_funder'))?.source_files[0].text === REPORT,
+);
+
+mark = await requestCount();
+const pngForm = new FormData();
+pngForm.append('file', new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], 'photo.png', { type: 'image/png' }));
+const fpPng = await api('POST', `${funderPath}/funder-profile/upload`, { token: tokenD, form: pngForm });
+const fpEmpty = await api('POST', `${funderPath}/funder-profile/upload`, { token: tokenD, form: textFile('empty.txt', '') });
+const fpNoFile = await api('POST', `${funderPath}/funder-profile/upload`, { token: tokenD, form: new FormData() });
+const fpNotMultipart = await api('POST', `${funderPath}/funder-profile/upload`, { token: tokenD, json: { file: 'x' } });
+const brokenDocx = new FormData();
+brokenDocx.append('file', new File(['not really a word file'], 'notes.docx'));
+const fpBadDocx = await api('POST', `${funderPath}/funder-profile/upload`, { token: tokenD, form: brokenDocx });
+const fpHuge = await api('POST', `${funderPath}/funder-profile/upload`, { token: tokenD, form: textFile('huge.txt', 'a'.repeat(10 * 1024 * 1024 + 1)) });
+check(
+  'bad files are refused at once: wrong type (400), empty (400), no file (422), not a form (422), unreadable Word file (400), too large (413)',
+  fpPng.status === 400 && fpPng.data.detail === 'Invalid file type. Allowed: .pdf, .docx, .txt' &&
+    fpEmpty.status === 400 && fpEmpty.data.detail === '"empty.txt" is empty (0 bytes). Check that you picked the right file.' &&
+    fpNoFile.status === 422 && fpNoFile.data.detail === 'No file was uploaded. Choose a PDF, Word (.docx), or text (.txt) file and try again.' &&
+    fpNotMultipart.status === 422 && fpBadDocx.status === 400 && /Couldn't open "notes\.docx" as a Word document/.test(fpBadDocx.data.detail) &&
+    fpHuge.status === 413 && fpHuge.data.detail === 'File is too large (10.1 MB). The limit is 10 MB. Upload a smaller file, or save just the pages that matter as a new PDF.',
+  [fpPng.data, fpEmpty.data, fpNoFile.data, fpNotMultipart.data, fpBadDocx.data, fpHuge.data],
+);
+check(
+  '...nothing was saved and no Claude call was made for them',
+  (await writerRepo.getFunderRecord(userD, 'grant_funder'))?.source_files.length === 1 && (await requestCount()) === mark,
+  (await mock.requests()).slice(mark).map((r) => r.prompt_id),
+);
+
+// At most six files; a file with the same name replaces the earlier one.
+const extraNames = ['extra 1.txt', 'extra 2.txt', 'extra 3.txt', 'extra 4.txt', 'extra 5.txt'];
+await writerRepo.updateFunderRecord(userD, 'grant_funder', (current) =>
+  current
+    ? {
+        ...current,
+        source_files: [
+          ...current.source_files,
+          ...extraNames.map((name) => ({ name, chars: 10, text: `Extra ${name}`, added_at: new Date().toISOString() })),
+        ],
+      }
+    : undefined,
+);
+const fpSeventh = await api('POST', `${funderPath}/funder-profile/upload`, { token: tokenD, form: textFile('seventh.txt', 'One file too many.') });
+check(`a seventh file is refused (at most ${writer.FUNDER_MAX_FILES})`, fpSeventh.status === 400 && fpSeventh.data.detail === FM.tooManyFiles, fpSeventh.data);
+const REPORT_2 = 'ANNUAL-REPORT-2-MARKER Grants paid in 2025: [Other School Name], $16,000, reading intervention.';
+const fpReplaced = await finishJob(await api('POST', `${funderPath}/funder-profile/upload`, { token: tokenD, form: textFile('annual-report.txt', REPORT_2) }), tokenD);
+const filesNow = (await writerRepo.getFunderRecord(userD, 'grant_funder'))?.source_files ?? [];
+check(
+  'a file with the same name replaces the earlier one (still six files); notes not sent are kept',
+  fpReplaced.status === 200 && filesNow.length === 6 && filesNow.filter((file) => file.name === 'annual-report.txt').length === 1 &&
+    filesNow.find((file) => file.name === 'annual-report.txt')?.text === REPORT_2 &&
+    (await writerRepo.getFunderRecord(userD, 'grant_funder'))?.notes_text === FUNDER_NOTES,
+  [fpReplaced.status, filesNow.map((file) => file.name)],
+);
+const fpRemoved = await api('DELETE', `${funderPath}/funder-profile/files/${encodeURIComponent('extra 1.txt')}`, { token: tokenD });
+const fpRemovedAgain = await api('DELETE', `${funderPath}/funder-profile/files/${encodeURIComponent('extra 1.txt')}`, { token: tokenD });
+check(
+  'removing a file: 200 with the record (file gone, profile now out of date); removing it again -> 404',
+  fpRemoved.status === 200 && fpRemoved.data.source_files.length === 5 && !fpRemoved.data.source_files.some((file: { name: string }) => file.name === 'extra 1.txt') &&
+    fpRemoved.data.profile_outdated === true && fpRemovedAgain.status === 404 && fpRemovedAgain.data.detail === FM.fileNotFound,
+  [fpRemoved.status, fpRemoved.data, fpRemovedAgain.data],
+);
+for (const name of extraNames.slice(1)) await api('DELETE', `${funderPath}/funder-profile/files/${encodeURIComponent(name)}`, { token: tokenD });
+const fpNotMineFile = await api('DELETE', `${funderPath}/funder-profile/files/annual-report.txt`, { token: tokenB });
+check("another account can't remove this application's funder files (404)", fpNotMineFile.status === 404 && (await writerRepo.getFunderRecord(userD, 'grant_funder'))?.source_files.length === 1, fpNotMineFile.data);
+
+// --- Research the web and build: funder_research_v1 (web search) -> __continue -> funder_profile_v1
+mark = await requestCount();
+const fpResearched = await run('POST', `${funderPath}/funder-profile`, tokenD, { notes_text: FUNDER_NOTES, research_web: true });
+const sinceResearch = (await mock.requests()).slice(mark);
+const researchCall = sinceResearch.find((r) => r.prompt_id === 'funder_research_v1');
+const buildCall = sinceResearch.find((r) => r.prompt_id === 'funder_profile_v1');
+check(
+  'Research the web and build: a web search call first, then the profile build (the research step continues to it)',
+  fpResearched.status === 200 && Boolean(researchCall && buildCall) && sinceResearch.indexOf(researchCall!) < sinceResearch.indexOf(buildCall!) &&
+    researchCall!.tools.length === 1 && researchCall!.tools[0] === 'web_search_20260209' && buildCall!.tools.length === 0,
+  sinceResearch.map((r) => [r.prompt_id, r.tools]),
+);
+check(
+  'the research prompt names the funder and the grant, asks for past grantees with source URLs, and caps the searches for this mode',
+  Boolean(researchCall?.prompt.includes('FUNDER: [Funder Name]') && researchCall.prompt.includes('GRANT: Literacy Seed Grant') &&
+    researchCall.prompt.includes('990-PF') && researchCall.prompt.includes(`at most ${directMode ? 3 : 6} searches`) &&
+    researchCall.prompt.includes('NOTHING FOUND')),
+  researchCall?.prompt.slice(0, 300),
+);
+const researchedView = fpResearched.data?.funder_profile;
+check(
+  'the findings and their source URLs are saved, and the build reads them',
+  researchedView?.research_chars > 200 &&
+    JSON.stringify(researchedView?.research_sources) ===
+      JSON.stringify(['https://example.org/funder/about', 'https://example.org/funder/annual-report-2024', 'https://example.org/funder/990pf-2023.pdf']) &&
+    Boolean(buildCall?.prompt.includes('=== Web research') && buildCall.prompt.includes('RESEARCH-FINDINGS-MARKER')),
+  [researchedView?.research_chars, researchedView?.research_sources],
+);
+check(
+  'sources now list the notes, the file and the research URLs (a made-up URL is still left out)',
+  JSON.stringify(researchedView?.profile?.sources) ===
+    JSON.stringify(['pasted notes', 'annual-report.txt', 'https://example.org/funder/about', 'https://example.org/funder/annual-report-2024', 'https://example.org/funder/990pf-2023.pdf']),
+  researchedView?.profile?.sources,
+);
+const researchJob = (await jobsModule.listJobs(userD, 100)).find((job) => job.kind === 'writer.funder_research');
+check(
+  'the research step notes its search cap for this mode, and hands over to the build route',
+  Boolean(researchJob?.notes.some((note) => note.includes(`Funder research: at most ${directMode ? 3 : 6} web searches`))) &&
+    (researchJob?.result as { __continue?: { path?: string; body?: unknown } })?.__continue?.path === `${funderPath}/funder-profile` &&
+    JSON.stringify((researchJob?.result as { __continue?: { body?: unknown } })?.__continue?.body) === JSON.stringify({ research_web: false }),
+  [researchJob?.notes, researchJob?.result],
+);
+
+// Research that finds nothing: built from what was already there, and says so; with nothing at all, a plain message.
+await mock.fixtures({ funder_research_v1: { text: 'NOTHING FOUND', web_searches: 1 } });
+const researchBefore = (await writerRepo.getFunderRecord(userD, 'grant_funder'))?.research_notes;
+const fpNothingNew = await run('POST', `${funderPath}/funder-profile`, tokenD, { research_web: true });
+check(
+  'research that finds nothing still builds from the notes, files and earlier research, and says so (earlier research kept)',
+  fpNothingNew.status === 200 && fpNothingNew.data.note === FM.researchNothingKept &&
+    (await writerRepo.getFunderRecord(userD, 'grant_funder'))?.research_notes === researchBefore,
+  [fpNothingNew.status, fpNothingNew.data?.note],
+);
+const blankApp = (await api('POST', '/api/writer/applications', { token: tokenD, json: { grant_id: 'grant_funder_blank' } })).data;
+const blankPath = `/api/writer/applications/${blankApp.id}`;
+mark = await requestCount();
+const fpBlank = await run('POST', `${blankPath}/funder-profile`, tokenD, { notes_text: '', research_web: true });
+check(
+  'research that finds nothing, with nothing else to build from -> a plain message; no profile call, nothing saved',
+  fpBlank.status === 422 && fpBlank.data.detail === FM.researchNothing && (await callsSince('funder_profile_v1', mark)).length === 0 &&
+    (await writerRepo.getFunderRecord(userD, 'grant_funder_blank')) === null,
+  [fpBlank.status, fpBlank.data],
+);
+await restoreFunder('funder_research_v1');
+await mock.fail('funder_research_v1', 400, 'invalid_request_error', 1);
+mark = await requestCount();
+const fpRetried = await run('POST', `${blankPath}/funder-profile`, tokenD, { notes_text: 'BLANK-NOTES-MARKER [Other School Name] received $5,000.', research_web: true });
+const retryCalls = await callsSince('funder_research_v1', mark);
+check(
+  'a web search tool the account rejects is retried once with the basic tool, then the build runs',
+  fpRetried.status === 200 && retryCalls.length === 2 && retryCalls[0].tools[0] === 'web_search_20260209' && retryCalls[1].tools[0] === 'web_search_20250305',
+  [fpRetried.status, fpRetried.data, retryCalls.map((r) => r.tools)],
+);
+
+// --- The funder history reaches the fit analysis, drafting and scoring
+mark = await requestCount();
+const fpFit = await run('POST', `${funderPath}/analyze`, tokenD);
+const fpFitPrompt = (await callsSince('fit_gap_v1', mark))[0]?.prompt ?? '';
+check(
+  'fit analysis prompt: FUNDER HISTORY with the summary, comparable grants found in the material, exclusions, process, ask and positioning',
+  fpFit.status === 200 && fpFitPrompt.includes('FUNDER HISTORY (what this funder has actually funded') && fpFitPrompt.includes('FUNDER-SUMMARY-MARKER') &&
+    fpFitPrompt.includes('"recipient": "[Other School Name]"') && !fpFitPrompt.includes('[Unlisted School Name]') &&
+    fpFitPrompt.includes('EXCLUSION-MARKER') && fpFitPrompt.includes('PROCESS-MARKER') && fpFitPrompt.includes('ASK-MARKER') &&
+    fpFitPrompt.includes('POSITIONING-MARKER'),
+  fpFitPrompt.slice(fpFitPrompt.indexOf('FUNDER HISTORY'), fpFitPrompt.indexOf('FUNDER HISTORY') + 300),
+);
+check(
+  '...and asks for a strategy that matches it, a "funder_history" fit entry, and gaps for process requirements and exclusions',
+  fpFitPrompt.includes('The recommended_strategy must say how to match it') && fpFitPrompt.includes('criterion_id "funder_history"') &&
+    fpFitPrompt.includes('Use severity "high" when an exclusion clearly applies'),
+);
+check(
+  'without a funder history the fit, drafting and scoring prompts are unchanged (no FUNDER HISTORY block)',
+  !fitPrompt.includes('FUNDER HISTORY') && draftPrompts.length > 0 && draftPrompts.every((p) => !p.includes('FUNDER HISTORY')) &&
+    !scorePrompt.includes('FUNDER HISTORY') && !fitPrompt.includes('funder_history'),
+);
+const fpAfterFit = (await api('GET', funderPath, { token: tokenD })).data;
+check('a fit analysis made after the profile: funder_profile_newer_than_fit is false', fpAfterFit.funder_profile_newer_than_fit === false, fpAfterFit.funder_profile_newer_than_fit);
+await api('POST', `${funderPath}/confirm-strategy`, { token: tokenD, json: { strategy: 'FUNDER-STRATEGY-MARKER Lead with early literacy.' } });
+for (const gap of fpAfterFit.gaps ?? []) {
+  if (gap.severity === 'high') await api('PUT', `${funderPath}/gaps/${gap.id}/waive`, { token: tokenD, json: { reason: 'test' } });
+}
+mark = await requestCount();
+const fpDrafted = await run('POST', `${funderPath}/draft`, tokenD, { section_id: 's1' });
+const fpDraftPrompt = (await callsSince('section_draft_v1', mark))[0]?.prompt ?? '';
+check(
+  'drafting prompt: funder history for emphasis (positioning, comparable grants found in the material, the ask), never the unverified one',
+  fpDrafted.status === 200 && fpDraftPrompt.includes('FUNDER HISTORY (emphasize what this funder demonstrably funds') &&
+    fpDraftPrompt.includes('POSITIONING-MARKER') && fpDraftPrompt.includes('"recipient": "[Other School Name]"') &&
+    fpDraftPrompt.includes('"range": "$12,000 to $18,000"') && !fpDraftPrompt.includes('[Unlisted School Name]') &&
+    !fpDraftPrompt.includes('UNVERIFIED-COMPARABLE-MARKER') && !fpDraftPrompt.includes('NOTES-MARKER-5521'),
+  fpDraftPrompt.slice(fpDraftPrompt.indexOf('FUNDER HISTORY'), fpDraftPrompt.indexOf('FUNDER HISTORY') + 400),
+);
+check(
+  "drafting prompt: the funder's language cues are added to the guidelines' (each once), and it never claims a relationship or past funding",
+  fpDraftPrompt.includes(
+    'FUNDER LANGUAGE CUES (mirror naturally, no keyword stuffing): ["breaking the cycle of poverty", "seed money", "ripple effect", "Catholic institutions", "early literacy", "Catholic identity", "FUNDER-CUE-MARKER"]',
+  ) &&
+    fpDraftPrompt.includes(
+      '- Never say or imply that the organization has a relationship with [Funder Name] or was funded by it before, unless the ORGANIZATION PROFILE says so.',
+    ) && fpDraftPrompt.includes("don't name the funder's other grantees"),
+  fpDraftPrompt.slice(fpDraftPrompt.indexOf('FUNDER LANGUAGE CUES'), fpDraftPrompt.indexOf('FUNDER LANGUAGE CUES') + 300),
+);
+const fpDraftJob = (await jobsModule.listJobs(userD, 100)).find((job) => job.kind === 'writer.draft' && job.application_id === funderApp.id);
+check('the drafting step notes that the funder history was used', Boolean(fpDraftJob?.notes.some((note) => note.includes('Funder history included'))), fpDraftJob?.notes);
+mark = await requestCount();
+const fpScored = await run('POST', `${funderPath}/score`, tokenD);
+const fpScorePrompt = (await callsSince('self_score_v1', mark))[0]?.prompt ?? '';
+check(
+  'self-score prompt: judged against the funder history and the ask against their typical range (top fix may be funder alignment)',
+  fpScored.status === 200 && fpScorePrompt.includes('FUNDER HISTORY (what this funder has actually funded):') &&
+    fpScorePrompt.includes('"typical_award": "$5,000 to $25,000"') && fpScorePrompt.includes('make it the top_fix') &&
+    fpScorePrompt.includes('"recipient": "[Other School Name]"') && !fpScorePrompt.includes('[Unlisted School Name]'),
+  fpScorePrompt.slice(fpScorePrompt.indexOf('FUNDER HISTORY'), fpScorePrompt.indexOf('FUNDER HISTORY') + 300),
+);
+
+// A profile built after the fit analysis: the page offers to re-run it, until it is re-run.
+const fpRebuilt = await run('POST', `${funderPath}/funder-profile`, tokenD, {});
+const fpNewer = (await api('GET', funderPath, { token: tokenD })).data;
+check(
+  'building the profile again after the fit analysis (notes not sent are kept): funder_profile_newer_than_fit is true',
+  fpRebuilt.status === 200 && fpNewer.funder_profile_newer_than_fit === true && fpNewer.funder_profile.notes_text === FUNDER_NOTES &&
+    fpNewer.funder_profile.profile_outdated === false,
+  [fpRebuilt.status, fpNewer.funder_profile_newer_than_fit],
+);
+await run('POST', `${funderPath}/analyze`, tokenD);
+const fpRefit = (await api('GET', funderPath, { token: tokenD })).data;
+check('...and false again once the fit analysis is re-run', fpRefit.funder_profile_newer_than_fit === false, fpRefit.funder_profile_newer_than_fit);
+
+const fpBundle = (await api('GET', `${funderPath}/debug-bundle`, { token: tokenD })).data?.bundle_markdown ?? '';
+check(
+  'debug bundle: one funder history line with sizes and counts, never the notes or file text',
+  /- Funder history: notes \d+ chars, 1 file\(s\), web research \d+ chars \(3 source URLs\), profile yes \(3 comparable grant\(s\), 2 found in the material, ask suggested\)/.test(fpBundle) &&
+    !fpBundle.includes('NOTES-MARKER-5521') && !fpBundle.includes('ANNUAL-REPORT') && fpBundle.includes('| funder_profile_v1 |') && fpBundle.includes('| funder_research_v1 |'),
+  fpBundle.split('\n').find((line) => line.startsWith('- Funder history')),
+);
+
+// Pasted notes over the limit are cut, and the step says so.
+const longNotes = `LONG-NOTES-MARKER ${'Grant to [Other School Name] for reading. '.repeat(1600)}`;
+const fpLong = await run('POST', `${funderPath}/funder-profile`, tokenD, { notes_text: longNotes });
+check(
+  `pasted notes over ${writer.FUNDER_NOTES_LIMIT.toLocaleString('en-US')} characters are cut to the limit, and the result says so`,
+  longNotes.length > writer.FUNDER_NOTES_LIMIT && fpLong.status === 200 && String(fpLong.data?.note).startsWith(FM.notesCut) &&
+    (await writerRepo.getFunderRecord(userD, 'grant_funder'))?.notes_text.length === writer.FUNDER_NOTES_LIMIT,
+  [fpLong.status, fpLong.data?.note],
+);
+
+// Another account, and an account without an API key
+const fpNotMine = await api('POST', `${funderPath}/funder-profile`, { token: tokenB, json: { notes_text: 'x' } });
+check("someone else's application: no funder profile (404)", fpNotMine.status === 404 && fpNotMine.data.detail === 'Application not found', fpNotMine.data);
+const fpNoKey = await api('POST', `/api/writer/applications/${appB.data.id}/funder-profile`, { token: tokenB, json: { notes_text: 'x' } });
+check(
+  'missing API key -> 400 before anything is saved',
+  fpNoKey.status === 400 && fpNoKey.data.detail === 'Claude API key not set. Please add your API key first.' &&
+    (await writerRepo.getFunderRecord(userB, 'grant_kenedy')) === null,
+  fpNoKey.data,
+);
+
+// Pure rules: comparables capped at ten, whole words only, no half an ask, no empty profile; research sources; fitting the material.
+const manyComparables = JSON.stringify({
+  summary: 'S',
+  comparable_grants: Array.from({ length: 14 }, (_, i) => ({ recipient: `[School ${i + 1}]`, purpose: 'Reading' })),
+  ask_recommendation: { range: '$5,000' },
+});
+const parsedMany = writer.parseFunderProfile(manyComparables, { searchable: 'school 1 school 2', sources: [] }, '2026-01-01T00:00:00.000Z');
+check(
+  'at most ten comparable grants; an ask without a rationale is left out; each recipient is looked up in the material',
+  parsedMany?.profile.comparable_grants.length === 10 && parsedMany.profile.ask_recommendation === null &&
+    parsedMany.profile.comparable_grants[0].verified === true && parsedMany.profile.comparable_grants[2].verified === false,
+  parsedMany?.profile.comparable_grants.map((c) => [c.recipient, c.verified]),
+);
+const marySearch = writer.parseFunderProfile(JSON.stringify({ summary: 'S', comparable_grants: [{ recipient: 'Mary' }] }), { searchable: 'grants in maryland', sources: [] }, 't');
+check('a name inside another word is not a match ("Mary" in "Maryland")', marySearch?.profile.comparable_grants[0].verified === false, marySearch?.profile.comparable_grants);
+check(
+  'an answer with no profile in it is refused (null), never saved as an empty profile',
+  writer.parseFunderProfile('Sorry, I cannot help with that.', { searchable: '', sources: [] }, 't') === null &&
+    writer.parseFunderProfile('{"summary": "", "priorities": [], "comparable_grants": []}', { searchable: '', sources: [] }, 't') === null,
+);
+check(
+  'research sources: URLs in the text (trailing punctuation dropped) and in citations, each once, web addresses only',
+  JSON.stringify(
+    writer.researchSources('See https://example.org/a. Also (https://example.org/b), https://example.org/a and ftp://example.org/c', [
+      { type: 'text', citations: [{ url: 'https://example.org/cited' }, { url: 'javascript:alert(1)' }] },
+    ]),
+  ) === JSON.stringify(['https://example.org/cited', 'https://example.org/a', 'https://example.org/b']),
+);
+const fitted = writer.funderMaterial(
+  {
+    ...writer.emptyFunderRecord('g', 't'),
+    notes_text: 'short notes',
+    research_notes: 'r'.repeat(30_000),
+    source_files: [{ name: 'big.txt', chars: 100_000, text: 'b'.repeat(100_000), added_at: 't' }],
+  },
+  null,
+  80_000,
+);
+check(
+  'material that does not fit is shared fairly: short parts whole, the longest cut, and the cut is named',
+  fitted.chars === 80_000 && JSON.stringify(fitted.cut) === JSON.stringify(['"big.txt"']) &&
+    fitted.text.includes('=== File: big.txt (the first 49,989 of 100,000 characters) ===') && fitted.text.includes('=== Pasted notes ===\nshort notes'),
+  [fitted.chars, fitted.cut, fitted.text.split('\n').filter((line) => line.startsWith('==='))],
+);
+
+// ---------------------------------------------------------------------------
+// 4.2 Grant requirements from a guidelines file (POST .../grant-spec/upload)
+// ---------------------------------------------------------------------------
+
+const specFile = (name: string, text: string, pasted?: string) => {
+  const form = textFile(name, text);
+  if (pasted !== undefined) form.append('guidelines_text', pasted);
+  return form;
+};
+const GUIDE_FILE = 'GUIDELINES-FILE-MARKER Required sections: Organization Background (250 words); Statement of Need (300 words). Scoring: need 50, fit 50.';
+mark = await requestCount();
+const gsUnauth = await api('POST', `${blankPath}/grant-spec/upload`, { form: specFile('guidelines.txt', GUIDE_FILE) });
+const gsUnknown = await api('POST', '/api/writer/applications/app_nope/grant-spec/upload', { token: tokenD, form: specFile('guidelines.txt', GUIDE_FILE) });
+const gsNoKey = await api('POST', `/api/writer/applications/${appB.data.id}/grant-spec/upload`, { token: tokenB, form: specFile('guidelines.txt', GUIDE_FILE) });
+const gsPng = new FormData();
+gsPng.append('file', new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], 'guidelines.png', { type: 'image/png' }));
+const gsBadType = await api('POST', `${blankPath}/grant-spec/upload`, { token: tokenD, form: gsPng });
+const gsEmpty = await api('POST', `${blankPath}/grant-spec/upload`, { token: tokenD, form: specFile('guidelines.txt', '') });
+const gsNoFile = await api('POST', `${blankPath}/grant-spec/upload`, { token: tokenD, form: new FormData() });
+check(
+  'guidelines file: sign-in (401), unknown application (404), API key (400), file type (400), empty (400) and no file (422) checked before any job',
+  gsUnauth.status === 401 && gsUnknown.status === 404 && gsNoKey.status === 400 &&
+    gsNoKey.data.detail === 'Claude API key not set. Please add your API key first.' &&
+    gsBadType.status === 400 && gsBadType.data.detail === 'Invalid file type. Allowed: .pdf, .docx, .txt' &&
+    gsEmpty.status === 400 && gsNoFile.status === 422 && (await requestCount()) === mark,
+  [gsUnauth.status, gsUnknown.status, gsNoKey.data, gsBadType.data, gsEmpty.data, gsNoFile.data],
+);
+mark = await requestCount();
+const gsFromFile = await finishJob(
+  await api('POST', `${blankPath}/grant-spec/upload`, { token: tokenD, form: specFile('guidelines.txt', GUIDE_FILE, 'PASTED-FIRST-MARKER Deadline: rolling.') }),
+  tokenD,
+);
+const gsPrompt = (await callsSince('grant_spec_v1', mark))[0]?.prompt ?? '';
+check(
+  'Add the guidelines as a file: the requirements are read from it (text pasted alongside first), with no "inferred" fallback',
+  gsFromFile.status === 200 && (gsFromFile.data?.grant_spec?.required_sections?.length ?? 0) > 0 && gsFromFile.data?.note === null &&
+    gsPrompt.includes(`FULL GUIDELINES TEXT:\nPASTED-FIRST-MARKER Deadline: rolling.\n\n${GUIDE_FILE}`) &&
+    !gsPrompt.includes('No full guidelines provided') &&
+    (await writerRepo.getGrantSpec(userD, 'grant_funder_blank'))?.guidelines_text?.startsWith('PASTED-FIRST-MARKER') === true,
+  [gsFromFile.status, gsFromFile.data?.note, gsPrompt.slice(gsPrompt.indexOf('FULL GUIDELINES'), gsPrompt.indexOf('FULL GUIDELINES') + 200)],
+);
+const gsJob = (await jobsModule.listJobs(userD, 100)).find((job) => job.kind === 'writer.grant_spec' && job.application_id === blankApp.id);
+check(
+  'the step notes where the guidelines came from',
+  gsJob?.notes.some((line) => line.includes('Guidelines from the file "guidelines.txt"')) === true,
+  gsJob?.notes,
+);
+const longGuidelines = `LONG-GUIDELINES ${'Section rules and scoring details. '.repeat(2000)}`;
+const gsLong = await finishJob(await api('POST', `${blankPath}/grant-spec/upload`, { token: tokenD, form: specFile('long.txt', longGuidelines) }), tokenD);
+check(
+  'a guidelines file over 60,000 characters: the first 60,000 are read, and the result says so',
+  gsLong.status === 200 && String(gsLong.data?.note).startsWith('Only the first 60,000 characters of the guidelines were read') &&
+    (await writerRepo.getGrantSpec(userD, 'grant_funder_blank'))?.guidelines_text?.length === 60_000,
+  [gsLong.status, gsLong.data?.note],
+);
+
+// ---------------------------------------------------------------------------
 // Section 8: debug bundle, recent AI calls, no secrets
 // ---------------------------------------------------------------------------
 

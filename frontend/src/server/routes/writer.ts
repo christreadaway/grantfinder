@@ -19,13 +19,15 @@
 import crypto from 'node:crypto';
 
 import { requireApiKey } from '../auth';
+import { maxUploadBytes } from '../config';
 import { HttpError } from '../errors';
 import { fileResponse, optionalString, requireString, type RequestContext } from '../http';
 import { findActiveJob, listJobs, newCorrelationId, startJob, type Job } from '../jobs';
 import { clamp } from '../json';
 import { logger } from '../log';
 import { getApplication, getProfile, listApplications, updateProfile } from '../repo';
-import { getGrantOrFoundation } from '../services/ai';
+import { cutText, getGrantOrFoundation } from '../services/ai';
+import { documentExtension, extractDocumentText, INVALID_DOCUMENT_TYPE, isAllowedDocument } from '../services/documents';
 import type { Router } from '../router';
 import {
   applyHandEdit,
@@ -33,7 +35,15 @@ import {
   blockingGaps,
   complianceResults,
   countChars,
+  emptyFunderRecord,
   findPlaceholders,
+  FUNDER_FILE_TEXT_LIMIT,
+  FUNDER_MAX_FILES,
+  FUNDER_MESSAGES,
+  FUNDER_NOTES_LIMIT,
+  funderProfileOutdated,
+  funderRecordView,
+  hasFunderMaterial,
   limitsFor,
   liveCompliance,
   loadApplication,
@@ -54,6 +64,7 @@ import { buildExport, EXPORT_FORMATS } from '../services/writerExport';
 import {
   createApplicationIfNew,
   getFitAnalysis,
+  getFunderRecord,
   getGaps,
   getGrantSpec,
   getIntakeRequests,
@@ -61,11 +72,22 @@ import {
   getSectionDraft,
   listSectionDrafts,
   touchApplication,
+  updateFunderRecord,
   updateGaps,
   updateIntakeRequests,
   updateSectionDraft,
 } from '../services/writerRepo';
-import type { AICallLog, Application, Gap, IntakeRequest, SectionDraft, WriterExportFormat } from '../types';
+import type {
+  AICallLog,
+  Application,
+  FitAnalysis,
+  FunderRecord,
+  FunderRecordView,
+  Gap,
+  IntakeRequest,
+  SectionDraft,
+  WriterExportFormat,
+} from '../types';
 
 /** Every job for one application shares its correlation id, so the debug bundle can trace it. */
 function jobOptions(app: Application) {
@@ -162,7 +184,7 @@ async function listUserApplications(ctx: RequestContext): Promise<Application[]>
 async function getApplicationState(ctx: RequestContext): Promise<Record<string, unknown>> {
   const user = await ctx.user();
   const app = await loadApplication(user.id, ctx.params.appId);
-  const [gaps, profile, spec, analysis, intake, drafts, scorecard] = await Promise.all([
+  const [gaps, profile, spec, analysis, intake, drafts, scorecard, funder] = await Promise.all([
     getGaps(user.id, app.id),
     getProfile(user.id),
     getGrantSpec(user.id, app.grant_id),
@@ -170,6 +192,7 @@ async function getApplicationState(ctx: RequestContext): Promise<Record<string, 
     getIntakeRequests(user.id, app.id),
     listSectionDrafts(user.id, app.id),
     getScorecard(user.id, app.id),
+    getFunderRecord(user.id, app.grant_id),
   ]);
   const voice = profile?.voice_profile ?? null;
   const coverage = spec ? draftsVsSpec(drafts, spec) : null;
@@ -194,7 +217,15 @@ async function getApplicationState(ctx: RequestContext): Promise<Record<string, 
     scorecard: scorecard
       ? { ...scorecard, compliance_results: complianceResults(spec ? draftsVsSpec(sections, spec).current : sections) }
       : null,
+    // What this funder has actually funded (notes, files, web research and the profile built from them).
+    funder_profile: funderRecordView(funder),
+    // The fit analysis (and the strategy from it) came before this funder profile: re-run it to use the profile.
+    funder_profile_newer_than_fit: funderNewerThanFit(funder, analysis),
   };
+}
+
+function funderNewerThanFit(funder: FunderRecord | null, analysis: FitAnalysis | null): boolean {
+  return Boolean(analysis && funder?.profile && funder.profile.generated_at > analysis.generated_at);
 }
 
 // =============================================================================
@@ -229,6 +260,244 @@ async function enrichGrantSpecRoute(ctx: RequestContext): Promise<Response> {
   if (!grant) throw new HttpError(404, WRITER_MESSAGES.underlyingGrantMissing);
   await requireApiKey(user.id);
   return startJob(ctx, 'writer.grant_spec', { app_id: app.id, guidelines_text: guidelines }, jobOptions(app));
+}
+
+/** Guidelines text kept for one grant spec (Claude reads the first 60,000 characters). */
+const GUIDELINES_TEXT_LIMIT = 60_000;
+
+/**
+ * The guidelines as a file (PDF, Word or text; the same rules as profile
+ * documents) instead of pasted text. A form field guidelines_text, when sent,
+ * goes first and the file's text is added after it. Starts the same
+ * grant-spec step as the pasted text does.
+ */
+async function enrichGrantSpecUploadRoute(ctx: RequestContext): Promise<Response> {
+  const user = await ctx.user();
+  const app = await loadApplication(user.id, ctx.params.appId);
+  if (!(await getGrantOrFoundation(user.id, app.grant_id))) throw new HttpError(404, WRITER_MESSAGES.underlyingGrantMissing);
+  await requireApiKey(user.id);
+  const { filename, bytes, size, form } = await uploadedFile(ctx);
+  const pastedField = form.get('guidelines_text');
+  if (pastedField !== null && typeof pastedField !== 'string') throw new HttpError(422, 'Field "guidelines_text" must be text.');
+  // Text is extracted here, so an unreadable document fails now, before any job.
+  const text = await extractDocumentText(bytes, filename);
+  const pasted = normalizeLineBreaks(pastedField ?? '').trim();
+  const combined = pasted ? `${pasted}\n\n${text}` : text;
+  const kept = cutText(combined, GUIDELINES_TEXT_LIMIT);
+  logger.info('guidelines_file_uploaded', {
+    correlation_id: app.correlation_id,
+    app_id: app.id,
+    type: documentExtension(filename),
+    bytes: size,
+    chars: text.length,
+    pasted_chars: pasted.length,
+  });
+  const notice =
+    combined.length > GUIDELINES_TEXT_LIMIT
+      ? `Only the first ${GUIDELINES_TEXT_LIMIT.toLocaleString('en-US')} characters of the guidelines were read (there are ${combined.length.toLocaleString('en-US')}). ` +
+        'If a section or scoring rule is missing, paste that part and re-analyze.'
+      : null;
+  return startJob(ctx, 'writer.grant_spec', { app_id: app.id, guidelines_text: kept, source_file: filename, notice }, jobOptions(app));
+}
+
+// =============================================================================
+// 4.2b Funder history (what the grantor has actually funded)
+// =============================================================================
+
+/** Room for the multipart wrapping around an upload (the file itself is checked separately). */
+const MULTIPART_OVERHEAD_BYTES = 64 * 1024;
+
+/** Research and profile builds for one grant read and write the same funder record: one at a time. */
+function funderJobKey(grantId: string): string {
+  return `writer.funder:${grantId}`;
+}
+
+/** Pasted notes as saved: line breaks normalized, cut to the limit (with a notice when cut). */
+function funderNotes(raw: string): { text: string; notice: string | null } {
+  const text = normalizeLineBreaks(raw);
+  if (text.length <= FUNDER_NOTES_LIMIT) return { text, notice: null };
+  return { text: cutText(text, FUNDER_NOTES_LIMIT), notice: FUNDER_MESSAGES.notesCut };
+}
+
+/** Short fingerprint of the notes, so the same click twice is recognized as the same request. */
+function notesDigest(text: string): string {
+  return crypto.createHash('sha256').update(text).digest('hex').slice(0, 16);
+}
+
+function joinNotices(...notices: Array<string | null | undefined>): string | null {
+  const text = notices
+    .map((notice) => (notice ?? '').trim())
+    .filter(Boolean)
+    .join(' ');
+  return text || null;
+}
+
+/** File size for messages, rounded up, so a file just over the limit never reads "4 MB (the limit is 4 MB)". */
+function megabytes(bytes: number): string {
+  return (Math.ceil(bytes / 104857.6) / 10).toFixed(1).replace(/\.0$/, '');
+}
+
+function fileTooLarge(bytes: number, limit: number): HttpError {
+  return new HttpError(
+    413,
+    `File is too large (${megabytes(bytes)} MB). The limit is ${megabytes(limit)} MB. Upload a smaller file, or save just the pages that matter as a new PDF.`,
+  );
+}
+
+/**
+ * The uploaded file of a multipart request (field "file"), checked like
+ * profile documents: PDF, Word (.docx) or text, not empty, within the upload
+ * limit (4 MB on Netlify). The form comes back too, for its other fields.
+ */
+async function uploadedFile(ctx: RequestContext): Promise<{ filename: string; bytes: Uint8Array; size: number; form: FormData }> {
+  const limit = maxUploadBytes();
+  const declared = Number(ctx.req.headers.get('content-length') || 0);
+  if (declared > limit + MULTIPART_OVERHEAD_BYTES) throw fileTooLarge(declared, limit);
+  const form = await ctx.formData();
+  const entry = form.get('file');
+  if (!entry || typeof entry === 'string') {
+    throw new HttpError(422, 'No file was uploaded. Choose a PDF, Word (.docx), or text (.txt) file and try again.');
+  }
+  // Some browsers send a path; only the name is kept.
+  const filename = (entry.name || '').split(/[\\/]/).pop()?.trim().slice(0, 200) || '';
+  if (!isAllowedDocument(filename)) throw new HttpError(400, INVALID_DOCUMENT_TYPE);
+  if (entry.size > limit) throw fileTooLarge(entry.size, limit);
+  if (entry.size === 0) throw new HttpError(400, `"${filename}" is empty (0 bytes). Check that you picked the right file.`);
+  return { filename, bytes: new Uint8Array(await entry.arrayBuffer()), size: entry.size, form };
+}
+
+/** Check the application, its grant, the org profile and the API key; returns the application. */
+async function funderContext(ctx: RequestContext, userId: string): Promise<Application> {
+  const app = await loadApplication(userId, ctx.params.appId);
+  if (!(await getGrantOrFoundation(userId, app.grant_id))) throw new HttpError(404, WRITER_MESSAGES.underlyingGrantMissing);
+  await loadWriterProfile(userId);
+  await requireApiKey(userId);
+  return app;
+}
+
+/**
+ * Build the funder profile ({research_web: true}: research the web first,
+ * then build). notes_text, when sent, replaces the pasted notes; files and
+ * earlier research are kept. research_note is the research part's message,
+ * passed on so the website shows it when the build finishes.
+ */
+async function funderProfileRoute(ctx: RequestContext): Promise<Response> {
+  const user = await ctx.user();
+  const body = await ctx.json();
+  const rawNotes = optionalString(body, 'notes_text');
+  const researchWeb = parseBool(body.research_web, 'research_web', false);
+  const researchNote = optionalString(body, 'research_note');
+  const app = await funderContext(ctx, user.id);
+
+  const kind = researchWeb ? 'writer.funder_research' : 'writer.funder_profile';
+  const notes = rawNotes === null ? null : funderNotes(rawNotes);
+  const jobInput = {
+    app_id: app.id,
+    notes_digest: notes ? notesDigest(notes.text) : null,
+    notice: joinNotices(notes?.notice, researchNote?.slice(0, 1000)),
+  };
+  const options = { ...jobOptions(app), exclusiveKey: funderJobKey(app.grant_id) };
+  const active = await findActiveJob(user.id, funderJobKey(app.grant_id));
+  if (active) {
+    // The same click again waits for the running step (startJob answers 409 running); nothing is saved meanwhile.
+    if (active.kind !== kind) throw new HttpError(409, FUNDER_MESSAGES.busy);
+    return startJob(ctx, kind, jobInput, options);
+  }
+
+  if (notes) {
+    const now = new Date().toISOString();
+    await updateFunderRecord(user.id, app.grant_id, (current) => {
+      if (current ? current.notes_text === notes.text : !notes.text.trim()) return undefined; // nothing changed
+      return { ...(current ?? emptyFunderRecord(app.grant_id, now)), notes_text: notes.text, material_updated_at: now, updated_at: now };
+    });
+  }
+  if (!researchWeb && !hasFunderMaterial(await getFunderRecord(user.id, app.grant_id))) {
+    throw new HttpError(400, FUNDER_MESSAGES.noMaterial);
+  }
+  logger.info('funder_profile_requested', {
+    correlation_id: app.correlation_id,
+    app_id: app.id,
+    research_web: researchWeb,
+    notes_chars: notes ? notes.text.length : null,
+  });
+  return startJob(ctx, kind, jobInput, options);
+}
+
+/**
+ * Add a file to the funder history (PDF, Word or text; same rules as
+ * profile documents) and build the profile again. A form field notes_text,
+ * when sent, also replaces the pasted notes. A file with the same name
+ * replaces the earlier one.
+ */
+async function funderUploadRoute(ctx: RequestContext): Promise<Response> {
+  const user = await ctx.user();
+  const app = await funderContext(ctx, user.id);
+  const { filename, bytes, size, form } = await uploadedFile(ctx);
+  const notesField = form.get('notes_text');
+  if (notesField !== null && typeof notesField !== 'string') throw new HttpError(422, 'Field "notes_text" must be text.');
+  // A build running now would not see this file (and would save over the change it makes to the profile).
+  if (await findActiveJob(user.id, funderJobKey(app.grant_id))) throw new HttpError(409, FUNDER_MESSAGES.busy);
+  const existing = await getFunderRecord(user.id, app.grant_id);
+  const isFull = (record: FunderRecord | null) =>
+    Boolean(record && record.source_files.filter((file) => file.name !== filename).length >= FUNDER_MAX_FILES);
+  if (isFull(existing)) throw new HttpError(400, FUNDER_MESSAGES.tooManyFiles);
+
+  // Text is extracted here, so an unreadable document fails now, before any job.
+  const text = await extractDocumentText(bytes, filename);
+  const notes = notesField === null ? null : funderNotes(notesField);
+  const now = new Date().toISOString();
+  let full = false as boolean;
+  await updateFunderRecord(user.id, app.grant_id, (current) => {
+    full = isFull(current);
+    if (full) return undefined;
+    const base = current ?? emptyFunderRecord(app.grant_id, now);
+    return {
+      ...base,
+      ...(notes ? { notes_text: notes.text } : {}),
+      source_files: [
+        ...base.source_files.filter((file) => file.name !== filename),
+        { name: filename, chars: text.length, text: cutText(text, FUNDER_FILE_TEXT_LIMIT), added_at: now },
+      ],
+      material_updated_at: now,
+      updated_at: now,
+    };
+  });
+  if (full) throw new HttpError(400, FUNDER_MESSAGES.tooManyFiles);
+  logger.info('funder_file_added', {
+    correlation_id: app.correlation_id,
+    app_id: app.id,
+    type: documentExtension(filename),
+    bytes: size,
+    chars: text.length,
+  });
+  const cutNotice =
+    text.length > FUNDER_FILE_TEXT_LIMIT
+      ? `Only the first ${FUNDER_FILE_TEXT_LIMIT.toLocaleString('en-US')} characters of "${filename}" are kept (it has ${text.length.toLocaleString('en-US')}).`
+      : null;
+  const jobInput = {
+    app_id: app.id,
+    notes_digest: notes ? notesDigest(notes.text) : null,
+    file: filename,
+    notice: joinNotices(notes?.notice, cutNotice),
+  };
+  return startJob(ctx, 'writer.funder_profile', jobInput, { ...jobOptions(app), exclusiveKey: funderJobKey(app.grant_id) });
+}
+
+/** Remove one file from the funder history (the profile is then out of date until it is built again). */
+async function removeFunderFileRoute(ctx: RequestContext): Promise<FunderRecordView | null> {
+  const user = await ctx.user();
+  const app = await loadApplication(user.id, ctx.params.appId);
+  const name = ctx.params.name;
+  let found = false as boolean;
+  const saved = await updateFunderRecord(user.id, app.grant_id, (current) => {
+    found = Boolean(current?.source_files.some((file) => file.name === name));
+    if (!current || !found) return undefined;
+    const now = new Date().toISOString();
+    return { ...current, source_files: current.source_files.filter((file) => file.name !== name), material_updated_at: now, updated_at: now };
+  });
+  if (!found) throw new HttpError(404, FUNDER_MESSAGES.fileNotFound);
+  logger.info('funder_file_removed', { correlation_id: app.correlation_id, app_id: app.id, files_left: saved?.source_files.length ?? 0 });
+  return funderRecordView(saved);
 }
 
 // =============================================================================
@@ -640,11 +909,26 @@ function describeJob(job: Job): string[] {
   return lines;
 }
 
+/** The funder record in one line: sizes and counts only (never the notes themselves). */
+function describeFunder(funder: FunderRecord | null): string {
+  if (!funder) return 'none';
+  const profile = funder.profile;
+  const comparables = profile?.comparable_grants ?? [];
+  return (
+    `notes ${funder.notes_text.length} chars, ${funder.source_files.length} file(s), ` +
+    `web research ${funder.research_notes.length} chars (${funder.research_sources.length} source URLs), ` +
+    (profile
+      ? `profile yes (${comparables.length} comparable grant(s), ${comparables.filter((grantMade) => grantMade.verified).length} found in the material, ` +
+        `ask ${profile.ask_recommendation ? 'suggested' : 'none'})${funderProfileOutdated(funder) ? ' OUT OF DATE' : ''}`
+      : 'profile not built')
+  );
+}
+
 /** One paste-ready markdown bundle: correlation id, state, AI call timeline with costs, steps, errors. */
 async function debugBundle(ctx: RequestContext): Promise<{ bundle_markdown: string }> {
   const user = await ctx.user();
   const app = await loadApplication(user.id, ctx.params.appId);
-  const [jobs, spec, analysis, gaps, intake, stored, scorecard, profile] = await Promise.all([
+  const [jobs, spec, analysis, gaps, intake, stored, scorecard, profile, funder] = await Promise.all([
     listJobs(user.id, 200),
     getGrantSpec(user.id, app.grant_id),
     getFitAnalysis(user.id, app.id),
@@ -653,6 +937,7 @@ async function debugBundle(ctx: RequestContext): Promise<{ bundle_markdown: stri
     listSectionDrafts(user.id, app.id),
     getScorecard(user.id, app.id),
     getProfile(user.id),
+    getFunderRecord(user.id, app.grant_id),
   ]);
   const appJobs = jobs.filter((job) => job.application_id === app.id).reverse(); // oldest first
   const calls: AICallLog[] = appJobs.flatMap((job) => job.ai_calls).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
@@ -679,6 +964,7 @@ async function debugBundle(ctx: RequestContext): Promise<{ bundle_markdown: stri
           `guidelines ${spec.guidelines_text ? `${spec.guidelines_text.length} chars` : 'none'})`
         : 'MISSING'
     }`,
+    `- Funder history: ${describeFunder(funder)}${funderNewerThanFit(funder, analysis) ? ' | profile is newer than the fit analysis' : ''}`,
     `- Fit analysis: ${analysis ? 'yes' : 'MISSING'}`,
     `- Gaps: ${gaps.length} (${gaps.filter((gap) => gap.severity === 'high').length} high)${statusCounts ? ` [${statusCounts}]` : ''}`,
     `- Intake requests: ${intake.length}`,
@@ -748,6 +1034,10 @@ export function registerWriterRoutes(router: Router): void {
   router.get('/api/writer/applications/:appId', getApplicationState);
   router.post('/api/writer/voice/analyze', analyzeVoiceRoute);
   router.post('/api/writer/applications/:appId/grant-spec', enrichGrantSpecRoute);
+  router.post('/api/writer/applications/:appId/grant-spec/upload', enrichGrantSpecUploadRoute);
+  router.post('/api/writer/applications/:appId/funder-profile', funderProfileRoute);
+  router.post('/api/writer/applications/:appId/funder-profile/upload', funderUploadRoute);
+  router.delete('/api/writer/applications/:appId/funder-profile/files/:name', removeFunderFileRoute);
   router.post('/api/writer/applications/:appId/analyze', analyzeFitRoute);
   router.post('/api/writer/applications/:appId/confirm-strategy', confirmStrategy);
   router.post('/api/writer/applications/:appId/intake/generate', generateIntakeRoute);

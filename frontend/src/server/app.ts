@@ -9,6 +9,7 @@ import { clientIp, errorResponse, jsonResponse, newRequestId, publicOrigin, type
 import { logger } from './log';
 import { Router } from './router';
 import { registerAuthRoutes } from './routes/auth';
+import { registerChecklistRoutes } from './routes/checklist';
 import { registerDiscoveryRoutes } from './routes/discovery';
 import { registerExportRoutes } from './routes/export';
 import { registerGrantRoutes } from './routes/grants';
@@ -31,6 +32,7 @@ export function getRouter(): Router {
   registerProfileRoutes(r);
   registerExportRoutes(r);
   registerWriterRoutes(r);
+  registerChecklistRoutes(r);
   router = r;
   return r;
 }

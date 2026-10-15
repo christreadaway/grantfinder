@@ -439,6 +439,101 @@ export interface Scorecard {
 
 export type WriterExportFormat = 'docx' | 'md' | 'txt' | 'form_map';
 
+// =============================================================================
+// Funder history (what a grantor has actually funded; one record per grant)
+// =============================================================================
+
+export interface FunderPriority {
+  priority: string;
+  /** Where the material shows it. */
+  evidence: string;
+}
+
+export interface FunderGivingPatterns {
+  typical_range: string;
+  median_award: string | null;
+  grants_per_year: string | null;
+  geography: string;
+  recipient_types: string[];
+}
+
+/** A grant the material says this funder made. Never invented: entries without a recipient are dropped. */
+export interface ComparableGrant {
+  /** As written in the source material. */
+  recipient: string;
+  year: string | null;
+  amount: string | null;
+  purpose: string;
+  why_comparable: string;
+  /** The recipient appears word for word in the material (otherwise shown flagged and left out of drafting). */
+  verified: boolean;
+}
+
+export interface AskRecommendation {
+  range: string;
+  /** Cites the comparable grants. */
+  rationale: string;
+}
+
+/** Built by funder_profile_v1 from pasted notes, uploaded files, web research and the grant record. */
+export interface FunderProfile {
+  summary: string;
+  priorities: FunderPriority[];
+  giving_patterns: FunderGivingPatterns;
+  comparable_grants: ComparableGrant[];
+  exclusions: string[];
+  process_requirements: string[];
+  ask_recommendation: AskRecommendation | null;
+  language_cues: string[];
+  /** Concrete recommendations for framing this application to match the funder's history. */
+  positioning: string[];
+  /** What the material doesn't show. */
+  unknowns: string[];
+  /** "pasted notes", file names, URLs. */
+  sources: string[];
+  generated_at: string;
+}
+
+export interface FunderSourceFile {
+  name: string;
+  chars: number;
+  /** The file's text (kept for rebuilding; never sent back to the website). */
+  text: string;
+  added_at: string;
+}
+
+/** Stored per user per grant at writer/{user}/funder/{grant_id}, reused by any application to that grant. */
+export interface FunderRecord {
+  grant_id: string;
+  /** What the person pasted (capped). */
+  notes_text: string;
+  source_files: FunderSourceFile[];
+  /** Web research findings with source URLs (funder_research_v1). */
+  research_notes: string;
+  research_sources: string[];
+  researched_at: string | null;
+  profile: FunderProfile | null;
+  /** When the notes, files or research last changed (a profile built before this is out of date). */
+  material_updated_at: string | null;
+  updated_at: string;
+}
+
+/** What the website gets (GET application state `funder_profile`): the record without the big texts. */
+export interface FunderRecordView {
+  grant_id: string;
+  notes_text: string;
+  source_files: Array<{ name: string; chars: number; added_at: string }>;
+  /** Length of the saved web research findings. */
+  research_chars: number;
+  research_sources: string[];
+  researched_at: string | null;
+  profile: FunderProfile | null;
+  /** The notes, files or research changed after the profile was built. */
+  profile_outdated: boolean;
+  material_updated_at: string | null;
+  updated_at: string;
+}
+
 /** One logged Claude call (PRD Section 8). */
 export interface AICallLog {
   correlation_id: string;

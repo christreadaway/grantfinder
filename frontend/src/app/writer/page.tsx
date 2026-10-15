@@ -12,13 +12,14 @@
 import { Suspense, useCallback, useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
-  AlertCircle, Bug, CheckCircle, ChevronLeft, Copy, Download, FileText,
-  Loader2, Pencil, RotateCcw, Save, Send, Target, Wand2,
+  AlertCircle, Bug, CheckCircle, ChevronLeft, Copy, Download, FileText, Globe, History,
+  Loader2, Paperclip, Pencil, RotateCcw, Save, Send, Target, Wand2,
 } from 'lucide-react';
 import api, { blobErrorDetail, errorDetail, isSessionEnded, onJobProgress } from '@/lib/api';
 import { copyText, saveFile } from '@/lib/download';
+import ApplicationChecklist, { type ChecklistAction } from './ApplicationChecklist';
 import type {
-  Application, FitAnalysis, Gap, GrantSpec, IntakeRequest, RequiredSection, Scorecard, SectionDraft,
+  Application, FitAnalysis, FunderProfile, FunderRecordView, Gap, GrantSpec, IntakeRequest, RequiredSection, Scorecard, SectionDraft,
 } from '@/server/types';
 
 /** What GET /api/writer/applications/:id returns (routes/writer.ts getApplicationState). */
@@ -35,6 +36,10 @@ interface WriterState {
   missing_sections: Array<{ id: string; title: string }>;
   stale_section_ids: string[];
   scorecard: Scorecard | null;
+  /** What this funder has actually funded: notes, files, web research and the profile built from them. */
+  funder_profile?: FunderRecordView | null;
+  /** The fit analysis came before the funder profile (re-run it to use the profile). */
+  funder_profile_newer_than_fit?: boolean;
 }
 
 type ExportFormat = 'docx' | 'md' | 'txt' | 'form_map';
@@ -75,6 +80,8 @@ const REQUEST_STATUS_LABELS: Record<string, string> = {
 /** Background job kind -> busy label, to pick a running step back up after a reload. */
 const JOB_BUSY: Record<string, string> = {
   'writer.grant_spec': 'spec',
+  'writer.funder_research': 'funder-research',
+  'writer.funder_profile': 'funder',
   'writer.analyze': 'analyze',
   'writer.intake_generate': 'intake',
   'writer.voice_analyze': 'voice',
@@ -86,6 +93,11 @@ const JOB_BUSY: Record<string, string> = {
 /** What each busy label means to a person watching the screen. */
 const BUSY_LABELS: Record<string, string> = {
   spec: 'Reading the grant requirements',
+  funder: 'Building the funder profile',
+  'funder-research': 'Researching the funder on the web, then building its profile',
+  'funder-file': 'Reading the file, then building the funder profile',
+  'funder-remove': 'Removing the file',
+  material: 'Reading the document and adding its facts to your profile',
   analyze: 'Comparing your profile to what the funder scores',
   strategy: 'Saving your strategy',
   waive: 'Updating the gap',
@@ -110,7 +122,57 @@ const RATING_COLORS: Record<string, string> = {
 const OFF = 'disabled:opacity-50 disabled:cursor-not-allowed';
 
 /** Notices that report a problem (e.g. "Could not read <url> (HTTP 403)...") show amber, not green. */
-const WARNING_NOTICE = /^(Could not|Couldn't|No guidelines|Not drafted|Left out|Still in)/;
+const WARNING_NOTICE = /^(Could not|Couldn't|No guidelines|No facts|Not drafted|Left out|Still in|Web research|Your pasted notes|Only part|Only the first)/;
+
+/** Files added on this page: the same limits as profile documents (Netlify accepts uploads up to about 4 MB). */
+const MAX_FILE_BYTES = 4 * 1024 * 1024;
+/** Cards the Application Checklist can bring into view: below a sticky banner, and focusable for keyboard users. */
+const TARGET = 'scroll-mt-24 focus:outline-none';
+/** Pasted funder notes kept (FUNDER_NOTES_LIMIT in services/writer.ts). */
+const FUNDER_NOTES_LIMIT = 60_000;
+/** The file input's label shows the keyboard focus ring (the input itself is visually hidden). */
+const FILE_LABEL_FOCUS =
+  'peer-focus-visible:outline-2 peer-focus-visible:outline-solid peer-focus-visible:outline-offset-2 peer-focus-visible:outline-[var(--primary)]';
+
+/** File size for messages, rounded up so a file just over the limit never reads "4.0 MB (limit 4 MB)". */
+const megabytes = (bytes: number): string => (Math.ceil(bytes / 104857.6) / 10).toFixed(1);
+
+/** Why a chosen file can't be added (PDF, Word or text up to 4 MB), or null when it can. */
+function fileProblem(file: File): string | null {
+  if (file.size > MAX_FILE_BYTES) {
+    return `${file.name} is ${megabytes(file.size)} MB (limit 4 MB). Save just the pages that matter as a new PDF, or paste the text instead.`;
+  }
+  if (!/\.(pdf|docx|txt)$/i.test(file.name)) return `${file.name} is not a PDF, Word (.docx), or text (.txt) file.`;
+  if (file.size === 0) return `${file.name} is empty (0 bytes). Check that you picked the right file.`;
+  return null;
+}
+
+/** Facts a document upload found for the writer (processing.upload_document's key_facts). */
+function keyFactsOf(result: unknown): number {
+  const facts = result && typeof result === 'object' ? (result as { key_facts?: unknown }).key_facts : null;
+  return Array.isArray(facts) ? facts.length : 0;
+}
+
+/** Bring a part of the page into view and move the keyboard focus there (the checklist's buttons). False when it isn't on the page. */
+function reveal(target: Element | null, focusTarget?: Element | null, block: ScrollLogicalPosition = 'start'): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  target.scrollIntoView({ behavior: 'smooth', block });
+  const focusable = focusTarget instanceof HTMLElement ? focusTarget : target;
+  focusable.focus({ preventScroll: true });
+  return true;
+}
+
+const GUIDELINES_FILE_HELP = 'Guidelines file: PDF, Word (.docx) or text, up to 4 MB. Text in the box above is read first.';
+
+/** Only real web addresses become links. */
+function webUrl(text: string): string | null {
+  try {
+    const url = new URL(text.trim());
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null;
+  } catch {
+    return null;
+  }
+}
 
 /** "[NEEDS INPUT: ...]" markers drafting leaves where a fact was missing (same pattern as services/writer.ts). */
 const NEEDS_INPUT = /\[NEEDS INPUT[^\]]*\]/gi;
@@ -191,10 +253,12 @@ interface Unsaved {
   edits: Record<string, string>;
   /** section id -> the saved text when Edit was clicked (shows when a redraft or another tab changed it since) */
   editBases: Record<string, string>;
+  /** Funder history notes typed but not saved yet. */
+  funderNotes: string;
 }
 
 const NOTHING_UNSAVED: Unsaved = {
-  guidelines: '', strategy: '', intakeAnswers: {}, refineInputs: {}, voiceSample: '', edits: {}, editBases: {},
+  guidelines: '', strategy: '', intakeAnswers: {}, refineInputs: {}, voiceSample: '', edits: {}, editBases: {}, funderNotes: '',
 };
 const unsavedKey = (appId: string) => `grantfinder.writer.unsaved.${appId}`;
 let storageWarned = false;
@@ -220,6 +284,7 @@ function readUnsaved(appId: string | null): Unsaved {
       voiceSample: typeof data?.voiceSample === 'string' ? data.voiceSample : '',
       edits: textMap(data?.edits, true),
       editBases: textMap(data?.editBases, true),
+      funderNotes: typeof data?.funderNotes === 'string' ? data.funderNotes : '',
     };
   } catch (error) {
     console.warn('[GrantFinder] Could not read the text kept from before the reload:', error);
@@ -237,9 +302,10 @@ function writeUnsaved(appId: string, unsaved: Unsaved): void {
     edits: unsaved.edits,
     // A base only matters while its edit box is open.
     editBases: Object.fromEntries(Object.entries(unsaved.editBases).filter(([id]) => own(unsaved.edits, id) !== undefined)),
+    funderNotes: unsaved.funderNotes,
   };
   const empty = !kept.guidelines.trim() && !kept.strategy.trim() && !kept.voiceSample.trim() && !Object.keys(kept.intakeAnswers).length &&
-    !Object.keys(kept.refineInputs).length && !Object.keys(kept.edits).length;
+    !Object.keys(kept.refineInputs).length && !Object.keys(kept.edits).length && !kept.funderNotes.trim();
   try {
     if (empty) window.sessionStorage.removeItem(unsavedKey(appId));
     else window.sessionStorage.setItem(unsavedKey(appId), JSON.stringify(kept));
@@ -283,6 +349,121 @@ function EditCounts({ text, limits }: { text: string; limits?: RequiredSection }
   );
 }
 
+/** A short titled list (nothing when empty). */
+function ProfileList({ title, items, className = '' }: { title: string; items: string[]; className?: string }) {
+  if (!items.length) return null;
+  return (
+    <div className={className}>
+      <h3 className="font-semibold mb-1">{title}</h3>
+      <ul className="list-disc ml-5 space-y-0.5">
+        {items.map((item, i) => <li key={i} className="break-words">{item}</li>)}
+      </ul>
+    </div>
+  );
+}
+
+/** The funder profile: what this funder has actually funded, and how to position the application. */
+function FunderProfileView({ profile, outdated }: { profile: FunderProfile; outdated: boolean }) {
+  const patterns = profile.giving_patterns;
+  const ask = profile.ask_recommendation;
+  const comparables = profile.comparable_grants || [];
+  const facts: Array<[string, string]> = [
+    ['Typical award', `${patterns.typical_range || 'Not shown in the material'}${patterns.median_award ? ` (median ${patterns.median_award})` : ''}`],
+    ...(patterns.grants_per_year ? [['Grants a year', patterns.grants_per_year] as [string, string]] : []),
+    ...(patterns.geography ? [['Where they give', patterns.geography] as [string, string]] : []),
+    ...((patterns.recipient_types || []).length ? [['Who they fund', patterns.recipient_types.join(', ')] as [string, string]] : []),
+  ];
+  return (
+    <div className="mt-4 pt-3 border-t border-gray-800 space-y-4 text-sm" data-funder-profile="">
+      {outdated && (
+        <p className="text-amber-300">
+          Your notes, files or research changed after this profile was built. Click &quot;Build Funder Profile&quot; to update it.
+        </p>
+      )}
+      {profile.summary && <p className="text-gray-200 break-words">{profile.summary}</p>}
+      <dl className="grid grid-cols-1 sm:grid-cols-[max-content_1fr] gap-x-4 gap-y-1">
+        {facts.map(([label, value]) => (
+          <div key={label} className="contents">
+            <dt className="text-gray-400">{label}</dt>
+            <dd className="break-words">{value}</dd>
+          </div>
+        ))}
+      </dl>
+      {ask ? (
+        <div className="rounded border border-[var(--primary)] bg-black/30 p-3">
+          <div className="font-semibold">Suggested ask: {ask.range}</div>
+          <p className="text-gray-300 mt-1 break-words">{ask.rationale}</p>
+        </div>
+      ) : (
+        <p className="text-gray-400">No ask amount suggested: the material does not show enough award sizes.</p>
+      )}
+      {comparables.length > 0 && (
+        <div>
+          <h3 className="font-semibold mb-1">Comparable grants they made</h3>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[32rem] text-xs border-collapse">
+              <thead>
+                <tr className="text-left text-gray-400">
+                  <th scope="col" className="py-1 pr-2 font-normal">Recipient</th>
+                  <th scope="col" className="py-1 pr-2 font-normal">Year</th>
+                  <th scope="col" className="py-1 pr-2 font-normal">Amount</th>
+                  <th scope="col" className="py-1 pr-2 font-normal">Purpose</th>
+                  <th scope="col" className="py-1 font-normal">Why comparable</th>
+                </tr>
+              </thead>
+              <tbody>
+                {comparables.map((grantMade, i) => (
+                  <tr key={i} className="border-t border-gray-800 align-top">
+                    <td className="py-1 pr-2">
+                      {grantMade.recipient}
+                      {!grantMade.verified && (
+                        <span className="block text-amber-300">Not found in your material. Check it before you rely on it.</span>
+                      )}
+                    </td>
+                    <td className="py-1 pr-2">{grantMade.year || '-'}</td>
+                    <td className="py-1 pr-2">{grantMade.amount || '-'}</td>
+                    <td className="py-1 pr-2">{grantMade.purpose}</td>
+                    <td className="py-1">{grantMade.why_comparable}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+      <ProfileList title="What they fund" items={(profile.priorities || []).map((p) => (p.evidence ? `${p.priority} (${p.evidence})` : p.priority))} />
+      {(profile.exclusions || []).length > 0 && (
+        <ProfileList title="What they don't fund" items={profile.exclusions}
+          className="rounded border border-red-800 bg-red-950/40 text-red-200 p-2" />
+      )}
+      <ProfileList title="How they decide" items={profile.process_requirements || []} />
+      <ProfileList title="How to position this application" items={profile.positioning || []} />
+      {(profile.language_cues || []).length > 0 && (
+        <p><span className="font-semibold">Words they use:</span> {profile.language_cues.join(' · ')}</p>
+      )}
+      <ProfileList title="Not shown in the material" items={profile.unknowns || []} className="text-gray-400" />
+      {(profile.sources || []).length > 0 && (
+        <div>
+          <h3 className="font-semibold mb-1">Sources</h3>
+          <ul className="space-y-0.5">
+            {profile.sources.map((source, i) => {
+              const href = webUrl(source);
+              return (
+                <li key={i} className="break-all">
+                  {href ? (
+                    <a href={href} target="_blank" rel="noopener noreferrer" className="text-[var(--primary)] hover:underline">{source}</a>
+                  ) : source}
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+      <p className="text-xs text-gray-500">Built {new Date(profile.generated_at).toLocaleString()}</p>
+    </div>
+  );
+}
+
 // =============================================================================
 // The page
 // =============================================================================
@@ -308,6 +489,9 @@ function WriterInner({ appId }: { appId: string | null }) {
   const [voiceSample, setVoiceSample] = useState(restored.voiceSample);
   const [edits, setEdits] = useState(restored.edits);
   const [editBases, setEditBases] = useState(restored.editBases);
+  const [funderNotes, setFunderNotes] = useState(restored.funderNotes);
+  /** A document was added here after the fit analysis: offer to re-run it. */
+  const [materialAdded, setMaterialAdded] = useState(false);
   const [emailCopy, setEmailCopy] = useState<Record<string, 'copied' | 'failed'>>({});
 
   // Live status lines from background jobs ("Drafting section 2 of 6: Need")
@@ -317,11 +501,18 @@ function WriterInner({ appId }: { appId: string | null }) {
   // recommended one before confirming). While loading, keep whatever was restored.
   const savedStrategy = state ? state.application.strategy || state.fit_analysis?.recommended_strategy || '' : null;
   const unsavedStrategy = savedStrategy === null || (strategyText.trim() && strategyText.trim() !== savedStrategy.trim()) ? strategyText : '';
+  // Funder notes count as unsaved only when they differ from the saved notes.
+  const savedFunderNotes = state ? state.funder_profile?.notes_text ?? '' : null;
+  const unsavedFunderNotes = savedFunderNotes === null || plainBreaks(funderNotes) !== plainBreaks(savedFunderNotes) ? funderNotes : '';
 
   // Typed text survives a reload of this tab.
   useEffect(() => {
-    if (appId) writeUnsaved(appId, { guidelines, strategy: unsavedStrategy, intakeAnswers, refineInputs, voiceSample, edits, editBases });
-  }, [appId, guidelines, unsavedStrategy, intakeAnswers, refineInputs, voiceSample, edits, editBases]);
+    if (appId) {
+      writeUnsaved(appId, {
+        guidelines, strategy: unsavedStrategy, intakeAnswers, refineInputs, voiceSample, edits, editBases, funderNotes: unsavedFunderNotes,
+      });
+    }
+  }, [appId, guidelines, unsavedStrategy, intakeAnswers, refineInputs, voiceSample, edits, editBases, unsavedFunderNotes]);
 
   // Sections whose edit box is open with text that differs from the saved text:
   // drafting, scoring and export would ignore that text, so they wait for Save or Cancel.
@@ -346,6 +537,9 @@ function WriterInner({ appId }: { appId: string | null }) {
     setState(data);
     const analysis = data.fit_analysis;
     if (analysis) setStrategyText((current) => current || data.application.strategy || analysis.recommended_strategy || '');
+    // The saved funder notes fill an empty box (text typed before a reload wins).
+    const savedNotes = data.funder_profile?.notes_text ?? '';
+    if (savedNotes) setFunderNotes((current) => current || savedNotes);
   }, []);
 
   /**
@@ -492,6 +686,14 @@ function WriterInner({ appId }: { appId: string | null }) {
   const unsavedExportMessage = hasUnsavedEdits
     ? `Unsaved changes in ${unsavedTitles}: click Save on ${unsavedWhere} (or Cancel) before you export.`
     : '';
+  const funderRecord = state.funder_profile ?? null;
+  const funderFiles = funderRecord?.source_files ?? [];
+  const canBuildFunder = Boolean(funderNotes.trim() || funderFiles.length || (funderRecord?.research_chars ?? 0) > 0);
+  // The fit analysis recommends a strategy that differs from the one in use (e.g. after a re-run with the funder history).
+  const recommended = analysis?.recommended_strategy?.trim() ?? '';
+  const otherRecommendation = Boolean(
+    app.strategy_confirmed && recommended && recommended !== (app.strategy || '').trim() && recommended !== strategyText.trim(),
+  );
 
   /**
    * Run one step: busy banner, errors shown, and the page reloaded either way
@@ -532,6 +734,137 @@ function WriterInner({ appId }: { appId: string | null }) {
 
   const analyzeRequirements = async (text: string | undefined) => {
     if (await run('spec', () => api.enrichGrantSpec(appId, text))) setGuidelines('');
+  };
+
+  /** Re-running replaces the gap list, so it asks first (every "Re-run fit analysis" button). */
+  const rerunFit = () => {
+    if (!window.confirm('Re-running the fit analysis replaces the current gap list. Answers you recorded stay in your profile and are used in the new analysis. Continue?')) return;
+    void (async () => {
+      if (await run('analyze', () => api.analyzeFit(appId))) setMaterialAdded(false);
+    })();
+  };
+
+  /** Analyze the requirements from a guidelines file; text in the paste box is read first. */
+  const addGuidelinesFile = (files: FileList | null) => {
+    const file = files?.[0];
+    if (!file || busy !== null) return;
+    const problem = fileProblem(file);
+    if (problem) {
+      setNotice(null);
+      setError(problem);
+      return;
+    }
+    void (async () => {
+      if (await run('spec', () => api.enrichGrantSpecFromFile(appId, file, guidelines), () => `Read the requirements from "${file.name}".`)) {
+        setGuidelines('');
+      }
+    })();
+  };
+
+  /** Add a document's facts to the profile as evidence, so drafts can cite them (the same reading as the dashboard's documents). */
+  const addMaterial = (files: FileList | null) => {
+    const file = files?.[0];
+    if (!file || busy !== null) return;
+    const problem = fileProblem(file);
+    if (problem) {
+      setNotice(null);
+      setError(problem);
+      return;
+    }
+    let facts = 0;
+    void (async () => {
+      const ok = await run('material', () => api.uploadDocument(file), (result) => {
+        facts = keyFactsOf(result);
+        return facts > 0
+          ? `"${file.name}": ${facts} fact${facts === 1 ? '' : 's'} added for the writer.`
+          : `No facts the writer can cite were found in "${file.name}".`;
+      });
+      if (ok && facts > 0) setMaterialAdded(true);
+    })();
+  };
+
+  /** What the Application Checklist's buttons do. Steps run only as their own buttons would; approvals stay with the person. */
+  const checklistAction = (action: ChecklistAction) => {
+    if (busy !== null) return;
+    const byId = (id: string) => document.getElementById(id);
+    switch (action) {
+      case 'analyze-requirements': {
+        // Never runs by itself: the person may want to paste or add the guidelines first.
+        const card = byId('writer-requirements');
+        const details = card?.querySelector('details');
+        if (details) details.open = true;
+        reveal(card, card?.querySelector('textarea'));
+        return;
+      }
+      case 'run-fit':
+        if (!spec) {
+          reveal(byId('writer-requirements'));
+          return;
+        }
+        reveal(byId('writer-fit'));
+        if (analysis) rerunFit(); // replaces the gap list, so it asks first
+        else void run('analyze', () => api.analyzeFit(appId));
+        return;
+      case 'confirm-strategy': {
+        // A human approval gate: bring the strategy up to read and confirm; the page never confirms it.
+        const box = byId('writer-strategy');
+        if (!reveal(box, box, 'center')) reveal(byId(spec ? 'writer-fit' : 'writer-requirements'));
+        return;
+      }
+      case 'draft-missing':
+        if (!app.strategy_confirmed) {
+          const box = byId('writer-strategy');
+          if (!reveal(box, box, 'center')) reveal(byId(spec ? 'writer-fit' : 'writer-requirements'));
+          return;
+        }
+        reveal(byId('writer-draft'));
+        // The Draft card says why when drafting has to wait (open high gaps, unsaved edits).
+        if (blocking.length > 0 || hasUnsavedEdits) return;
+        if (sections.length === 0) void draftSections();
+        else if (missingSections.length > 0) void draftSections(undefined, true);
+        return;
+      case 'score':
+        if (sections.length === 0 || hasUnsavedEdits) {
+          reveal(byId(sections.length ? 'writer-draft' : 'writer-requirements'));
+          return;
+        }
+        reveal(byId('writer-score'));
+        void run('score', () => api.scoreApplication(appId));
+        return;
+      case 'export':
+        reveal(byId('writer-export'));
+        return;
+      default: {
+        const anchor = action.slice('scroll:'.length);
+        const target = anchor.startsWith('section-')
+          ? document.querySelector(`[data-section-id="${CSS.escape(anchor.slice('section-'.length))}"]`)
+          : byId(anchor);
+        if (!reveal(target)) console.warn(`[GrantFinder] The checklist pointed at something not on this page: ${anchor}`);
+      }
+    }
+  };
+
+  /** Build the funder profile from the notes in the box (saved with it), the files and earlier research; or research the web first. */
+  const buildFunder = (researchWeb: boolean) =>
+    run(researchWeb ? 'funder-research' : 'funder', () => api.buildFunderProfile(appId, funderNotes, researchWeb),
+      () => 'Funder profile built. The fit analysis, drafting and scoring use it from now on.');
+
+  /** Add a file to the funder history (the notes in the box are saved with it), then build the profile again. */
+  const addFunderFile = (files: FileList | null) => {
+    const file = files?.[0];
+    if (!file || busy !== null) return;
+    const problem = fileProblem(file);
+    if (problem) {
+      setNotice(null);
+      setError(problem);
+      return;
+    }
+    void run('funder-file', () => api.uploadFunderFile(appId, file, funderNotes), () => `Added "${file.name}" and built the funder profile again.`);
+  };
+
+  const removeFunderFile = (name: string) => {
+    if (!window.confirm(`Remove "${name}" from the funder history? Click "Build Funder Profile" afterwards to update the profile.`)) return;
+    void run('funder-remove', () => api.removeFunderFile(appId, name), () => `Removed "${name}". Click "Build Funder Profile" to update the profile.`);
   };
 
   /** Every drafting button: saves an edited strategy first, then drafts. */
@@ -676,6 +1009,21 @@ function WriterInner({ appId }: { appId: string | null }) {
     }
   };
 
+  /** "Add the guidelines as a file" (card 1, before and after the first analysis). */
+  const guidelinesFileInput = (
+    <>
+      <input id="writer-guidelines-file" type="file" accept=".pdf,.docx,.txt" className="sr-only peer" disabled={busy !== null}
+        onChange={(e) => {
+          addGuidelinesFile(e.target.files);
+          e.target.value = ''; // the same file can be chosen again
+        }} />
+      <label htmlFor="writer-guidelines-file" aria-disabled={busy !== null ? true : undefined}
+        className={`btn btn-secondary cursor-pointer ${FILE_LABEL_FOCUS}`}>
+        <Paperclip className="w-4 h-4" /> Add the guidelines as a file
+      </label>
+    </>
+  );
+
   const renderSection = (s: SectionDraft) => {
     const stale = staleIds.includes(s.section_id);
     // Limits belong to the question this draft answers; a stale draft has none.
@@ -688,7 +1036,7 @@ function WriterInner({ appId }: { appId: string | null }) {
     const versions = s.versions || [];
     const mine = activeSection === s.section_id;
     return (
-      <div key={s.section_id} data-section-id={s.section_id} className="border border-gray-800 rounded p-3">
+      <div key={s.section_id} data-section-id={s.section_id} tabIndex={-1} className={`border border-gray-800 rounded p-3 ${TARGET}`}>
         <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-1 mb-1">
           <h3 className="font-semibold">
             {s.title}
@@ -866,8 +1214,11 @@ function WriterInner({ appId }: { appId: string | null }) {
         </div>
       )}
 
+      {/* What is done, what is left, where the gaps are, and the next step */}
+      <ApplicationChecklist appId={appId} state={state} busy={busy !== null} onAction={checklistAction} />
+
       {/* Stage 1: Grant Spec */}
-      <div className="card">
+      <div id="writer-requirements" tabIndex={-1} className={`card ${TARGET}`}>
         <h2 className="text-xl font-bold mb-2 flex items-center gap-2"><FileText className="w-5 h-5" /> 1 · Grant Requirements</h2>
         {!spec ? (
           <>
@@ -881,10 +1232,14 @@ function WriterInner({ appId }: { appId: string | null }) {
               placeholder="Paste guidelines / RFP text here (optional)..."
               className="w-full h-32 bg-black/30 border border-gray-700 rounded p-3 text-sm mb-3"
             />
-            <button className={`btn btn-primary ${OFF}`} disabled={busy !== null}
-              onClick={() => void analyzeRequirements(guidelines || undefined)}>
-              {busy === 'spec' ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Analyze Requirements'}
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button className={`btn btn-primary ${OFF}`} disabled={busy !== null}
+                onClick={() => void analyzeRequirements(guidelines || undefined)}>
+                {busy === 'spec' ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Analyze Requirements'}
+              </button>
+              {guidelinesFileInput}
+            </div>
+            <p className="text-xs text-gray-500 mt-2">{GUIDELINES_FILE_HELP}</p>
           </>
         ) : (
           <div className="space-y-3 text-sm">
@@ -923,18 +1278,90 @@ function WriterInner({ appId }: { appId: string | null }) {
                 placeholder="Paste guidelines / RFP text here..."
                 className="w-full h-32 bg-black/30 border border-gray-700 rounded p-3 text-sm my-2"
               />
-              <button className={`btn btn-secondary ${OFF}`} disabled={busy !== null || !guidelines.trim()}
-                onClick={() => void analyzeRequirements(guidelines)}>
-                {busy === 'spec' ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Re-analyze Requirements'}
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button className={`btn btn-secondary ${OFF}`} disabled={busy !== null || !guidelines.trim()}
+                  onClick={() => void analyzeRequirements(guidelines)}>
+                  {busy === 'spec' ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Re-analyze Requirements'}
+                </button>
+                {guidelinesFileInput}
+              </div>
+              <p className="text-xs text-gray-500 mt-2">{GUIDELINES_FILE_HELP}</p>
             </details>
           </div>
         )}
       </div>
 
-      {/* Stage 2: Fit & Strategy */}
+      {/* Stage 1b: Funder History (what the funder has actually funded) */}
       {spec && (
         <div className="card">
+          <h2 className="text-xl font-bold mb-2 flex items-center gap-2"><History className="w-5 h-5" /> 1b · Funder History</h2>
+          <p className="text-gray-400 text-sm mb-3">
+            Match this application to what the funder has actually funded, not only to the written guidelines.
+            Add what you know, or let Claude search the web. The fit analysis, drafting and scoring then use the funder profile.
+          </p>
+          <textarea
+            aria-label="Funder history notes"
+            value={funderNotes}
+            onChange={(e) => setFunderNotes(e.target.value)}
+            placeholder="Paste what you know about this funder: past grantees, annual report or 990-PF grant lists, notes from calls, feedback on past applications"
+            className="w-full h-32 bg-black/30 border border-gray-700 rounded p-3 text-sm"
+          />
+          {funderNotes.length > FUNDER_NOTES_LIMIT && (
+            <p className="text-xs text-amber-300 mt-1">
+              That is more than {FUNDER_NOTES_LIMIT.toLocaleString('en-US')} characters; only the first {FUNDER_NOTES_LIMIT.toLocaleString('en-US')} are kept. Add a long grant list as a file instead.
+            </p>
+          )}
+          {funderFiles.length > 0 && (
+            <ul className="text-sm space-y-1 mt-2" aria-label="Funder files">
+              {funderFiles.map((file) => (
+                <li key={file.name} className="flex flex-wrap items-center gap-x-2">
+                  <FileText className="w-4 h-4 text-gray-500 shrink-0" />
+                  <span className="break-all">{file.name}</span>
+                  <span className="text-xs text-gray-500">{file.chars.toLocaleString('en-US')} characters</span>
+                  <button className={`text-xs text-gray-400 hover:underline ${OFF}`} disabled={busy !== null}
+                    aria-label={`Remove ${file.name}`} onClick={() => removeFunderFile(file.name)}>
+                    Remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <div className="flex flex-wrap items-center gap-2 mt-3">
+            <button className={`btn btn-primary ${OFF}`} disabled={busy !== null || !canBuildFunder} onClick={() => void buildFunder(false)}>
+              {(busy === 'funder' || busy === 'funder-file') && <Loader2 className="w-4 h-4 animate-spin" />} Build Funder Profile
+            </button>
+            <input id="writer-funder-file" type="file" accept=".pdf,.docx,.txt" className="sr-only peer" disabled={busy !== null}
+              onChange={(e) => {
+                addFunderFile(e.target.files);
+                e.target.value = ''; // the same file can be chosen again
+              }} />
+            <label htmlFor="writer-funder-file" aria-disabled={busy !== null ? true : undefined}
+              className={`btn btn-secondary cursor-pointer ${FILE_LABEL_FOCUS}`}>
+              <Paperclip className="w-4 h-4" /> Add a file
+            </label>
+            <button className={`btn btn-secondary ${OFF}`} disabled={busy !== null} onClick={() => void buildFunder(true)}>
+              {busy === 'funder-research' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Globe className="w-4 h-4" />} Research the web and build
+            </button>
+          </div>
+          <p className="text-xs text-gray-500 mt-2">
+            Files: PDF, Word (.docx) or text, up to 4 MB. &quot;Research the web and build&quot; uses Claude&apos;s web search on your own
+            Claude API key (a few searches, about 1 cent each, plus the usual Claude cost).
+          </p>
+          {state.funder_profile_newer_than_fit && analysis && (
+            <div className="mt-3 p-3 rounded border bg-amber-950 border-amber-800 text-amber-200 text-sm flex flex-wrap items-center justify-between gap-2">
+              <span>The fit analysis and strategy were made before this funder profile. Re-run the fit analysis so they use what this funder has funded.</span>
+              <button className={`btn btn-secondary ${OFF}`} disabled={busy !== null} onClick={rerunFit}>Update the fit analysis now</button>
+            </div>
+          )}
+          {funderRecord?.profile && (
+            <FunderProfileView profile={funderRecord.profile} outdated={funderRecord.profile_outdated} />
+          )}
+        </div>
+      )}
+
+      {/* Stage 2: Fit & Strategy */}
+      {spec && (
+        <div id="writer-fit" tabIndex={-1} className={`card ${TARGET}`}>
           <h2 className="text-xl font-bold mb-2 flex items-center gap-2"><Target className="w-5 h-5" /> 2 · Fit, Gaps &amp; Strategy</h2>
           {!analysis ? (
             <button className={`btn btn-primary ${OFF}`} disabled={busy !== null}
@@ -955,12 +1382,7 @@ function WriterInner({ appId }: { appId: string | null }) {
                   </div>
                 ))}
               </div>
-              <button className={`text-xs text-gray-400 hover:underline ${OFF}`} disabled={busy !== null}
-                onClick={() => {
-                  if (window.confirm('Re-running the fit analysis replaces the current gap list. Answers you recorded stay in your profile and are used in the new analysis. Continue?')) {
-                    void run('analyze', () => api.analyzeFit(appId));
-                  }
-                }}>
+              <button className={`text-xs text-gray-400 hover:underline ${OFF}`} disabled={busy !== null} onClick={rerunFit}>
                 Re-run fit analysis (after adding answers or documents)
               </button>
               {strengthLeads.length > 0 && (
@@ -994,6 +1416,16 @@ function WriterInner({ appId }: { appId: string | null }) {
                 ) : (
                   <p className="text-green-400 text-sm mt-2 flex items-center gap-1"><CheckCircle className="w-4 h-4" /> Strategy confirmed</p>
                 )}
+                {otherRecommendation && (
+                  <details className="text-sm mt-2">
+                    <summary className="cursor-pointer text-gray-400">See the strategy the fit analysis recommends</summary>
+                    <p className="text-gray-300 whitespace-pre-wrap break-words mt-1">{analysis.recommended_strategy}</p>
+                    <button className={`btn btn-secondary mt-2 ${OFF}`} disabled={busy !== null}
+                      onClick={() => setStrategyText(analysis.recommended_strategy)}>
+                      Use this strategy
+                    </button>
+                  </details>
+                )}
               </div>
             </div>
           )}
@@ -1002,7 +1434,7 @@ function WriterInner({ appId }: { appId: string | null }) {
 
       {/* Stage 3: Gaps & Stakeholder Intake */}
       {analysis && gaps.length > 0 && (
-        <div className="card">
+        <div id="missing-info" tabIndex={-1} className={`card ${TARGET}`}>
           <h2 className="text-xl font-bold mb-2 flex items-center gap-2"><Send className="w-5 h-5" /> 3 · Missing Info &amp; Stakeholders</h2>
           <div className="space-y-2 mb-4">
             {gaps.map((g) => (
@@ -1088,6 +1520,35 @@ function WriterInner({ appId }: { appId: string | null }) {
         </div>
       )}
 
+      {/* More material for the writer: a document's facts become profile evidence that drafts can cite */}
+      {spec && (
+        <div id="writer-materials" className="card">
+          <h2 className="text-xl font-bold mb-2 flex items-center gap-2"><Paperclip className="w-5 h-5" /> Add Materials</h2>
+          <p className="text-gray-400 text-sm mb-3">
+            Add a document (budget, prior report, letters, data) so drafts can cite it. Claude reads it and adds its key facts to
+            your profile, where the fit analysis and every draft can use them.
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <input id="writer-material-file" type="file" accept=".pdf,.docx,.txt" className="sr-only peer" disabled={busy !== null}
+              onChange={(e) => {
+                addMaterial(e.target.files);
+                e.target.value = ''; // the same file can be chosen again
+              }} />
+            <label htmlFor="writer-material-file" aria-disabled={busy !== null ? true : undefined}
+              className={`btn btn-secondary cursor-pointer ${FILE_LABEL_FOCUS}`}>
+              {busy === 'material' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Paperclip className="w-4 h-4" />} Add a document
+            </label>
+            <span className="text-xs text-gray-500">PDF, Word (.docx) or text, up to 4 MB.</span>
+          </div>
+          {materialAdded && analysis && (
+            <div className="mt-3 p-3 rounded border bg-amber-950 border-amber-800 text-amber-200 text-sm flex flex-wrap items-center justify-between gap-2">
+              <span>The fit analysis was made before this document. Re-run it so the gaps and strategy can use the new facts.</span>
+              <button className={`btn btn-secondary ${OFF}`} disabled={busy !== null} onClick={rerunFit}>Update the fit analysis to use it</button>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Voice profile (improves drafting; optional but recommended) */}
       {app.strategy_confirmed && (
         <div className="card">
@@ -1118,7 +1579,7 @@ function WriterInner({ appId }: { appId: string | null }) {
 
       {/* Stage 4: Draft */}
       {app.strategy_confirmed && (
-        <div className="card">
+        <div id="writer-draft" tabIndex={-1} className={`card ${TARGET}`}>
           <h2 className="text-xl font-bold mb-2 flex items-center gap-2"><Pencil className="w-5 h-5" /> 4 · Draft</h2>
           {blocking.length > 0 && (
             <p className="text-yellow-400 text-sm mb-3">
@@ -1156,7 +1617,7 @@ function WriterInner({ appId }: { appId: string | null }) {
 
       {/* Stage 5: Score */}
       {sections.length > 0 && (
-        <div className="card">
+        <div id="writer-score" tabIndex={-1} className={`card ${TARGET}`}>
           <h2 className="text-xl font-bold mb-2">5 · Self-Score Against the Rubric</h2>
           <button className={`btn btn-primary mb-4 ${OFF}`} disabled={busy !== null || hasUnsavedEdits}
             onClick={() => void run('score', () => api.scoreApplication(appId))}>
@@ -1201,7 +1662,7 @@ function WriterInner({ appId }: { appId: string | null }) {
 
       {/* Stage 6: Export */}
       {sections.length > 0 && (
-        <div className="card">
+        <div id="writer-export" tabIndex={-1} className={`card ${TARGET}`}>
           <h2 className="text-xl font-bold mb-2 flex items-center gap-2"><Download className="w-5 h-5" /> 6 · Export</h2>
           <p className="text-gray-400 text-sm mb-3">
             Final human gate: you review, you submit. Nothing is sent to the funder automatically.

@@ -554,6 +554,47 @@ class ApiClient {
     return response.data;
   }
 
+  /** Analyze the requirements from a guidelines file (PDF, Word or text); pasted text, when given, is read first. */
+  async enrichGrantSpecFromFile(appId: string, file: File, guidelinesText?: string) {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (guidelinesText && guidelinesText.trim()) formData.append('guidelines_text', guidelinesText);
+    const response = await this.client.post(`/api/writer/applications/${appId}/grant-spec/upload`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return response.data;
+  }
+
+  /**
+   * Build the grant's funder profile from the pasted notes (replaced by
+   * notesText when given), its files and earlier research. researchWeb: Claude
+   * searches the web first (on the person's own key), then the profile is built.
+   */
+  async buildFunderProfile(appId: string, notesText?: string, researchWeb = false) {
+    const response = await this.client.post(`/api/writer/applications/${appId}/funder-profile`, {
+      ...(notesText !== undefined ? { notes_text: notesText } : {}),
+      research_web: researchWeb,
+    });
+    return response.data;
+  }
+
+  /** Add a PDF, Word or text file to the funder history (notesText is saved too), then build the profile again. */
+  async uploadFunderFile(appId: string, file: File, notesText?: string) {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (notesText !== undefined) formData.append('notes_text', notesText);
+    const response = await this.client.post(`/api/writer/applications/${appId}/funder-profile/upload`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return response.data;
+  }
+
+  /** Remove one file from the funder history. */
+  async removeFunderFile(appId: string, name: string) {
+    const response = await this.client.delete(`/api/writer/applications/${appId}/funder-profile/files/${encodeURIComponent(name)}`);
+    return response.data;
+  }
+
   async analyzeFit(appId: string) {
     const response = await this.client.post(`/api/writer/applications/${appId}/analyze`);
     return response.data;
@@ -626,6 +667,34 @@ class ApiClient {
 
   async analyzeVoice(samples: string[]) {
     const response = await this.client.post('/api/writer/voice/analyze', { samples });
+    return response.data;
+  }
+
+  /** The Application Checklist's record: ticked items, notes, and the deadline counted in days (routes/checklist.ts). */
+  async getChecklist(appId: string): Promise<{
+    done: Record<string, boolean>;
+    notes: Record<string, string>;
+    next_deadline: string | null;
+    days_left: number | null;
+    deadline_passed: boolean;
+  }> {
+    const response = await this.client.get(`/api/writer/applications/${appId}/checklist`);
+    return response.data;
+  }
+
+  /** Tick or untick one checklist item; a note is saved only when given ('' removes it). Returns the updated record. */
+  async setChecklistItem(appId: string, key: string, done: boolean, note?: string): Promise<{
+    done: Record<string, boolean>;
+    notes: Record<string, string>;
+    next_deadline: string | null;
+    days_left: number | null;
+    deadline_passed: boolean;
+  }> {
+    const response = await this.client.put(`/api/writer/applications/${appId}/checklist`, {
+      key,
+      done,
+      ...(note === undefined ? {} : { note }),
+    });
     return response.data;
   }
 
