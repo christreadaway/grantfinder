@@ -28,10 +28,16 @@ export async function issueToken(userId: string): Promise<string> {
     .sign(encoder.encode(secretKey()));
 }
 
-/** The user id inside a valid token, or null. */
+/**
+ * The user id inside a valid token, or null. A server setup problem (no
+ * SECRET_KEY at runtime) throws instead of returning null: answering 401 would
+ * make every browser forget its session, and a guest's session is their only
+ * way back to their work.
+ */
 export async function verifyToken(token: string): Promise<string | null> {
+  const key = encoder.encode(secretKey());
   try {
-    const { payload } = await jwtVerify(token, encoder.encode(secretKey()), { algorithms: ['HS256'] });
+    const { payload } = await jwtVerify(token, key, { algorithms: ['HS256'] });
     return typeof payload.sub === 'string' && payload.sub ? payload.sub : null;
   } catch {
     return null;

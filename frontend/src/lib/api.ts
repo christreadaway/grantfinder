@@ -140,6 +140,8 @@ export function isSessionEnded(error: unknown): boolean {
 class ApiClient {
   private client: AxiosInstance;
   private token: string | null = null;
+  /** False when the browser refused to store the session (it then lasts only while this tab stays open). */
+  private sessionStored = true;
 
   constructor() {
     this.client = axios.create({
@@ -212,7 +214,10 @@ class ApiClient {
   async waitForJob(jobId: string, kind: string): Promise<unknown> {
     const started = Date.now();
     let delay = 1000;
-    let lastContact = Date.now();
+    // When the current run of failed checks began (null while checks succeed).
+    // Measured from the first failure, not the last success, so a laptop that
+    // slept for an hour and fails one check on waking doesn't give up at once.
+    let failingSince: number | null = null;
     console.info(`[GrantFinder] ${kind} started (job ${jobId})`);
     emitProgress({ jobId, kind, status: 'queued', progress: 'Starting...' });
     for (;;) {
@@ -221,7 +226,7 @@ class ApiClient {
       let job: { status: JobProgress['status']; progress: string | null; result?: unknown; error?: { status: number; detail: string } | null };
       try {
         job = (await this.client.get(`/api/jobs/${jobId}`, { timeout: 20000 })).data;
-        lastContact = Date.now();
+        failingSince = null;
       } catch (error) {
         const status = (error as AxiosError)?.response?.status;
         if (status === 401 || status === 403 || status === 404) throw error;
@@ -229,11 +234,12 @@ class ApiClient {
           console.warn(`[GrantFinder] Offline while ${kind} runs (job ${jobId}); waiting for the connection.`);
           emitProgress({ jobId, kind, status: 'running', progress: 'Waiting for your internet connection (the step keeps running on the server)...' });
           await waitForOnline(30000);
-          lastContact = Date.now(); // time offline doesn't count against the step
+          failingSince = null; // time offline doesn't count against the step
           delay = 1000;
           continue;
         }
-        const silentMs = Date.now() - lastContact;
+        failingSince ??= Date.now();
+        const silentMs = Date.now() - failingSince;
         console.warn(`[GrantFinder] Checking ${kind} failed (no answer for ${Math.round(silentMs / 1000)}s); retrying.`, error);
         if (silentMs < LOST_CONTACT_MS) {
           if (silentMs > 15000) {
@@ -267,8 +273,28 @@ class ApiClient {
     if (typeof window === 'undefined') return;
     try {
       localStorage.setItem('auth_token', token);
+      this.sessionStored = true;
     } catch (error) {
+      this.sessionStored = false;
       console.warn('[GrantFinder] Browser storage is blocked; this sign-in lasts only while the page stays open.', error);
+    }
+  }
+
+  /** False when this browser blocks saving the session: closing or reloading the tab would lose it. */
+  isSessionStored(): boolean {
+    return this.sessionStored;
+  }
+
+  /** True when this browser lets GrantFinder keep a session (checked before a guest sign-in). */
+  canStoreSession(): boolean {
+    if (typeof window === 'undefined') return true;
+    try {
+      const probe = 'grantfinder_storage_probe';
+      localStorage.setItem(probe, '1');
+      localStorage.removeItem(probe);
+      return true;
+    } catch {
+      return false;
     }
   }
 
