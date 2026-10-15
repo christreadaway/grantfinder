@@ -9,9 +9,7 @@ import { useStore } from '@/lib/store';
 
 const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || '';
 
-/** Where this browser keeps the session (for a guest, the only key to their work)... */
-const TOKEN_KEY = 'auth_token';
-/** ...and the session a new sign-in replaced, so lost guest work can still be recovered by hand. */
+/** The session a new sign-in replaced, so lost guest work can still be recovered by hand. */
 const PREVIOUS_TOKEN_KEY = 'auth_token_previous';
 
 /** How long to wait for the engine to recognize a saved session before offering "Try again". */
@@ -23,6 +21,10 @@ const RESTORE_FAILED =
   "Couldn't reach GrantFinder to reopen your saved work. Check your internet connection, then try again. Don't start a new guest session; it would be empty.";
 const REPLACE_SESSION_QUESTION =
   'This browser already has a GrantFinder session. A new guest session starts empty, and the current one can no longer be opened here. Continue?';
+const STORAGE_BLOCKED_QUESTION =
+  'This browser is blocking site storage, so a guest session will be lost when this tab closes or reloads. Use Google sign-in, or keep this tab open and export your work before leaving. Continue as guest?';
+/** On this page there is no debug report and no step to pick back up: keep failures simple. */
+const NO_ANSWER = "GrantFinder didn't answer. Check your internet connection and try again.";
 
 type EngineStatus =
   | { state: 'checking' }
@@ -46,29 +48,50 @@ type RestoreOutcome =
 const subscribeNowhere = () => () => {};
 const serverSnapshot = () => false;
 const expiredSnapshot = () => new URLSearchParams(window.location.search).get('expired') === '1';
-const storedTokenSnapshot = () => {
+/**
+ * The session in this browser: the saved token, or (when the browser blocks
+ * storage) the one held in this tab since signing in.
+ */
+function currentSessionToken(): string | null {
   try {
-    return Boolean(window.localStorage.getItem(TOKEN_KEY));
+    return api.loadToken();
   } catch {
-    return false;
+    return null;
   }
-};
+}
+const storedTokenSnapshot = () => Boolean(currentSessionToken());
 
-function readStoredToken(): string | null {
+/** The user id inside a session token. Not verified: only used to decide whether to warn or what to keep. */
+function tokenSubject(token: string | null): string | null {
+  const payload = token?.split('.')[1];
+  if (!payload) return null;
   try {
-    return window.localStorage.getItem(TOKEN_KEY);
-  } catch (error) {
-    console.warn('[GrantFinder] Could not read the saved session in this browser:', error);
+    const base64 = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const claims = JSON.parse(atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, '=')));
+    return typeof claims?.sub === 'string' ? claims.sub : null;
+  } catch {
     return null;
   }
 }
 
+const isGuestToken = (token: string | null): boolean => Boolean(tokenSubject(token)?.startsWith('guest_'));
+
+/** Keep the session being replaced, but never replace a kept guest session (its only key) with a non-guest one. */
 function keepPreviousToken(token: string) {
   try {
+    const kept = window.localStorage.getItem(PREVIOUS_TOKEN_KEY);
+    if (kept && kept !== token && isGuestToken(kept) && !isGuestToken(token)) return;
     window.localStorage.setItem(PREVIOUS_TOKEN_KEY, token);
   } catch (error) {
     console.warn('[GrantFinder] Could not keep a copy of the earlier session:', error);
   }
+}
+
+/** Why a sign-in failed, in words that fit this page. */
+function signInProblem(error: unknown): string {
+  const status = (error as { response?: { status?: unknown } } | null)?.response?.status;
+  if (typeof status !== 'number' || status >= 500) return NO_ANSWER;
+  return errorDetail(error, 'Please try again.');
 }
 
 /** Reject with a timeout error (worded by errorDetail) if the engine doesn't answer in time. */
@@ -179,21 +202,27 @@ export default function Home() {
       setSignInError('Google sign-in did not finish. Please try again.');
       return;
     }
-    const existing = readStoredToken();
-    if (existing) keepPreviousToken(existing);
+    const existing = currentSessionToken();
+    if (existing) {
+      // Signing in replaces the stored token; for a guest it is the only key to their work.
+      if (isGuestToken(existing) && !window.confirm(REPLACE_SESSION_QUESTION)) return;
+      keepPreviousToken(existing);
+    }
     try {
       const data = await api.googleAuth(credentialResponse.credential);
       setUser(data.user);
       router.push('/dashboard');
     } catch (error) {
       console.error('[GrantFinder] Google sign-in failed:', error);
-      setSignInError(`Google sign-in failed: ${errorDetail(error, 'please try again.')}`);
+      setSignInError(`Google sign-in failed: ${signInProblem(error)}`);
     }
   };
 
   const handleGuest = async () => {
     setSignInError(null);
-    const existing = readStoredToken();
+    // Without browser storage the guest session (the only key to the work) lives only in this tab.
+    if (!api.canStoreSession() && !window.confirm(STORAGE_BLOCKED_QUESTION)) return;
+    const existing = currentSessionToken();
     if (existing) {
       // A new guest session replaces the token, which is the only key to the current work.
       if (!window.confirm(REPLACE_SESSION_QUESTION)) return;
@@ -206,7 +235,7 @@ export default function Home() {
       router.push('/dashboard'); // stays "Starting..." until the dashboard shows
     } catch (error) {
       console.error('[GrantFinder] Guest sign-in failed:', error);
-      setSignInError(`Guest sign-in failed: ${errorDetail(error, 'please try again.')}`);
+      setSignInError(`Guest sign-in failed: ${signInProblem(error)}`);
       setGuestBusy(false);
     }
   };

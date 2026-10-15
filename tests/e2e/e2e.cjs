@@ -1492,7 +1492,7 @@ async function basics(browser) {
     check('profile source says "Entered by hand"', (p.sources || []).includes('Entered by hand'), p.sources);
   });
 
-  await step('Step bar back to Website, then "Skip to questions"', async () => {
+  await step('Step bar back to Website, then back to the saved questions', async () => {
     if (await onStep(page, 'questionnaire')) {
       const websiteStep = page.getByRole('button', { name: 'Website', exact: true });
       check('step bar: "Website" is clickable from the questions', await websiteStep.isEnabled());
@@ -1503,11 +1503,17 @@ async function basics(browser) {
     }
     check('website step says the saved profile is kept', await page.getByText(/your saved profile is kept/).isVisible());
     const before = await requestCount();
-    await page.getByRole('button', { name: 'Skip to questions' }).click();
+    // "Save basics and continue" already wrote this guest's questions, so the button
+    // goes back to them instead of paying for a new set.
+    const goBack = page.getByRole('button', { name: 'Go to my questions' });
+    const reuse = (await goBack.count()) > 0;
+    check('with saved questions, the Website step offers "Go to my questions" (not a new set)', reuse);
+    await (reuse ? goBack : page.getByRole('button', { name: 'Skip to questions' })).click();
     await page.getByRole('heading', { name: 'Answer a Few Questions' }).waitFor({ timeout: JOB_TIMEOUT });
     await card(page, 'Answer a Few Questions').locator('.space-y-6 > div').first().waitFor({ timeout: JOB_TIMEOUT });
-    check('"Skip to questions" shows the questions', true);
-    check('questions were written by Claude (questionnaire_v1)', (await promptsFor('questionnaire_v1', before)).length === 1);
+    check('the button shows the questions', true);
+    check(reuse ? 'the saved questions are reused (no new questionnaire_v1 call)' : 'questions were written by Claude (questionnaire_v1)',
+      (await promptsFor('questionnaire_v1', before)).length === (reuse ? 0 : 1));
     const p = (await api('GET', '/api/processing/profile', { token })).data || {};
     check('skipping kept the hand-entered profile', p.organization_name === 'St. Testwell Mission Chapel', p.organization_name);
   });

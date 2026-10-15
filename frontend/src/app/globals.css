@@ -198,7 +198,7 @@ body {
   color: white;
 }
 
-.btn-primary:hover:not(:disabled) {
+.btn-primary:hover:not(:disabled):not([aria-disabled="true"]) {
   background: var(--primary-hover);
 }
 
@@ -208,12 +208,14 @@ body {
   border: 1px solid var(--card-border);
 }
 
-.btn-secondary:hover:not(:disabled) {
+.btn-secondary:hover:not(:disabled):not([aria-disabled="true"]) {
   background: var(--card-bg);
 }
 
-/* A button that can't be used right now must look that way (and not react to hover). */
-.btn:disabled {
+/* A button that can't be used right now must look that way (and not react to hover).
+   A "Browse Files" label can't be :disabled, so it says aria-disabled="true" instead. */
+.btn:disabled,
+.btn[aria-disabled="true"] {
   opacity: 0.45;
   cursor: not-allowed;
 }
@@ -232,6 +234,11 @@ body {
   border-radius: 8px;
   color: var(--foreground);
   font-size: 14px;
+}
+
+.input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .input:focus {

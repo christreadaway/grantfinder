@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Search, Upload, Globe, FileText, MessageSquare, Play,
@@ -110,10 +110,13 @@ interface DiscoveryResult {
 const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
 
 const BIG_FILE_HELP =
-  'For a big report, make a text copy: in Word use File > Save As > Plain Text (.txt); for a PDF, select all the text (Ctrl+A or Cmd+A), copy it, paste it into a new document and save that as .txt, then add the .txt here. You can also paste key facts into "Anything else we should know?" on the Questions step.';
+  'For a big report, make a text copy: in Word use File > Save As > Plain Text (.txt); for a PDF, select all the text (Ctrl+A or Cmd+A), copy it, paste it into a new document and save that as .txt, then add the .txt here. You can also paste key facts into "Anything else we should know?" on the Questions step (after the questions are written).';
 
 const CONNECTION_PROBLEM =
   "Can't reach GrantFinder right now. Check your internet connection, then try again. Your work is saved.";
+
+const STORAGE_BLOCKED =
+  'This browser is blocking site storage: keep this tab open, and export your work before you close it.';
 
 const GUEST_SIGN_OUT_WARNING =
   "You are signed in as a guest. After you sign out, this work (applications, profile, saved key) can't be opened again. Export what you need first. Sign out anyway?";
@@ -267,7 +270,10 @@ function questionnaireFrom(data: unknown): Questionnaire | null {
       id: q.id,
       question: q.question,
       question_type: typeof q.question_type === 'string' ? q.question_type : 'text',
-      options: Array.isArray(q.options) ? q.options.filter((o): o is string => typeof o === 'string' && o.trim() !== '') : null,
+      // Trimmed and de-duplicated: a repeated option would be two checkboxes that toggle together.
+      options: Array.isArray(q.options)
+        ? Array.from(new Set(q.options.filter((o): o is string => typeof o === 'string').map((o) => o.trim()).filter(Boolean)))
+        : null,
       required: Boolean(q.required),
     }));
   return questions.length ? { questions, total_questions: questions.length } : null;
@@ -292,6 +298,20 @@ function findingsOf(extraction: DocumentExtraction): string[] {
 const factCount = (extraction: DocumentExtraction): number =>
   Array.isArray(extraction.key_facts) ? extraction.key_facts.length : 0;
 
+/** A document's line in the Documents step after it was read... */
+function documentAdded(name: string, extraction: DocumentExtraction): DocumentResult {
+  const facts = factCount(extraction);
+  return { ok: true, message: `${name}: ${findingsOf(extraction).length} grant-relevant item(s) found${facts > 0 ? `, ${facts} fact(s) for the writer` : ''}` };
+}
+
+/** ...or when it couldn't be (it stays in the list, to try again or remove). */
+function documentFailed(name: string, error: unknown): DocumentResult {
+  return { ok: false, message: `${name}: ${errorDetail(error, 'could not be added. Try it again.')}` };
+}
+
+/** File size for messages, rounded up so a file just over the limit never reads "4.0 MB (limit 4 MB)". */
+const megabytes = (bytes: number): string => (Math.ceil(bytes / 104857.6) / 10).toFixed(1);
+
 /** Only real web addresses get a "Visit Grant Website" link. */
 function webUrl(url: unknown): string | null {
   if (typeof url !== 'string' || !url.trim()) return null;
@@ -305,27 +325,85 @@ function webUrl(url: unknown): string | null {
 
 const statusLabel = (status: unknown): string => APPLICATION_STATUS_LABELS[String(status)] ?? String(status ?? '');
 
-/** True when the session saved in this browser belongs to a guest (used when the user record couldn't load). */
-function storedSessionIsGuest(): boolean {
+/** The user id inside a session token. Not verified: only used to decide whether to warn or what to keep. */
+function tokenSubject(token: string | null | undefined): string | null {
+  const payload = token?.split('.')[1];
+  if (!payload) return null;
   try {
-    const payload = window.localStorage.getItem('auth_token')?.split('.')[1];
-    if (!payload) return false;
     const base64 = payload.replace(/-/g, '+').replace(/_/g, '/');
     const claims = JSON.parse(atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, '=')));
-    return typeof claims?.sub === 'string' && claims.sub.startsWith('guest_');
+    return typeof claims?.sub === 'string' ? claims.sub : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
-function keepPreviousToken() {
+const isGuestToken = (token: string | null | undefined): boolean => Boolean(tokenSubject(token)?.startsWith('guest_'));
+
+/** The session in this browser: the saved token, or (storage blocked) the one held in this tab. */
+function currentSessionToken(): string | null {
   try {
-    const token = window.localStorage.getItem('auth_token');
-    if (token) window.localStorage.setItem(PREVIOUS_TOKEN_KEY, token);
+    return api.loadToken();
+  } catch {
+    return null;
+  }
+}
+
+/** Keep the session being signed out of, but never replace a kept guest session (its only key) with a non-guest one. */
+function keepPreviousToken(token: string | null) {
+  if (!token) return;
+  try {
+    const kept = window.localStorage.getItem(PREVIOUS_TOKEN_KEY);
+    if (kept && kept !== token && isGuestToken(kept) && !isGuestToken(token)) return;
+    window.localStorage.setItem(PREVIOUS_TOKEN_KEY, token);
   } catch (error) {
     console.warn('[GrantFinder] Could not keep a copy of the session before signing out:', error);
   }
 }
+
+/** Answers on screen worth saving: not blank, each with the question text the person saw. */
+function answersToSubmit(questions: Question[], answers: Record<number, AnswerValue>) {
+  return questions
+    .filter((q) => !isBlank(answers[q.id]))
+    .map((q) => ({ question_id: q.id, answer: answers[q.id], question: q.question }));
+}
+
+/** The answers on screen that differ from what the engine already saved for the same question text. */
+function unsavedAnswers(questions: Question[], answers: Record<number, AnswerValue>, saved: SavedAnswer[]) {
+  const savedByText = new Map(saved.map((item) => [questionKey(item.question), item.answer]));
+  const byId = new Map(questions.map((q) => [q.id, q]));
+  return answersToSubmit(questions, answers).filter((item) => {
+    const key = questionKey(item.question);
+    const q = byId.get(item.question_id);
+    if (!q || !savedByText.has(key)) return true;
+    // Compared the way it was filled in on screen ("No" saved, the No button shown).
+    return JSON.stringify(toAnswerValue(q, savedByText.get(key))) !== JSON.stringify(item.answer);
+  });
+}
+
+const hasHttpResponse = (error: unknown): boolean =>
+  typeof (error as { response?: { status?: unknown } } | null)?.response?.status === 'number';
+
+/** What the "Try again" banner says: the engine's own words when it answered, else a connection problem. */
+function problemText(errors: unknown[]): string {
+  const answered = errors.find(hasHttpResponse);
+  return answered ? `${errorDetail(answered, CONNECTION_PROBLEM)} Your work is saved.` : CONNECTION_PROBLEM;
+}
+
+/** "a, b and c" */
+function listInWords(items: string[]): string {
+  return items.length < 2 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+}
+
+/** Shown when the dashboard opens with only part of the saved work (after "Try again" also failed). */
+const partialLoadNotice = (missing: string[]) =>
+  `Some saved work couldn't be loaded right now: ${listInWords(missing)}. What loaded is shown below. Nothing is lost; reload the page in a few minutes to see the rest.`;
+
+// Values only the browser knows: React reads them on every render and once more after mounting.
+const subscribeNowhere = () => () => {};
+const serverSnapshotFalse = () => false;
+/** The browser refused to store the session, so it lives only in this tab. */
+const sessionNotStoredSnapshot = () => !api.isSessionStored();
 
 // =============================================================================
 // Page
@@ -334,10 +412,16 @@ function keepPreviousToken() {
 export default function Dashboard() {
   const router = useRouter();
   const { user, setUser, matchResults, setMatchResults } = useStore();
+  const userId = user?.id ?? null;
+  const signedIn = Boolean(user);
   const [currentStep, setCurrentStep] = useState<SetupStep>('api-key');
-  // True until the saved key status, grants, profile, results, applications and jobs are read.
+  // True until the saved key status, grants, profile, results and applications are read.
   const [restoring, setRestoring] = useState(true);
-  const [connectionProblem, setConnectionProblem] = useState(false);
+  /** What the "Try again" banner says when the saved work couldn't be read (null: no banner). */
+  const [connectionProblem, setConnectionProblem] = useState<string | null>(null);
+  /** Shown when the page opened with only part of the saved work. */
+  const [partialNotice, setPartialNotice] = useState<string | null>(null);
+  const storageBlocked = useSyncExternalStore(subscribeNowhere, sessionNotStoredSnapshot, serverSnapshotFalse);
   const [sessionCheck, setSessionCheck] = useState(0);
   const [resumeKey, setResumeKey] = useState(0);
   const [apiKey, setApiKey] = useState('');
@@ -374,6 +458,14 @@ export default function Dashboard() {
   });
   const terminalRef = useRef<HTMLDivElement>(null);
   const resumedFor = useRef<string | null>(null);
+  /** Set by "Try again": if the saved work still can't all be read, open with what did load. */
+  const retried = useRef(false);
+
+  // The latest router, so endSession never changes (the reload below must not restart because of it).
+  const routerRef = useRef(router);
+  useEffect(() => {
+    routerRef.current = router;
+  }, [router]);
 
   /** The engine said the session is over (401): forget it and explain on the sign-in page. */
   const endSession = useCallback(() => {
@@ -382,8 +474,8 @@ export default function Dashboard() {
     } catch (error) {
       console.warn('[GrantFinder] Could not forget the ended session:', error);
     }
-    router.replace('/?expired=1');
-  }, [router]);
+    routerRef.current.replace('/?expired=1');
+  }, []);
 
   // Every engine call needs a session, so visitors without one go to sign-in.
   // Only a 401 ends the session here: a Wi-Fi blip or a Netlify error keeps the
@@ -399,7 +491,7 @@ export default function Dashboard() {
       router.replace('/');
       return;
     }
-    if (user) return;
+    if (signedIn) return;
     let active = true;
     withTimeout(api.getMe(), SESSION_CHECK_TIMEOUT_MS)
       .then((me) => {
@@ -413,71 +505,98 @@ export default function Dashboard() {
           return;
         }
         console.error(`[GrantFinder] Could not check the session (attempt ${sessionCheck + 1}); it is kept for the next try:`, error);
-        setConnectionProblem(true);
+        setConnectionProblem(problemText([error]));
       });
     return () => {
       active = false;
     };
-  }, [user, setUser, router, endSession, sessionCheck]);
+  }, [signedIn, setUser, router, endSession, sessionCheck]);
 
   // Live status lines from background jobs ("Scoring grants 11-15 of 40")
   useEffect(() => onJobProgress((info) => setJobProgress(info.progress)), []);
 
+  // A file dropped outside a drop zone would make the browser open it and leave this page.
+  useEffect(() => {
+    const keepPage = (event: DragEvent) => {
+      if (event.dataTransfer && Array.from(event.dataTransfer.types).includes('Files')) event.preventDefault();
+    };
+    window.addEventListener('dragover', keepPage);
+    window.addEventListener('drop', keepPage);
+    return () => {
+      window.removeEventListener('dragover', keepPage);
+      window.removeEventListener('drop', keepPage);
+    };
+  }, []);
+
   // Pick up where the user left off: saved key, grants, profile, questions,
   // results, applications, and a matching run still in progress from before a
-  // reload. Nothing is shown until all of it is read, so a hiccup never looks
-  // like lost work; "Try again" (resumeKey) reads it all again.
+  // reload. On a first failure nothing is shown (a hiccup must never look like
+  // lost work) and "Try again" (resumeKey) reads it all again; if that fails
+  // too, the page opens with what did load and says what is missing.
+  // Keyed on the user's id (not the user object, which changes when the key
+  // is saved) and cancelled when the user changes, so a late answer can never
+  // put another account's results on screen.
   useEffect(() => {
-    if (!user) return;
-    const runKey = `${user.id}#${resumeKey}`;
+    if (!userId) return;
+    const runKey = `${userId}#${resumeKey}`;
     if (resumedFor.current === runKey) return;
     resumedFor.current = runKey;
-    const me = user;
+    let active = true;
     (async () => {
-      const failures: unknown[] = [];
-      const read = <T,>(request: Promise<T>, fallback: T): Promise<T> =>
+      const failures: Array<{ part: string; error: unknown }> = [];
+      const read = <T,>(part: string, request: Promise<T>, fallback: T): Promise<T> =>
         withTimeout(request, RESUME_TIMEOUT_MS).catch((error: unknown) => {
-          failures.push(error);
+          failures.push({ part, error });
+          return fallback;
+        });
+      // Nice to have: without them there is just no pick-up of a running step, or no saved questions.
+      const optional = <T,>(what: string, request: Promise<T>, fallback: T): Promise<T> =>
+        withTimeout(request, RESUME_TIMEOUT_MS).catch((error: unknown) => {
+          if (!isSessionEnded(error)) console.warn(`[GrantFinder] Could not load ${what}; carrying on without it:`, error);
           return fallback;
         });
       const [stats, profile, apps, latest, keyStatus, jobs, savedQuestions] = await Promise.all([
-        read<GrantStats | null>(api.getGrantStats(), null),
-        read<SavedProfile | null>(api.getProfile(), null),
-        read<ApplicationSummary[]>(api.listApplications(), []),
-        read<MatchResultsData | null>(api.getLatestMatchResults(), null),
-        read<{ is_set?: boolean } | null>(api.getApiKeyStatus(), null),
-        read<JobSummary[]>(api.listJobs(), []),
-        withTimeout(api.getSavedQuestionnaire(), RESUME_TIMEOUT_MS).catch((error: unknown) => {
-          console.warn('[GrantFinder] Could not load the saved questions; they can be written again:', error);
-          return null;
-        }),
+        read<GrantStats | null>('your grant database', api.getGrantStats(), null),
+        read<SavedProfile | null>('your organization profile', api.getProfile(), null),
+        read<ApplicationSummary[]>('your applications', api.listApplications(), []),
+        read<MatchResultsData | null>('your match results', api.getLatestMatchResults(), null),
+        read<{ is_set?: boolean } | null>('whether your Claude key is saved', api.getApiKeyStatus(), null),
+        optional<JobSummary[]>('steps still running from before', api.listJobs(), []),
+        optional<unknown>('the saved questions', api.getSavedQuestionnaire(), null),
       ]);
-      if (failures.length) {
+      if (!active) return;
+      if (failures.some((failure) => isSessionEnded(failure.error))) {
         // /api/auth/api-key/status is an auth route, so lib/api leaves its 401 to the page.
-        if (failures.some(isSessionEnded)) {
-          endSession();
+        endSession();
+        return;
+      }
+      if (failures.length) {
+        console.error('[GrantFinder] Could not read all of the saved work:', failures);
+        if (!retried.current) {
+          setConnectionProblem(problemText(failures.map((failure) => failure.error)));
           return;
         }
-        console.error('[GrantFinder] Could not reopen the saved work (nothing was changed on screen):', failures);
-        setConnectionProblem(true);
-        return;
+        setPartialNotice(partialLoadNotice(failures.map((failure) => failure.part)));
       }
 
       let runningMatch: JobSummary | undefined;
       try {
-        // What decides the step first: the key, grants, results and applications.
+        // What decides the step first: the key, grants, results, questions and applications.
         const totalGrants = typeof stats?.total_grants === 'number' ? stats.total_grants : 0;
         if (stats && totalGrants > 0) {
           setDiscoveredTotal(totalGrants);
           setGrantStats(stats);
         }
         setApplications(Array.isArray(apps) ? apps : []);
-        if (latest) setMatchResults(latest);
-        const results = latest ?? useStore.getState().matchResults;
+        // This account's saved results only (never whatever an earlier session left in the store).
+        setMatchResults(latest);
+        const saved = questionnaireFrom(savedQuestions);
         // Ask the engine (the signed-in user object can be from before the key was saved).
-        if (keyStatus?.is_set ?? me.claude_api_key_set) {
+        if (keyStatus?.is_set ?? useStore.getState().user?.claude_api_key_set) {
           setApiKeySet(true);
-          setCurrentStep((step) => (step === 'api-key' ? (results ? 'results' : totalGrants > 0 ? 'website' : 'grants') : step));
+          setCurrentStep((step) => (step === 'api-key'
+            ? (latest ? 'results' : saved ? 'questionnaire' : totalGrants > 0 ? 'website' : 'grants')
+            : step));
         }
         runningMatch = (Array.isArray(jobs) ? jobs : []).find(
           (job) => job.kind === 'processing.match_grants' && (job.status === 'running' || job.status === 'queued'),
@@ -506,7 +625,6 @@ export default function Dashboard() {
           setProfileDocs(documentNamesFrom(profile.sources));
         }
         // The last questions Claude wrote come back without a new AI call, with earlier answers filled in.
-        const saved = questionnaireFrom(savedQuestions);
         if (saved) {
           setQuestionnaire(saved);
           setAnswers(prefillAnswers(saved.questions, earlierAnswers));
@@ -519,17 +637,23 @@ export default function Dashboard() {
       if (!runningMatch) return;
       try {
         const finished = await api.waitForJob(runningMatch.id, runningMatch.kind);
+        if (!active) return;
         setMatchResults(finished as MatchResultsData);
         setIsProcessing(false);
         setCurrentStep('results');
       } catch (error) {
-        if (isSessionEnded(error)) return; // lib/api is already returning to sign-in
+        if (!active || isSessionEnded(error)) return; // signed out, or lib/api is already returning to sign-in
         console.error('[GrantFinder] Matching from before the reload failed:', error);
         setProcessingLogs((logs) => [...logs, logLine('error', errorDetail(error, 'Matching failed. Run it again from the Documents step.'))]);
         setIsProcessing(false);
       }
     })();
-  }, [user, resumeKey, setMatchResults, endSession]);
+    return () => {
+      active = false;
+      // Let the next run (another account, "Try again", or StrictMode's second mount) start fresh.
+      resumedFor.current = null;
+    };
+  }, [userId, resumeKey, setMatchResults, endSession]);
 
   // Auto-scroll terminal
   useEffect(() => {
@@ -544,7 +668,8 @@ export default function Dashboard() {
 
   /** "Try again" after the engine couldn't be reached: check the session, then read the saved work again. */
   const retryConnection = () => {
-    setConnectionProblem(false);
+    retried.current = true;
+    setConnectionProblem(null);
     setRestoring(true);
     if (user) setResumeKey((n) => n + 1);
     else setSessionCheck((n) => n + 1);
@@ -572,9 +697,11 @@ export default function Dashboard() {
   };
 
   const signOut = () => {
-    const guest = user ? user.id.startsWith('guest_') : storedSessionIsGuest();
+    const token = currentSessionToken();
+    // The user record may not have loaded (no connection): the stored token still says whether it is a guest.
+    const guest = user ? user.id.startsWith('guest_') : isGuestToken(token);
     if (guest && !window.confirm(GUEST_SIGN_OUT_WARNING)) return;
-    keepPreviousToken();
+    keepPreviousToken(token);
     try {
       api.clearToken();
     } catch (error) {
@@ -660,16 +787,30 @@ export default function Dashboard() {
       if (grantFile.size > MAX_UPLOAD_BYTES) {
         throw new Error(`${grantFile.name} is larger than 4 MB. Remove extra sheets or images and try again.`);
       }
-      const result: GrantStats = await api.uploadGrantDatabase(grantFile);
+      const uploaded = grantFile;
+      const result: GrantStats = await api.uploadGrantDatabase(uploaded);
       setGrantStats(result);
       setDiscoveredTotal(result.total_grants);
-      setGrantFile(null);
+      setGrantFile((current) => (current === uploaded ? null : current));
       goTo('website');
     });
 
-  /** Have Claude write questions, filling in earlier answers (saved or on screen) wherever the question text matches. */
+  /**
+   * Have Claude write questions, filling in earlier answers (saved or on screen)
+   * wherever the question text matches. The new questions replace the saved
+   * ones, so answers typed on screen and not saved yet are saved first.
+   */
   const loadQuestionnaire = async () => {
-    const earlier = mergeAnswers(savedAnswers, questionnaire?.questions ?? [], answers);
+    const shown = questionnaire?.questions ?? [];
+    const unsaved = unsavedAnswers(shown, answers, savedAnswers);
+    if (unsaved.length) {
+      setBusy('Saving your answers');
+      await api.submitQuestionnaire(unsaved, freeFormText);
+      setSavedAnswers((earlier) => mergeAnswers(earlier, shown, answers));
+      setProfileExists(true);
+      setBusy('Writing your questions');
+    }
+    const earlier = mergeAnswers(savedAnswers, shown, answers);
     const fresh = questionnaireFrom(await api.generateQuestionnaire());
     if (!fresh) throw new Error('Claude did not write any questions. Please try again.');
     setQuestionnaire(fresh);
@@ -747,14 +888,15 @@ export default function Dashboard() {
     });
 
   const handleDocumentUpload = (files: FileList | null) => {
-    if (!files || !files.length) return;
+    // While documents are being read the list can't change (a file added now would be skipped or lost).
+    if (!files || !files.length || busy) return;
     const accepted: File[] = [];
     const rejected: string[] = [];
     let anyTooBig = false;
     Array.from(files).forEach((file) => {
       if (file.size > MAX_UPLOAD_BYTES) {
         anyTooBig = true;
-        rejected.push(`${file.name} is ${(file.size / 1048576).toFixed(1)} MB (limit 4 MB)`);
+        rejected.push(`${file.name} is ${megabytes(file.size)} MB (limit 4 MB)`);
       } else if (!/\.(pdf|docx|txt)$/i.test(file.name)) {
         rejected.push(`${file.name} is not a PDF, DOCX, or TXT file`);
       } else {
@@ -772,36 +914,36 @@ export default function Dashboard() {
     ]);
   };
 
+  /** Take the documents that were read off the list (failed ones stay, to try again or remove) and show them as in the profile. */
+  const finishDocuments = (succeeded: File[]) => {
+    if (!succeeded.length) return;
+    setDocuments((queue) => queue.filter((file) => !succeeded.includes(file)));
+    setProfileDocs((names) => uniqueNames([...names, ...succeeded.map((file) => file.name)]));
+    setProfileExists(true);
+  };
+
   /** Add the queued documents to the profile (for matching later and for the writer) without matching now. */
   const addDocumentsOnly = () =>
     runBusy('Adding documents to your profile', async () => {
       const queued = documents;
       const results: DocumentResult[] = [];
-      const added: string[] = [];
+      const succeeded: File[] = [];
       setDocResults([]);
       for (const [index, doc] of queued.entries()) {
         setBusy(`Adding ${doc.name} to your profile (${index + 1} of ${queued.length})`);
         setJobProgress(null);
         try {
           const extraction: DocumentExtraction = await api.uploadDocument(doc);
-          const facts = factCount(extraction);
-          results.push({
-            ok: true,
-            message: `${doc.name}: ${findingsOf(extraction).length} grant-relevant item(s) found${facts > 0 ? `, ${facts} fact(s) for the writer` : ''}`,
-          });
-          added.push(doc.name);
+          results.push(documentAdded(doc.name, extraction));
+          succeeded.push(doc);
         } catch (error) {
           if (isSessionEnded(error)) throw error;
           console.error(`[GrantFinder] Adding ${doc.name} failed:`, error);
-          results.push({ ok: false, message: `${doc.name}: ${errorDetail(error, 'could not be added. Try it again.')}` });
+          results.push(documentFailed(doc.name, error));
         }
         setDocResults([...results]);
       }
-      setDocuments([]);
-      if (added.length) {
-        setProfileDocs((names) => uniqueNames([...names, ...added]));
-        setProfileExists(true);
-      }
+      finishDocuments(succeeded);
     });
 
   const runMatching = async () => {
@@ -816,7 +958,8 @@ export default function Dashboard() {
       // catches the "playground equipment is 30 years old" class of signals.
       if (documents.length > 0) {
         addLog('info', `Processing ${documents.length} document(s)...`);
-        const added: string[] = [];
+        const results: DocumentResult[] = [];
+        const succeeded: File[] = [];
         for (const doc of documents) {
           addLog('info', `Reading ${doc.name}...`);
           try {
@@ -826,18 +969,18 @@ export default function Dashboard() {
             findings.slice(0, 4).forEach((item) => addLog('info', `  → ${item}`));
             const facts = factCount(extraction);
             if (facts > 0) addLog('info', `  → ${facts} fact(s) for the application writer`);
-            added.push(doc.name);
+            results.push(documentAdded(doc.name, extraction));
+            succeeded.push(doc);
           } catch (docError) {
             if (isSessionEnded(docError)) throw docError;
             console.error(`[GrantFinder] Reading ${doc.name} failed:`, docError);
             addLog('warning', `${doc.name}: extraction failed (${errorDetail(docError, 'error')}) — continuing`);
+            results.push(documentFailed(doc.name, docError));
           }
         }
-        setDocuments([]);
-        if (added.length) {
-          setProfileDocs((names) => uniqueNames([...names, ...added]));
-          setProfileExists(true);
-        }
+        // Shown back on the Documents step; a file that failed stays in its list.
+        setDocResults(results);
+        finishDocuments(succeeded);
       }
 
       // 2. Real matching run
@@ -980,15 +1123,29 @@ export default function Dashboard() {
       {/* Main Content */}
       <main className="flex-1 py-6 sm:py-8">
         <div className="max-w-3xl mx-auto px-4">
+          {storageBlocked && (
+            <div className="mb-4 p-3 rounded bg-amber-950/60 border border-amber-800 text-amber-200 text-sm flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" aria-hidden="true" />
+              <span className="min-w-0 break-words">{STORAGE_BLOCKED}</span>
+            </div>
+          )}
+
           {connectionProblem && (
             <div className="mb-4 p-3 rounded bg-red-950 border border-red-800 text-red-300 text-sm" role="alert">
               <p className="flex items-start gap-2">
                 <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" aria-hidden="true" />
-                <span className="min-w-0 break-words">{CONNECTION_PROBLEM}</span>
+                <span className="min-w-0 break-words">{connectionProblem}</span>
               </p>
               <button type="button" onClick={retryConnection} className="btn btn-secondary text-sm mt-3">
                 Try again
               </button>
+            </div>
+          )}
+
+          {partialNotice && !restoring && (
+            <div className="mb-4 p-3 rounded bg-amber-950/60 border border-amber-800 text-amber-200 text-sm flex justify-between gap-4" aria-live="polite">
+              <span className="min-w-0 break-words">{partialNotice}</span>
+              <button type="button" onClick={() => setPartialNotice(null)} className="text-amber-100 shrink-0" aria-label="Dismiss">×</button>
             </div>
           )}
 
@@ -1168,6 +1325,7 @@ export default function Dashboard() {
                 onDragOver={(e) => e.preventDefault()}
                 onDrop={(e) => {
                   e.preventDefault();
+                  if (busy) return; // the upload in progress uses the file already chosen
                   const file = e.dataTransfer.files[0];
                   if (file && /\.xlsx?$/i.test(file.name)) {
                     setStepError(null);
@@ -1198,10 +1356,15 @@ export default function Dashboard() {
                       type="file"
                       accept=".xlsx,.xls"
                       onChange={(e) => setGrantFile(e.target.files?.[0] || null)}
+                      disabled={Boolean(busy)}
                       className="sr-only peer"
                       id="grant-file"
                     />
-                    <label htmlFor="grant-file" className={`btn btn-secondary mt-4 cursor-pointer ${FILE_LABEL_FOCUS}`}>
+                    <label
+                      htmlFor="grant-file"
+                      aria-disabled={busy ? true : undefined}
+                      className={`btn btn-secondary mt-4 cursor-pointer ${FILE_LABEL_FOCUS}`}
+                    >
                       Browse Files
                     </label>
                   </>
@@ -1282,9 +1445,16 @@ export default function Dashboard() {
                   <button type="button" onClick={() => setShowBasics((v) => !v)} disabled={Boolean(busy)} className="btn btn-secondary sm:flex-1">
                     {showBasics ? 'Hide the basics form' : 'Enter the basics by hand'}
                   </button>
-                  <button type="button" onClick={writeQuestions} disabled={Boolean(busy)} className="btn btn-secondary sm:flex-1">
-                    Skip to questions
-                  </button>
+                  {questionnaire ? (
+                    // The saved questions: no new AI call, and nothing already answered is replaced.
+                    <button type="button" onClick={() => goTo('questionnaire')} disabled={Boolean(busy)} className="btn btn-secondary sm:flex-1">
+                      Go to my questions
+                    </button>
+                  ) : (
+                    <button type="button" onClick={writeQuestions} disabled={Boolean(busy)} className="btn btn-secondary sm:flex-1">
+                      Skip to questions
+                    </button>
+                  )}
                 </div>
                 {showBasics && (
                   <div className="mt-4 grid gap-3 md:grid-cols-2">
@@ -1380,6 +1550,7 @@ export default function Dashboard() {
                           <button
                             type="button"
                             aria-pressed={value === true}
+                            disabled={Boolean(busy)}
                             onClick={() => setAnswers((prev) => ({ ...prev, [q.id]: true }))}
                             className={`btn ${value === true ? 'btn-primary' : 'btn-secondary'}`}
                           >
@@ -1388,6 +1559,7 @@ export default function Dashboard() {
                           <button
                             type="button"
                             aria-pressed={value === false}
+                            disabled={Boolean(busy)}
                             onClick={() => setAnswers((prev) => ({ ...prev, [q.id]: false }))}
                             className={`btn ${value === false ? 'btn-primary' : 'btn-secondary'}`}
                           >
@@ -1401,6 +1573,7 @@ export default function Dashboard() {
                           type="text"
                           value={typeof value === 'string' ? value : ''}
                           onChange={(e) => setAnswers((prev) => ({ ...prev, [q.id]: e.target.value }))}
+                          disabled={Boolean(busy)}
                           className="input"
                         />
                       )}
@@ -1409,6 +1582,7 @@ export default function Dashboard() {
                           id={inputId}
                           value={typeof value === 'string' ? value : ''}
                           onChange={(e) => setAnswers((prev) => ({ ...prev, [q.id]: e.target.value }))}
+                          disabled={Boolean(busy)}
                           className="input"
                         >
                           <option value="">Select...</option>
@@ -1426,6 +1600,7 @@ export default function Dashboard() {
                                 <input
                                   type="checkbox"
                                   checked={checked}
+                                  disabled={Boolean(busy)}
                                   onChange={() => setAnswers((prev) => {
                                     const selected = Array.isArray(prev[q.id]) ? (prev[q.id] as string[]) : [];
                                     return {
@@ -1451,6 +1626,7 @@ export default function Dashboard() {
                     id="q-notes"
                     value={freeFormText}
                     onChange={(e) => setFreeFormText(e.target.value)}
+                    disabled={Boolean(busy)}
                     className="input min-h-[100px]"
                     placeholder="Tell us about any specific needs, upcoming projects, or challenges..."
                   />
@@ -1506,22 +1682,39 @@ export default function Dashboard() {
                     handleDocumentUpload(e.target.files);
                     e.target.value = ''; // so the same file can be picked again later
                   }}
+                  disabled={Boolean(busy)}
                   className="sr-only peer"
                   id="doc-files"
                 />
-                <label htmlFor="doc-files" className={`btn btn-secondary mt-4 cursor-pointer ${FILE_LABEL_FOCUS}`}>
+                <label
+                  htmlFor="doc-files"
+                  aria-disabled={busy ? true : undefined}
+                  className={`btn btn-secondary mt-4 cursor-pointer ${FILE_LABEL_FOCUS}`}
+                >
                   Browse Files
                 </label>
               </div>
               {documents.length > 0 && (
-                <ul className="mt-4 space-y-2">
-                  {documents.map((doc, i) => (
-                    <li key={`${doc.name}-${i}`} className="flex items-center gap-2 text-sm">
-                      <CheckCircle className="w-4 h-4 shrink-0 text-[var(--accent)]" aria-hidden="true" />
-                      <span className="min-w-0 break-words">{doc.name}</span>
-                    </li>
-                  ))}
-                </ul>
+                <div className="mt-4">
+                  <p className="text-sm text-gray-400 mb-2">Waiting to be added:</p>
+                  <ul className="space-y-2">
+                    {documents.map((doc, i) => (
+                      <li key={`${doc.name}-${i}`} className="flex items-center gap-2 text-sm">
+                        <FileText className="w-4 h-4 shrink-0 text-gray-400" aria-hidden="true" />
+                        <span className="min-w-0 break-words">{doc.name}</span>
+                        <button
+                          type="button"
+                          onClick={() => setDocuments((queue) => queue.filter((file) => file !== doc))}
+                          disabled={Boolean(busy)}
+                          aria-label={`Remove ${doc.name}`}
+                          className="ml-auto shrink-0 text-gray-400 hover:text-white underline disabled:opacity-45 disabled:no-underline disabled:cursor-not-allowed"
+                        >
+                          Remove
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
               )}
               <button
                 type="button"
