@@ -560,14 +560,17 @@ PostgreSQL Database
 |-----------|---------------|
 | Website | Netlify (Next.js) |
 | Engine API | Netlify (API routes in the same Next.js app) |
-| Long AI steps | Netlify background function (up to 15 minutes each) |
+| AI steps | Inside normal Netlify requests (about a minute each; long steps continue in parts), on any Netlify plan. Optional: a Netlify background function (up to 15 minutes each) on plans that include background functions |
 | Database and file storage | Netlify Blobs |
 
-Everything is on Netlify. No other hosting service (no Vercel, Railway, Render, or Supabase) is used.
+Everything is on Netlify; no other hosting service is used.
 
-> **Implementation note (October 2026):** GrantFinder now runs entirely on **Netlify**: one
-> Next.js + TypeScript app serves the website and the engine API (`frontend/src/server`), a
-> Netlify background function runs every Claude step (up to 15 minutes each), and Netlify Blobs
+> **Implementation note (October 2026):** GrantFinder now runs entirely on **Netlify**, on any
+> Netlify plan: one Next.js + TypeScript app serves the website and the engine API
+> (`frontend/src/server`), which also runs every Claude step inside a normal request (about a
+> minute each; drafting and matching continue in parts on their own). An optional Netlify
+> background function gives each step up to 15 minutes when `GRANTFINDER_BACKGROUND_JOBS=true`
+> (only for plans that include background functions). Netlify Blobs
 > stores users, encrypted API keys, grants, profiles, and applications. Documents are parsed with
 > `unpdf` (PDF) and `mammoth` (DOCX). The original Python/FastAPI engine in `backend/` is kept as
 > reference only. See `docs/engine.md` and `docs/deployment.md`.

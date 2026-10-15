@@ -104,15 +104,18 @@ Open [http://localhost:3000](http://localhost:3000)
 6. **Write Application** on any match to open the GrantWriter
 
 Your work is saved as you go. Come back later and the dashboard reopens it before showing a step:
-if you already have results it opens on Results, your questions come back with your answers filled
-in, and your applications are listed at the top. If your internet drops, nothing is lost: click
-**Try again**.
+if you already have results it opens on Results; if Claude already wrote your questions it opens on
+them, with your answers filled in; and your applications are listed at the top. If your internet
+drops, nothing is lost: click **Try again**.
 
 ### Deploy to the Web
 
-Everything deploys to **Netlify**: the website, the engine API, the AI background worker, and
-storage (Netlify Blobs). Follow [docs/deployment.md](docs/deployment.md): about 15 minutes, click by click.
-How the pieces fit together: [docs/engine.md](docs/engine.md).
+Everything deploys to **Netlify**, on any Netlify plan: the website, the engine API (which also runs
+each AI step inside a normal request, about a minute at a time, continuing long steps such as
+drafting a whole application in parts on its own), and storage (Netlify Blobs). Plans that include
+background functions can turn on an optional worker that gives each step up to 15 minutes. Follow
+[docs/deployment.md](docs/deployment.md): about 15 minutes, click by click. How the pieces fit
+together: [docs/engine.md](docs/engine.md).
 
 ---
 
@@ -189,11 +192,11 @@ without matching again, use **Add to my profile only (no new matching)**.
 | Component | Technology |
 |-----------|------------|
 | Website | Next.js 16, React 19, TypeScript, Tailwind |
-| Engine | TypeScript API routes (`frontend/src/server`) + a Netlify background function for AI jobs |
+| Engine | TypeScript API routes (`frontend/src/server`); AI steps run inside normal requests on any Netlify plan, or in an optional Netlify background function (up to 15 minutes each) |
 | Database | Netlify Blobs |
 | Auth | Google OAuth or guest sign-in; signed session tokens |
 | AI | Claude API via the Anthropic TypeScript SDK (model set by `CLAUDE_MODEL`) |
-| Hosting | Netlify |
+| Hosting | Netlify (any plan) |
 
 The original Python (FastAPI) engine is kept in `backend/` as reference only.
 

@@ -30,13 +30,20 @@ Firestore collections became Netlify Blobs records (`services/writerRepo.ts`);
   → [GATE 2] Export                           POST .../export       (docx | md | txt | form_map)
 ```
 
-Steps marked (job) run in the Netlify background function (up to 15 minutes);
-the route answers `202 {job_id}` and the website polls `GET /api/jobs/{id}`,
-showing live progress ("Drafting section 2 of 6: ..."). Drafting takes
-`{section_id}` for one section or `{only_missing: true}` for the sections that
-have no draft yet. Drafting and refining share one lock per application, so
-they never run at the same time, and a hand edit is refused (409) while either
-is running (it would be overwritten).
+Steps marked (job) run as jobs: the route answers `202 {job_id}` and the
+website polls `GET /api/jobs/{id}`, showing live progress ("Drafting section 2
+of 6: ..."). On Netlify a job runs, by default, inside a normal request
+(`POST /api/jobs/{id}/run`, on any Netlify plan): Netlify allows about a
+minute, so Claude calls stop at 50 seconds and the step saves what finished.
+Work that doesn't fit continues in parts on its own (see Draft below). With
+`GRANTFINDER_BACKGROUND_JOBS=true` (Netlify plans that include background
+functions) a step can run up to 15 minutes instead (`docs/engine.md`).
+Drafting takes `{section_id}` for one section or `{only_missing: true}` for
+the sections that have no draft yet. Drafting and refining share one lock per
+application, so they never run at the same time: the very same click while one
+runs waits for it, a different one (a refine while a redraft runs) gets a
+plain 409 that says to wait, and a hand edit is refused (409) while either is
+running (it would be overwritten).
 
 UI: `/writer?id=<application_id>` (entered via the "Write Application" button
 on any match card in the dashboard results, including foundations, or from
@@ -54,10 +61,10 @@ What the page shows, in plain words:
 - The fit step shows "Lead with" (strength leads) and "Name honestly (don't
   hide)" (the honesty ledger); the scorecard shows "Biggest lever" and
   "Ranked fixes".
-- Text you typed but haven't saved (pasted guidelines, stakeholder answers,
-  refine instructions, a voice sample, an unsaved hand edit) is kept in this
-  browser tab and comes back after a reload. A step still running when the
-  page reloads is picked back up, not started again.
+- Text you typed but haven't saved (pasted guidelines, an edited strategy,
+  stakeholder answers, refine instructions, a voice sample, an unsaved hand
+  edit) is kept in this browser tab and comes back after a reload. A step
+  still running when the page reloads is picked back up, not started again.
 - No dead ends: if the application can't load, the page says why and offers
   "Try again" and "Back to dashboard"; with no application id it points back
   to the dashboard.
@@ -71,7 +78,9 @@ What the page shows, in plain words:
    Guidelines can be pasted; if absent, the grant's URL is fetched (SSRF-guarded,
    HTML or PDF). If the page can't be read (many funder sites block bots), the
    screen says so and why, and "Paste guidelines and re-analyze" replaces the
-   inferred spec with an exact one.
+   inferred spec with an exact one. In a one-minute step the page gets about
+   15 seconds (up to 30 with the background worker), so Claude still has time;
+   a page that doesn't answer in time counts as unreadable.
 2. **Fit & Gap (the core value)** — maps every rubric criterion to the org's
    strongest real evidence (strong/partial/weak/missing), produces strength
    leads, a gap report, an honesty ledger (weaknesses to name and frame, not
@@ -93,27 +102,55 @@ What the page shows, in plain words:
    Every claim is traced to a criterion + evidence; unsupported claims are
    flagged, never silently shipped. `[NEEDS INPUT: ...]` markers instead of
    invented facts. Banned phrases (org list + built-in AI-tell list) are
-   detected deterministically and rewritten before reaching the user.
+   detected deterministically, as whole words ("compassionate about" is not
+   "passionate about", and a banned "just" never matches "justice"), and
+   rewritten before reaching the user.
    Sections are drafted 3 at a time and each is saved the moment it finishes,
    so a run cut short keeps its finished work; a full run does the sections
-   with no draft first. A section that hits a passing problem (Claude
-   overloaded or rate-limited, an unreadable answer) gets one more try.
-   Partial-drafting recovery: if sections still fail, the message says how
-   many were saved and why, and tells you to use "Draft missing sections",
-   which drafts only the sections that have no draft yet. A section whose
-   redraft failed keeps its earlier text, so the message points to its own
-   "Redraft" button instead. "Redraft" rewrites a single section; "Redraft All
-   Sections" asks first. A redraft keeps the replaced text (refinements and
-   hand edits included) in the section's history.
+   with no draft first.
+   Drafting in parts (the Netlify default, one request per part): a section
+   starts only while at least 40 seconds are left in the step, so a part
+   drafts a few sections (3 at a time) and the rest continue in the next part
+   on their own (the website sends the remaining `section_ids`, and the count
+   keeps going: "Drafting section 4 of 6"). Every part starts at least one
+   section, each section is drafted once per run, and "Redraft All Sections"
+   redoes each section once. With the background worker, sections keep
+   starting for up to 10 minutes, so a whole application usually fits in one
+   part.
+   If a section fails, the run stops there. A section that hit a passing
+   problem (Claude overloaded or rate-limited, an unreadable answer) gets one
+   more try first, but only when the wait and another section still fit in
+   the step, which is rare in a one-minute part.
+   Partial-drafting recovery: the message says how many sections were saved
+   and why the others weren't (including any not started yet), and tells you
+   to use "Draft missing sections", which drafts only the sections that have
+   no draft yet. A section whose redraft failed keeps its earlier text, so the
+   message points to its own "Redraft" button instead. "Redraft" rewrites a
+   single section; "Redraft All Sections" asks first. A redraft keeps the
+   replaced text (refinements and hand edits included) in the section's
+   history. If the section changed anyway while it was being redrafted (a hand
+   edit that slipped in), the saved text stays and the new draft becomes the
+   newest earlier version, with a note.
+   With less than 15 seconds left in the step, the voice rewrite is skipped:
+   the section is saved with its banned phrases flagged and a note saying to
+   refine it or edit it by hand (export stays blocked until then).
 5. **Score** — a skeptical-reviewer scorecard per criterion, the single
    highest-leverage fix first, plus deterministic pass/fail compliance checks
-   (limits, banned phrases, evidence-backed claims).
+   (limits, banned phrases, evidence-backed claims). The pass/fail checklist
+   on the page is re-checked against the text as it is now (a hand edit after
+   scoring shows up at once); the score itself stays until you re-score.
 6. **Refine** — one instruction per revision ("tighten by 40 words", "warm
    this up"). If a revision exceeds a hard limit, one automatic tighten pass
-   runs; if still over, it stays flagged. The replaced text goes into the
-   section's history, and the section notes that the claim check is from the
-   earlier draft. A draft written for a question the current requirements
-   replaced can't be refined (409): redraft it first.
+   runs; if still over, it stays flagged. With less than 15 seconds left in
+   the step the tighten pass is skipped, and a tighten pass that fails for a
+   passing reason keeps the revision; either way the section is saved flagged
+   OVER LIMIT with a note saying to refine it again or edit it by hand. The
+   replaced text goes into the section's history, and the section notes that
+   the claim check is from the earlier draft. A draft written for a question
+   the current requirements replaced can't be refined (409): redraft it first.
+   If the section changed anyway while Claude was revising it (a hand edit
+   that slipped in), the revision is not saved: the step answers 409, your
+   text stays, and you can refine again.
 7. **Edit by hand (no AI):** "Edit" opens the section's text with live word
    and character counts against its limit; "Save" sends
    `PUT .../sections/{sid}` with `{text}`. The replaced text goes into the
@@ -127,6 +164,12 @@ What the page shows, in plain words:
    characters is refused (400). "Earlier versions (N)" lists the history,
    newest first; "Restore this version" asks first, then saves that text as a
    new edit, so the current text moves into the history.
+   Unsaved edits are never lost or skipped: while an edit box holds changes,
+   drafting, scoring and export wait (their buttons are off, and a message
+   names the sections to Save or Cancel), and closing or reloading the tab
+   asks first. Cancel asks before throwing typed changes away. If the saved
+   text changed after you clicked Edit (a redraft or another tab), the page
+   says so and Save asks first; the newer text stays in Earlier versions.
 8. **Export** — Word (.docx via the `docx` package), Markdown, portal paste-in plain
    text with per-field counts, and a JSON form-field map. Export REFUSES
    over-limit or banned-phrase content (see "Live compliance and export rules"
@@ -136,11 +179,14 @@ What the page shows, in plain words:
 ## Live compliance and export rules
 
 - **Checked live, never trusted from storage.** The application state
-  (`GET /api/writer/applications/{id}`, what the writer page shows), every
-  export, and the debug bundle re-check each section's word and character
-  counts, its limit, and banned phrases against the CURRENT requirements and
-  the CURRENT voice profile. A phrase banned after drafting, or a limit that a
-  re-analysis added, shows up at once (copies are checked; nothing is re-saved).
+  (`GET /api/writer/applications/{id}`, what the writer page shows, including
+  the scorecard's pass/fail checklist), every export, and the debug bundle
+  re-check each section's word and character counts, its limit, and banned
+  phrases against the CURRENT requirements and the CURRENT voice profile. A
+  phrase banned after drafting, or a limit that a re-analysis added or
+  lowered, shows up at once (copies are checked; nothing is re-saved).
+- **Never the unsaved text.** The page won't export while an edit box holds
+  unsaved changes (the file would hold the saved text, not what is on screen).
 - **Export refuses (409)** while any section is over its hard limit or
   contains a banned phrase. The message names each section with its overage
   (for example `Portal Summary (1243 of 1000 characters)`) or the phrases
@@ -175,6 +221,9 @@ What the page shows, in plain words:
 - Each section keeps its last 12 earlier texts (redrafts, refinements, voice
   rewrites, hand edits); a hand edit never runs at the same time as drafting
   or refining (409).
+- Saves never overwrite a newer change: a redraft that finishes after a hand
+  edit keeps the edited text (the new draft goes into the history), and a
+  refine of a section that changed meanwhile is not saved (409).
 - Nothing is auto-sent or auto-submitted, ever.
 
 ## Logging & debugging (PRD Section 8)
@@ -184,10 +233,10 @@ What the page shows, in plain words:
   `LOG_LEVEL=debug` enables verbose logging.
 - Every AI call logs: correlation ID, stage, prompt ID, model, input/output
   tokens, web searches, latency, cost estimate, status, stop reason. Each call
-  is also stored on its background job, so the history survives restarts.
+  is also stored on its job, so the history survives restarts.
 - `GET /api/writer/applications/{id}/debug-bundle` → one paste-ready markdown
   bundle: correlation ID, state summary, AI call timeline with costs, each
-  background step with its notes and internal error, and errors. The state
+  step (job) with its notes and internal error, and errors. The state
   summary re-checks every section live: words and characters against its
   limit, OVER LIMIT, banned phrases, unsupported claims, `[NEEDS INPUT]`
   placeholders, and how many earlier versions it has. The writer screen's
@@ -213,26 +262,31 @@ debug bundle re-check against the current list.
 
 ## Testing
 
-`tests/engine/writer.test.mts` (153 checks, mock Claude, no key needed) walks
+`tests/engine/writer.test.mts` (159 checks, mock Claude, no key needed) walks
 the whole pipeline through the API: gates, gap blocking, intake round-trip
 (including a second round that writes requests only for uncovered gaps),
-profile enrichment, voice enforcement, unsupported-claim flagging, over-limit
-auto-tighten, guidelines fetch success and failure, fatal vs. temporary Claude
+profile enrichment, voice enforcement, whole-word banned phrases,
+unsupported-claim flagging, over-limit auto-tighten (and a tighten pass that
+fails), guidelines fetch success and failure, fatal vs. temporary Claude
 errors, partial drafting and "Draft missing sections", hand edits (history
 capped at 12, restore, refused while drafting runs, over-limit and
 banned-phrase edits flagged and refused at export), live compliance (a phrase
-banned after drafting), the export refusal wording and `[NEEDS INPUT]` notice,
-all four export formats (the .docx is re-opened and checked), and the debug
-bundle. Run it with:
+banned after drafting, the scorecard checklist), the export refusal wording
+and `[NEEDS INPUT]` notice, all four export formats (the .docx is re-opened
+and checked), and the debug bundle. Run it with:
 
 ```bash
 cd ~/grantfinder/frontend
 npx tsx ../tests/engine/writer.test.mts
 ```
 
-It is one of the 7 engine suites (515 checks) that
-`cd ~/grantfinder && bash tests/engine/run_all.sh` runs; the browser test
-(`tests/e2e/README.md`) drives the same writer on screen, hand edit and
+`cd ~/grantfinder && bash tests/engine/run_all.sh` runs it twice: once with
+the other 8 suites, and again in direct job mode (the Netlify default).
+`tests/engine/direct.test.mts` (14 checks) covers drafting in parts (each
+section once, numbering across parts, Redraft All in parts), the skipped
+voice rewrite and tighten pass, and a guidelines page that never answers;
+`tests/engine/regressions.test.mts` covers the race-safe saves. The browser
+test (`tests/e2e/README.md`) drives the same writer on screen, hand edit and
 "Restore this version" included.
 
 AI prompts themselves require a live key to validate.

@@ -124,7 +124,7 @@ What keeps a step from being lost or paid for twice:
 | `deadlines.ts` | Deadline parsing and urgency |
 | `routes/*.ts` | API routes by area (auth, system, grants, discovery, processing, profile, export, writer) |
 | `services/*.ts` | Business logic and prompts by area |
-| `handlers/*.ts` | Background job handlers by area |
+| `handlers/*.ts` | Job handlers by area (every Claude call; they run in all three job modes) |
 
 ## Storage layout
 
@@ -145,9 +145,14 @@ ratelimit/{bucket}/{ipHash}       sign-in rate-limit window
 
 ```bash
 cd ~/grantfinder
-bash tests/engine/run_all.sh      # engine suites: foundation, deadlines, grants, processing, writer, regressions, security
-bash tests/e2e/run_e2e.sh         # real browser through the whole journey on a production build
+bash tests/engine/run_all.sh      # 9 suites: foundation, deadlines, grants, processing, writer, regressions, direct, direct-processing, security; then processing, grants, writer, regressions again in direct mode (1,012 checks)
+bash tests/e2e/run_e2e.sh         # real browser through the whole journey on a production build (437 checks)
 ```
+
+`direct.test.mts` and `direct-processing.test.mts` run with `GRANTFINDER_JOB_MODE=direct`, a set
+job budget (`GRANTFINDER_DIRECT_JOB_BUDGET_MS`: 45 and 5 seconds) and a slow mock Claude:
+drafting and matching in parts, and every other AI step ending inside one request.
+`E2E_JOB_MODE=direct bash tests/e2e/run_e2e.sh` runs the browser test in direct mode.
 
 The engine suites call `handleRequest()` in-process with a mock Claude
 (`tests/mock-claude/server.mjs`, answers in `tests/mock-claude/fixtures/*.json`, keyed by
@@ -168,6 +173,7 @@ its own `netlify.toml` (the CLI's local server mishandles the repo's `base = "fr
   steps, every error with its internal detail, and the AI calls behind each step. The
   dashboard has a **Copy debug report** link.
 - `GET /api/writer/applications/{id}/debug-bundle`: the same for one grant application.
-- Netlify: **Logs**, then **Functions**: the `___netlify-server-handler` (API) and
-  `grantfinder-jobs-background` (AI jobs) logs. Every line is JSON.
+- Netlify: **Logs**, then **Functions**: the `___netlify-server-handler` log (the API and, in
+  direct mode, every AI step) and, only with `GRANTFINDER_BACKGROUND_JOBS=true`, the
+  `grantfinder-jobs-background` log (AI steps in background mode). Every line is JSON.
 - Your Mac: `~/logs/grantfinder/grantfinder.log` (rotated daily, kept 14 days).

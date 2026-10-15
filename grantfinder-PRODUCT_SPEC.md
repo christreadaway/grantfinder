@@ -16,9 +16,10 @@
 
 ## Tech Stack
 
-Grant database, search, tracking. One Next.js 16 + TypeScript app deployed entirely on Netlify:
-website, engine API at `/api/*` (`frontend/src/server`), a background function for AI jobs, and
-Netlify Blobs storage. The `backend/` items in the history below describe the original Python
+Grant database, search, tracking. One Next.js 16 + TypeScript app deployed entirely on Netlify, on
+any Netlify plan: website, engine API at `/api/*` (`frontend/src/server`, which also runs each AI
+step inside a normal request; an optional background function gives each step up to 15 minutes on
+plans that include them), and Netlify Blobs storage. The `backend/` items in the history below describe the original Python
 engine, which is now reference only. Current architecture: `docs/engine.md`.
 
 ---
@@ -52,6 +53,7 @@ The following features have been implemented based on development sessions:
 23. Recurring "Annual: October 15" deadlines and the Kenedy Memorial Foundation record in the starter database
 24. October 2026: moved everything onto Netlify. The engine was ported to TypeScript (`frontend/src/server`), AI steps run as background jobs, data and sign-ins persist in Netlify Blobs, and the dashboard resumes saved work (`docs/engine.md`, `docs/deployment.md`)
 25. October 2026: GrantWriter hand edits with earlier versions and "Restore this version", live limit and banned-phrase checks at export, `[NEEDS INPUT]` placeholders listed per section, and "Draft missing sections" after a partial run (`docs/grant-writer.md`). Questionnaire answers are kept across new question sets, documents add key facts the writer drafts from, and sign-ins survive network blips (`docs/grant-discovery.md`, `docs/deployment.md`)
+26. October 2026: runs on any Netlify plan, including legacy Starter. Each AI step runs inside a normal request (about a minute); long steps continue in parts on their own (drafting a few sections per part, matching the grants that didn't fit). The 15-minute background function is optional (`GRANTFINDER_BACKGROUND_JOBS=true`, only for plans that include background functions), and `/api/health` shows which way AI steps run (`docs/engine.md`, `docs/deployment.md`)
 
 ---
 

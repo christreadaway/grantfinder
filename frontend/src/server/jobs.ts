@@ -484,15 +484,15 @@ export async function runJob(userId: string, jobId: string, options: { budgetMs?
 // Reading
 // =============================================================================
 
-/** Direct jobs run inside one request, which Netlify stops at 60 seconds. */
-const DIRECT_STALE_MS = 75_000;
+/** Direct jobs run inside one request, which Netlify stops at 60 seconds (longer only if a test sets a bigger budget). */
+const directStaleMs = () => Math.max(75_000, directJobBudgetMs() + 25_000);
 
 /** Jobs that died without reporting (crash, time limit, lost dispatch) read as failed. */
 function withStaleCheck(job: Job): Job {
   const now = Date.now();
   if (job.mode === 'direct') {
-    const quiet = now - Date.parse(job.updated_at) > DIRECT_STALE_MS;
-    const long = job.started_at !== null && now - Date.parse(job.started_at) > DIRECT_STALE_MS;
+    const quiet = now - Date.parse(job.updated_at) > directStaleMs();
+    const long = job.started_at !== null && now - Date.parse(job.started_at) > directStaleMs();
     if (job.status === 'running' && (quiet || long)) {
       return {
         ...job,

@@ -44,7 +44,7 @@ An AI-powered grant matching platform that builds a comprehensive profile of a C
   - Completeness (5%) — How much profile data is available for matching?
 
 ### Terminal-Style Processing UI
-- Real-time progress from background jobs (the website checks each running step every 1-3 seconds, and keeps checking through a Wi-Fi drop)
+- Real-time progress from each AI step (the website checks each running step every 1-3 seconds, and keeps checking through a Wi-Fi drop)
 - Stage-by-stage progress updates
 - Professional dark mode aesthetic
 
@@ -54,9 +54,9 @@ An AI-powered grant matching platform that builds a comprehensive profile of a C
 - **Grant applications (GrantWriter)** — Word (.docx), Markdown, portal paste-in text with per-field counts, and a JSON form-field map
 
 ## 5. Tech Stack
-- **Engine:** TypeScript API routes inside the Next.js app (`frontend/src/server`) plus a Netlify background function for long AI work (the original Python FastAPI engine in `backend/` is reference only)
+- **Engine:** TypeScript API routes inside the Next.js app (`frontend/src/server`). Each AI step runs inside a normal Netlify request (about a minute; long steps such as drafting or matching continue in parts on their own), so it works on any Netlify plan; plans with background functions can turn on an optional background function that gives each step up to 15 minutes. (The original Python FastAPI engine in `backend/` is reference only.)
 - **Frontend:** Next.js 16 with TypeScript
-- **Hosting & storage:** Netlify (website, API, background jobs) and Netlify Blobs (data)
+- **Hosting & storage:** Netlify on any plan (website, API, AI steps) and Netlify Blobs (data)
 - **AI:** Claude API (Anthropic) for questionnaire generation, document extraction, profile generation, and grant matching
 - **Auth:** Google OAuth (or temporary guest sign-in) with signed session tokens
 - **Security:** AES-256-GCM encryption for API keys
@@ -74,9 +74,9 @@ An AI-powered grant matching platform that builds a comprehensive profile of a C
 ## 7. Current Status
 - **Built:** Complete engine in TypeScript (ported from the original FastAPI backend) with all routes and services
 - **Built:** Complete frontend (Next.js) with setup wizard, profile builder, matching results, and the GrantWriter (drafts you can refine or edit by hand, with earlier versions kept)
-- **Built:** AI service integration with Claude API (background jobs, cost and token logging)
+- **Built:** AI service integration with Claude API (AI steps as jobs that fit any Netlify plan, cost and token logging)
 - **Built:** 5-category Excel parser, starter database, Grants.gov search, AI web discovery
-- **Tested:** 515 automated engine checks (7 suites) with a mock Claude, a browser test of the whole journey (436 checks), and a local run on the Netlify runtime
+- **Tested:** 1,012 automated engine checks with a mock Claude (9 suites, 561 checks, then 4 of them again in direct job mode, the way Netlify runs AI steps by default), a browser test of the whole journey (437 checks), and a local run on the Netlify runtime
 - **Deploy:** Netlify only (`docs/deployment.md`); a live-key run with real data is the next milestone
 
 ## 8. Business Model
