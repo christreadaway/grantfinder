@@ -21,7 +21,7 @@ if [ -n "${GRANTFINDER_TODAY:-}" ]; then
   echo "Pretending today is $GRANTFINDER_TODAY (GRANTFINDER_TODAY)"
 fi
 failed=()
-for suite in foundation deadlines grants processing writer regressions direct direct-processing checklist security finder; do
+for suite in foundation deadlines grants processing writer regressions direct direct-processing checklist security finder finder-parsing finder-results; do
   echo "== $suite"
   if npx tsx "../tests/engine/$suite.test.mts" > "/tmp/grantfinder-engine-$suite.log" 2>&1; then
     tail -1 "/tmp/grantfinder-engine-$suite.log"
@@ -33,7 +33,7 @@ for suite in foundation deadlines grants processing writer regressions direct di
 done
 # Netlify's default runs every AI step inside one request (direct job mode):
 # the processing, grants, writer and regressions suites must pass that way too.
-for suite in processing grants writer regressions checklist finder; do
+for suite in processing grants writer regressions checklist finder finder-results; do
   echo "== $suite (direct job mode)"
   if GRANTFINDER_JOB_MODE=direct npx tsx "../tests/engine/$suite.test.mts" > "/tmp/grantfinder-engine-$suite-direct.log" 2>&1; then
     tail -1 "/tmp/grantfinder-engine-$suite-direct.log"

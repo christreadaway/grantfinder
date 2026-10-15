@@ -37,6 +37,9 @@ MONTHS = "january february march april may june july august september october no
 EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 PHONE = re.compile(r"\(?\b\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b")
 CATEGORY_ORDER = {"catholic_school": 0, "mixed": 1, "church_parish": 2, "non_catholic": 3}
+APPLICANTS = {"school", "parish", "diocese", "teacher", "family", "nonprofit"}
+RELATIVE_TIME = re.compile(r"\b(today|tomorrow|yesterday|just (?:passed|closed|opened)|recently|this (?:fall|spring|summer|winter|month|week|year)|next (?:week|month)|upcoming|soon|currently|now (?:closed|open))\b", re.I)
+TEXAS_PLACE = re.compile(r"^(?:Texas|Central Texas|South Texas|North Texas)\b|\b(?:Diocese of (?:Austin|Dallas|Fort Worth|San Antonio|Houston|Galveston-Houston|El Paso|Lubbock|Amarillo|Beaumont|Brownsville|Corpus Christi|Laredo|San Angelo|Tyler|Victoria)|City of Austin|Travis|Williamson|Hays) (?:only|count(?:y|ies))", re.I)
 
 
 def norm(text):
@@ -214,6 +217,16 @@ class Merger:
         for key in ("description", "eligibility_notes"):
             if not out[key]:
                 self.note(f"warn {where}: empty {key}")
+        applicants = [a for a in (record.get("applicants") or []) if a in APPLICANTS]
+        if applicants:
+            out["applicants"] = list(dict.fromkeys(applicants))
+        else:
+            self.note(f"warn {where}: no applicants (who submits: school, parish, diocese, teacher, family, nonprofit)")
+        stale_words = RELATIVE_TIME.findall(" ".join(str(out.get(k) or "") for k in ("deadline_notes", "description", "eligibility_notes", "amount")))
+        if stale_words:
+            self.note(f"warn {where}: relative time words go stale ({', '.join(sorted(set(w.lower() for w in stale_words)))}): write explicit dates")
+        if out["geo_qualified"] == "Yes" and TEXAS_PLACE.search(out.get("geography") or ""):
+            self.note(f"warn {where}: geography {out['geography']!r} looks limited to Texas but geo_qualified is 'Yes' (use 'Yes - TX Only')")
         return out
 
 

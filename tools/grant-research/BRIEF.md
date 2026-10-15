@@ -21,7 +21,13 @@ link wastes a school's time; a fabricated grant is worse than none.
    that exclude religious organizations, private schools, or Texas go in `excluded` with the reason;
    they never go in `grants`.
 4. No names of individual people, no personal emails or phone numbers. `contact` is always "Via website".
-5. Do not mention any specific school or parish name.
+5. Do not mention any specific school or parish name, and don't write notes for one school ("so Austin
+   teachers qualify"): state the rule ("Texas teachers qualify").
+6. Never use relative time words in any field ("today", "tomorrow", "just passed", "recently", "this fall",
+   "upcoming", "soon", "now closed", "currently"): write explicit dates ("the 2026 window closed March 12, 2026;
+   the 2027 window is not posted yet"). Records are read for months after you write them.
+7. A window that has closed with no next date posted is NOT open: deadline "Check website", status
+   "Check deadline", and deadline_notes saying when it closed and that the next window isn't posted.
 
 ## Record format (one JSON object per program)
 ```
@@ -50,6 +56,9 @@ link wastes a school's time; a fabricated grant is worse than none.
       // Yes - TX Only = only Texas organizations may apply; Check eligibility = limited to some
       // regions, cities, counties or dioceses (say which in geography)
   "geography": "National | Texas | Central Texas (Travis, Williamson, Hays counties) | Mission dioceses only | ...",
+      // Anything limited to Texas or a Texas place (a diocese, city, county or region) is geo_qualified "Yes - TX Only".
+  "applicants": ["who submits the application: school | parish | diocese | teacher | family | nonprofit"],
+      // e.g. bishops apply -> ["diocese"]; teacher fellowships -> ["teacher"]; scholarships families apply for -> ["family"]
   "religious_eligibility": "eligible | secular_purpose_only | unclear",
       // eligible = religious schools/parishes may apply for this purpose;
       // secular_purpose_only = they may apply but money cannot support religious activity
