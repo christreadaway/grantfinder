@@ -206,7 +206,8 @@ check('Kenedy record loaded', Boolean(kenedy));
 check('Kenedy status OPEN', kenedy?.status === 'OPEN', kenedy?.status);
 check('Kenedy deadline "Annual: October 15"', kenedy?.deadline === 'Annual: October 15', kenedy?.deadline);
 check('Kenedy url is the application-process page', kenedy?.url === 'https://kenedy.org/grants/application-process/', kenedy?.url);
-check('Kenedy amount matches the seed', kenedy?.amount === kenedySeed.amount && /\$6,000 to \$50,000/.test(kenedy?.amount), kenedy?.amount);
+// The starter database is re-verified monthly: compare with the file, not with a copy of its text.
+check('Kenedy amount matches the seed (the full text, not cut)', typeof kenedySeed?.amount === 'string' && kenedySeed.amount.trim() !== '' && kenedy?.amount === kenedySeed.amount, { loaded: kenedy?.amount, file: kenedySeed?.amount });
 check('Kenedy eligibility notes kept in full', kenedy?.eligibility_notes === kenedySeed.eligibility_notes && /Exhibits A-H/.test(kenedy?.eligibility_notes), kenedy?.eligibility_notes?.slice(0, 80));
 check('Kenedy funds_for tags', JSON.stringify(kenedy?.funds_for) === JSON.stringify(kenedySeed.funds_for) && kenedy?.funds_for.includes('tuition_assistance'), kenedy?.funds_for);
 check('Kenedy is TX-only, mixed category, from the seed', kenedy?.geo_qualified === 'Yes - TX Only' && kenedy?.category === 'mixed' && kenedy?.source === 'seed', kenedy);

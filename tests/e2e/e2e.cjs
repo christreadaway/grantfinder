@@ -1859,6 +1859,17 @@ async function errors(browser) {
       info('(setting up: no profile yet, saving the basics through the API)');
       await api('PUT', '/api/processing/profile', { token, json: { organization_name: FX.ORG.name, organization_type: 'both', city: FX.ORG.city, state: 'TX' } });
     }
+    // Two grants the hard filters must rule out (the starter database only lists grants Catholic schools can apply to).
+    const ruledOut = await makeXlsx({
+      'Mixed Church-School': [
+        { 'Grant Name': 'Example Out-of-Area Grant', Funder: 'Example Northern Fund', Deadline: daysFromToday(45), URL: `${SITE}/grant-guidelines`, Status: 'OPEN', 'Geo Qualified': 'No' },
+        { 'Grant Name': 'Example Public Schools Only Grant', Funder: 'Example Public Fund', Deadline: daysFromToday(45), URL: `${SITE}/grant-guidelines`, Status: 'OPEN', 'Religious Eligibility': 'Religious organizations are not eligible' },
+      ],
+    });
+    const form = new FormData();
+    form.append('file', new Blob([ruledOut], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), 'ruled-out.xlsx');
+    const uploaded = await api('POST', '/api/grants/upload', { token, form });
+    check('two grants the hard filters must rule out were uploaded', uploaded.status === 200, `${uploaded.status} ${uploaded.text.slice(0, 200)}`);
     await goToStep(page, 'documents', 'sk-ant-test-e2e-3');
     await failNext('grant_match_batch_v1', 1000);
     try {
@@ -1873,6 +1884,12 @@ async function errors(browser) {
     info(`${labeled} of ${cards} match cards say Claude was unavailable`);
     check('grants Claude could not score say "Not AI-scored: Claude was unavailable (overloaded)"', labeled > 0, `${labeled} of ${cards}`);
     check('hard-filter results still work while Claude is down (Not Eligible grants)', (await tierCounts(page)).not_eligible >= 2, await tierCounts(page));
+    const outMatches = (((await api('GET', '/api/processing/match-results/latest', { token })).data || {}).matches || [])
+      .filter((m) => /^Example (Out-of-Area|Public Schools Only) Grant$/.test(m.grant_name));
+    check('...the out-of-area grant and the religious-exclusion grant are both Not Eligible, with their reasons',
+      outMatches.length === 2 && outMatches.every((m) => m.score_tier === 'not_eligible') &&
+        outMatches.some((m) => /geographic/i.test(m.explanation || '')) && outMatches.some((m) => /does not fund religious organizations/i.test(m.explanation || '')),
+      outMatches.map((m) => `${m.grant_name}: ${m.score_tier} ${m.explanation}`));
   });
 
   await step('Drafting while Claude keeps failing: finished sections are kept, the error says what to do', async () => {
