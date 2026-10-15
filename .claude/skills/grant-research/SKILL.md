@@ -32,11 +32,13 @@ Split the work so each agent has a manageable load (about 20 grants each):
   the full record with `action` keep/update/remove (+ `action_reason`), rolling past deadlines
   forward to the next cycle, and `renamed_from` when the funder renamed the program. The first
   verify agent also re-checks the `foundations` list and returns it as `"foundations"`.
-- **Discovery agents** (three): Catholic funders (national and Texas Catholic foundations, religious
+- **Discovery agents** (four): Catholic funders (national and Texas Catholic foundations, religious
   orders, fraternal societies, diocesan foundations), Texas funders (statewide, Austin / Central
   Texas, state programs open to private schools), national (corporate, foundation and federal
   programs open to private religious schools, including ESSA equitable services and nutrition
-  programs). Each gets: today's date, BRIEF.md, the full list of current grant names AND every name
+  programs), and AI in education (funders of AI literacy, teacher AI training, classroom AI pilots
+  and AI / computer science curricula that private religious schools or their teachers can apply
+  to; every record gets the `ai` tag). Each gets: today's date, BRIEF.md, the full list of current grant names AND every name
   in excluded.json (skip all of them), a target of 10-20 NEW verified programs, and its output file
   `$RESEARCH/new-<area>.json`.
 

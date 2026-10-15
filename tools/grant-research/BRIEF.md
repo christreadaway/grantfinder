@@ -65,7 +65,7 @@ When you are VERIFYING an existing record, also include `"action": "keep" | "upd
 `"action_reason"` for update/remove, and keep `grant_name` identical unless the funder renamed the
 program (then use the new name and add `"renamed_from": "<old name>"`).
 
-funds_for tags (use only these): academics, arts, athletics, capital, catechesis, catholic_schools,
+funds_for tags (use only these): academics, ai, arts, athletics, capital, catechesis, catholic_schools,
 classroom, community, education, emergency_relief, energy, environment, evangelization, facilities,
 faith_formation, gardens, health, human_services, hunger_relief, innovation, internet, library,
 literacy, mental_health, ministry, nutrition, operations, playground, programs, scholarships,

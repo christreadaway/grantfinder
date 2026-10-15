@@ -84,7 +84,7 @@ export function parseGrantDetails(data: Record<string, unknown>): Pick<
     geography: detailText(data.geography, 300),
     religious_eligibility: parseReligiousEligibility(data.religious_eligibility),
     focus_areas: detailList(data.focus_areas),
-    typical_award: typical && !/^not\s+published$/i.test(typical) ? typical : null,
+    typical_award: typical && !/^not\s+published\b/i.test(typical) ? typical : null,
     last_verified: isoDateOrNull(data.last_verified),
     confidence: confidence === 'verified' || confidence === 'partial' ? confidence : null,
     sources: sourceList(data.sources),

@@ -1,0 +1,170 @@
+# Grant research log
+
+What each monthly run of the grant-research skill changed in the starter database (newest first).
+
+## 2026-10-15
+
+89 grants (was 24).
+
+**Added:**
+- A. M. Pate Jr. Charitable Trust Grants
+- AFA Educator Grants (aerospace and STEM)
+- Advancing Our Mission Grants for Teachers and Staff
+- Area Grants Program
+- Arts Respond Performance Support
+- Beacon of Hope Scholarship Program
+- Bee Grant (with The Bee Cause Project)
+- Black and Indian Mission Office Diocesan Grants
+- Burdine Johnson Foundation Grants
+- Burkitt Foundation Perpetual Fund
+- CHRISTUS Fund Community Impact Fund
+- CNAMB and BCIM School and Religious Education Program Grants
+- Carson Scholars Scholarship (school nomination)
+- Catholic Campaign for Human Development Local Grants (Diocese of Austin)
+- Catholic Services Appeal (CSA) Parish and School Grant Program
+- Community Grants (Spring and Fall cycles)
+- Community Health Improvement Grants
+- Community Outdoor Outreach Program (CO-OP) Grants
+- ESSA Title I, Part A Equitable Services for Private School Students
+- ESSA Title II, Part A Equitable Services (teacher and principal professional development)
+- ESSA Title III, Part A Equitable Services (English learners and immigrant students)
+- ESSA Title IV, Part A Equitable Services (Student Support and Academic Enrichment)
+- Environmental Education Grants (prime awards and $5,000 subawards)
+- Friends of the Poor Grant Program
+- Fund for Teachers Fellowship
+- Garden Grant
+- Garland D. Rhoads Foundation Grants
+- Girls Giving Grants (g3) Youth Grant
+- Good Neighbor Citizenship Company Grants
+- H-E-B Excellence in Education Awards - Early Childhood Facility Award
+- Heritage Preservation Grant
+- Hispanic Impact Fund
+- Honda and Honda USA Foundation 2027 Programmatic Pillar Awards
+- IDEA Part B Equitable Services for Parentally Placed Private School Children with Disabilities
+- Impact Austin Grants (Community, Education, Health & Well-Being)
+- Inclusive Classroom Fund Grant (plus free classroom crowdfunding page)
+- Instrument Matching Grant
+- Joni Elaine Templeton Foundation Grants
+- Katherine C. Carmody Charitable Trust Grants
+- LCRA Community Grants
+- Lola Wright Foundation Grants
+- Moody Foundation General (Regional) Grants
+- Music Education & Community Program Grant (Music License Plate Grant)
+- Music Education Grants (competitive grants)
+- NEH Summer Institutes and Landmarks of American History and Culture Workshops for K-12 Educators (participant stipends)
+- National School Lunch Program, School Breakfast Program and Special Milk Program (private nonprofit schools)
+- National School Lunch and School Breakfast Programs (Texas)
+- Nonprofit Security Grant Program (NSGP) - Texas
+- PEC Community Grants
+- Partnership School Program (parish-sponsored tuition support)
+- Patrick Leahy Farm to School Grant Program
+- Pets in the Classroom Teacher Grants
+- Rural Parish Endowment Grants
+- School Library Book Grant
+- Sid W. Richardson Foundation Grants (Education)
+- Sprouting School Gardens Grant
+- Strake Foundation Grant Program
+- Strake Foundation Grants
+- Summerfield G. Roberts Foundation Grants (Texas History)
+- Systemic Change Grant Program
+- Teacher Development Grants and Academic Enrichment Grants
+- Texas Bar Foundation Grants
+- Texas Education Freedom Accounts (TEFA) - Private School Participation
+- Texas Preservation Trust Fund (TPTF) Grants
+- Thrivent Choice
+- Topfer Family Foundation Grants (Greater Austin)
+- Tuition Grant Program for Catholic Elementary Schools
+- Urban Forest Grant
+- Vital Worship, Vital Preaching Grants for Worshiping Communities
+- Voya Unsung Heroes Awards
+- Women's Fund
+- Women's Giving Circle Grants
+- Youth Garden Grant
+
+**Removed:**
+- Big Shoulders Fund Support: Serves only partner schools in the Chicago area and Northwest Indiana.
+- Captain Planet Foundation ecoSolution Grants: ecoSolution Grants are discontinued (not on the foundation's Grants or Programs pages, which say no external grant opportunities are available).
+- GHR Foundation Catholic Schools Grants: No open application: GHR works with a focused set of chosen partners, and its Catholic-school work is in the Twin Cities.
+- Hilton Fund for Sisters Grants: Does not fund 'diocesan or parish programs or schools in the United States' (or in other high-HDI countries); projects must be staffed by Catholic sisters; no construction, salaries or tuition; max $25,000.
+- Mabee Foundation Capital Grants: Guidelines exclude 'grants to a local, individual church body, congregation or parish' and generally exclude K-12 capital projects (except schools serving only students with intellectual or developmental disabilities).
+- Mary's Pence Grants: A parish or school will not qualify: applicants must be women-led gender-justice organizations with budgets of $250,000 or less, and capital expenses and direct-service projects without a systems-change component are not funded.
+- Mother Cabrini Health Foundation Grants: New York State only; a Texas parish or school cannot apply.
+- T-Mobile Hometown Grants: Program discontinued in 2026: the final application round closed March 31, 2026 and final grants were announced in June.
+
+**Changed:**
+- Catholic Extension Parish Support Grants: deadline Check website -> Annual: November 1
+- Catholic Extension Parish Support Grants: amount Varies -> Varies (no published range)
+- Catholic Extension Parish Support Grants: url https://www.catholicextension.org -> https://www.catholicextension.org/funding-information/how-to-request-funding/
+- Catholic Extension Parish Support Grants: religious_eligibility (none) -> eligible
+- Catholic Extension Parish Support Grants: geography (none) -> 87 pre-approved Extension (mission) dioceses only; in Texas: Amarillo, Beaumont, Brownsville, El Paso, Laredo, Lubbock, San Angelo and Tyler (not Austin, San Antonio, Galveston-Houston, Dallas, Fort Worth, Corpus Christi or Victoria)
+- Kenedy Memorial Foundation Grants: amount Typically $6,000 to $50,000 (2024 median about $25,000). Catholic requests over $50,000 need a three-fourths Board vote and are not favored. -> Varies; sectarian requests over $50,000 (non-sectarian over $25,000) need a three-fourths Board vote; fundraising-event support generally capped at $5,000
+- Kenedy Memorial Foundation Grants: religious_eligibility (none) -> eligible
+- Kenedy Memorial Foundation Grants: geography (none) -> Texas only (about 70% of discretionary Catholic grants go to South Texas)
+- Koch Foundation Grants: deadline Check website -> Annual: May 1
+- Koch Foundation Grants: amount Varies -> Varies: awards have ranged from $500 to $1,000,000; one-year funding only
+- Koch Foundation Grants: url https://www.thekochfoundation.org -> https://www.thekochfoundation.org/grant-making-guidelines/
+- Koch Foundation Grants: religious_eligibility (none) -> eligible
+- Koch Foundation Grants: geography (none) -> National (international funder, no geographic preference)
+- Raskob Foundation for Catholic Activities Grants: deadline Check website -> Annual: January 15
+- Raskob Foundation for Catholic Activities Grants: amount Varies -> Varies (no published range)
+- Raskob Foundation for Catholic Activities Grants: url https://www.rfca.org -> https://www.rfca.org/giving
+- Raskob Foundation for Catholic Activities Grants: religious_eligibility (none) -> eligible
+- Raskob Foundation for Catholic Activities Grants: geography (none) -> National
+- Scanlan Foundation Grants: deadline Check website -> 2026-12-15
+- Scanlan Foundation Grants: amount Varies -> Applicants may request any amount; the board may approve all or part
+- Scanlan Foundation Grants: url https://scanlanfoundation.org -> https://scanlanfoundation.org/grants/
+- Scanlan Foundation Grants: religious_eligibility (none) -> eligible
+- Scanlan Foundation Grants: geography (none) -> Texas only
+- Catholic Home Missions Appeal Grants: deadline Check website -> Annual: April 1
+- Catholic Home Missions Appeal Grants: amount Varies -> No minimum; maximum $125,000 per (arch)diocese
+- Catholic Home Missions Appeal Grants: url https://www.usccb.org/committees/catholic-home-missions -> https://www.usccb.org/committees/catholic-home-missions/grant-guidelines
+- Catholic Home Missions Appeal Grants: religious_eligibility (none) -> eligible
+- Catholic Home Missions Appeal Grants: geography (none) -> Home mission dioceses and eparchies only (2025 Texas recipient: Diocese of Brownsville)
+- CorWorks Parish Innovation Grants (OSV Institute for Catholic Innovation): deadline Check website -> 2026-11-20
+- CorWorks Parish Innovation Grants (OSV Institute for Catholic Innovation): amount Varies -> Up to $25,000 in seed funding, plus retreat travel, lodging, meals and training covered by OSV
+- CorWorks Parish Innovation Grants (OSV Institute for Catholic Innovation): url https://osvinstitute.com -> https://reply.osv.com/corworks
+- CorWorks Parish Innovation Grants (OSV Institute for Catholic Innovation): religious_eligibility (none) -> eligible
+- CorWorks Parish Innovation Grants (OSV Institute for Catholic Innovation): geography (none) -> National
+- CorWorks Parish Innovation Grants (OSV Institute for Catholic Innovation): status Check deadline -> OPEN
+- Dollar General Literacy Foundation Grants: amount Varies -> Youth Literacy up to $5,000; Summer Reading up to $3,000; Family and Adult Literacy up to $10,000
+- Dollar General Literacy Foundation Grants: url https://www.dgliteracy.org -> https://www.dgliteracy.org/grant-programs/
+- Dollar General Literacy Foundation Grants: religious_eligibility (none) -> eligible
+- Dollar General Literacy Foundation Grants: geography (none) -> National, within 15 miles of a Dollar General store in a state where Dollar General operates
+- E-Rate Program (Universal Service Schools and Libraries): amount 20-90% discount on eligible services -> Discounts of 20% to 90% on eligible services
+- E-Rate Program (Universal Service Schools and Libraries): religious_eligibility (none) -> eligible
+- E-Rate Program (Universal Service Schools and Libraries): geography (none) -> National
+- FEMA Nonprofit Security Grant Program (NSGP): amount Up to $200,000 per site -> Up to $200,000 (Texas FY2026 announcement; no minimum, no match)
+- FEMA Nonprofit Security Grant Program (NSGP): url https://www.fema.gov/grants/preparedness/nonprofit-security -> https://egrants.gov.texas.gov/fundingopp/page/nonprofit-security-grant-program-nsgp-federal-fiscal-year-2026
+- FEMA Nonprofit Security Grant Program (NSGP): religious_eligibility (none) -> eligible
+- FEMA Nonprofit Security Grant Program (NSGP): geography (none) -> National (Texas applicants apply through the Texas Public Safety Office)
+- KABOOM! Playground Grants: deadline Check website -> Rolling
+- KABOOM! Playground Grants: amount Varies -> Varies (playspace built with a KABOOM! funding partner)
+- KABOOM! Playground Grants: url https://kaboom.org -> https://kaboom.org/community-built-playspaces/community-built-playspace-grants/
+- KABOOM! Playground Grants: religious_eligibility (none) -> unclear
+- KABOOM! Playground Grants: geography (none) -> Listed metro areas only; in Texas: Dallas, Fort Worth, Houston and San Antonio (not Austin as of October 2026)
+- KABOOM! Playground Grants: status Check deadline -> Rolling
+- Laura Bush Foundation for America's Libraries: deadline Check website -> 2026-12-31
+- Laura Bush Foundation for America's Libraries: amount Up to $5,000 -> Not stated by funder; 2026 awardees reported $5,000 grants
+- Laura Bush Foundation for America's Libraries: url https://www.laurabushfoundation.com -> https://www.bushcenter.org/lbf-application-details
+- Laura Bush Foundation for America's Libraries: religious_eligibility (none) -> eligible
+- Laura Bush Foundation for America's Libraries: geography (none) -> National
+- Laura Bush Foundation for America's Libraries: status Check deadline -> OPEN
+- Meadows Foundation Grants: amount Varies -> Varies (no published range)
+- Meadows Foundation Grants: url https://mfi.org -> https://www.mfi.org/how-to-apply/
+- Meadows Foundation Grants: religious_eligibility (none) -> unclear
+- Meadows Foundation Grants: geography (none) -> Texas (up to 50% of giving in Dallas-Fort Worth)
+- Spark Good Local Grants: deadline Rolling -> 2026-11-30
+- Spark Good Local Grants: religious_eligibility (none) -> secular_purpose_only
+- Spark Good Local Grants: geography (none) -> National; apply to a Walmart or Sam's Club facility whose service area you serve
+- Spark Good Local Grants: status Rolling -> OPEN
+- Toshiba America Foundation K-12 Science/Math Grants: deadline Check website -> 2026-11-01
+- Toshiba America Foundation K-12 Science/Math Grants: amount Varies (small grants under ~$5,000 and larger grants) -> K-5: up to $1,000; 6-12: up to $5,000, or over $5,000 by larger-grant deadline
+- Toshiba America Foundation K-12 Science/Math Grants: url https://www.toshiba.com/taf -> https://www.toshiba.com/taf/
+- Toshiba America Foundation K-12 Science/Math Grants: religious_eligibility (none) -> secular_purpose_only
+- Toshiba America Foundation K-12 Science/Math Grants: geography (none) -> National
+- Toshiba America Foundation K-12 Science/Math Grants: status Check deadline -> OPEN
+- USDA Community Facilities Programs: amount Varies (grants and low-interest loans) -> Varies: low-interest direct loans and grants; grants on a graduated scale with higher percentages for small, low-income communities
+- USDA Community Facilities Programs: url https://www.rd.usda.gov/programs-services/community-facilities -> https://ruralhealthinfo.org/funding/91
+- USDA Community Facilities Programs: religious_eligibility (none) -> unclear
+- USDA Community Facilities Programs: geography (none) -> Rural areas and towns of up to 20,000 population (Austin and its suburbs do not qualify)
+

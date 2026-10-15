@@ -22,7 +22,7 @@ import sys
 from datetime import date, timedelta
 from pathlib import Path
 
-TAGS = set("""academics arts athletics capital catechesis catholic_schools classroom community education
+TAGS = set("""academics ai arts athletics capital catechesis catholic_schools classroom community education
 emergency_relief energy environment evangelization facilities faith_formation gardens health human_services
 hunger_relief innovation internet library literacy mental_health ministry nutrition operations playground
 programs scholarships security social_justice social_services special_education stem teacher_development
@@ -106,7 +106,7 @@ class Merger:
         out["deadline_notes"] = notes
         out["amount"] = str(record.get("amount") or "Varies").strip()
         typical = str(record.get("typical_award") or "").strip()
-        if typical and not re.fullmatch(r"not published\.?", typical, re.I):
+        if typical and not re.match(r"not published\b", typical, re.I):
             out["typical_award"] = typical
         out["description"] = str(record.get("description") or "").strip()
         out["contact"] = "Via website"
