@@ -882,6 +882,14 @@ const calMatches = [
   matchRecord('grant_0000000ca10b', LONG_NAME, 'excellent', 86, 'Annual: December 31', { funder: 'Fundación Ejemplo' }),
   matchRecord(LIVE_ID, 'Example Live Deadline Grant', 'good', 71, 'Rolling'),
 ];
+// The calendar only lists grants that are still in the person's database.
+await repo.updateGrants(userX.id, (list) => [
+  ...list,
+  ...calMatches.filter((m) => m.grant_id !== LIVE_ID).map((m) => grantRecord(userX.id, m.grant_id, m.grant_name, {
+    deadline: m.deadline, amount: m.amount, url: m.url, funder: m.funder, typical_award: m.typical_award ?? null,
+    deadline_notes: m.deadline_notes ?? null, focus_areas: m.focus_areas ?? [], eligibility_notes: m.eligibility_notes ?? null,
+  })),
+]);
 await saveResults(userX.id, 'session_finder_ics', calMatches);
 const expectedDue: Record<string, string> = {
   grant_0000000ca101: plusDays(30),
@@ -1071,7 +1079,7 @@ const csvExport = await api('POST', '/api/export', { token: tokenX, json: { sess
 const csvRows = parseCsv(csvExport.text.replace(/^﻿/, ''));
 const header = csvRows[0] ?? [];
 const NEW_COLUMNS = [
-  'Geography', 'Religious Eligibility', 'Deadline Notes', 'Typical Award', 'Funder Priorities', 'Eligibility Notes', 'Last Verified',
+  'Geography', 'Religious Eligibility', 'Deadline Notes', 'Typical Award', 'Funder Priorities', 'Eligibility Notes', 'Last Verified', 'Confidence',
   'Past Award Levels', 'Catholic School Track Record', 'Funder Outlook',
 ];
 check('CSV header ends with the new columns (grant facts, then the funder track record)', csvExport.status === 200 && same(header.slice(-NEW_COLUMNS.length), NEW_COLUMNS), header);
