@@ -48,6 +48,18 @@ An AI-powered grant matching platform that builds a comprehensive profile of a C
 - Stage-by-stage progress updates
 - Professional dark mode aesthetic
 
+### Results Page
+- **Top picks:** up to 5 strong matches whose deadline is still open, soonest deadline first, each with "Start application" (and "Investigate" when the funder has a web address)
+- **Deadline countdown:** every match shows its next due date and, when the date is known, a days-left badge (red within 14 days, amber within 45, "Past deadline")
+- **Sort and filter:** "Best match" or "Deadline soonest", and "Hide not eligible", remembered in the browser
+
+### GrantWriter (Application Writer)
+- **Application Checklist** at the top: due date and days left, the next step, each section's status, attachments and requirements to tick off, open gaps, and approvals
+- **Grant requirements** from pasted guidelines or a guidelines file (PDF, Word or text)
+- **Funder History:** paste notes, add up to 6 files, or let Claude research the web; Claude builds a funder profile (typical award, comparable grants they made, a suggested ask, what they don't fund) that the fit analysis, drafting and scoring use
+- **Fit and gap analysis, stakeholder questions, drafts in your voice, rubric self-score**, hand edits with earlier versions kept, and an "Add Materials" card for adding a document without leaving the writer
+- Nothing is ever sent to a funder automatically: you confirm the strategy before drafting, send stakeholder emails yourself, and export when you choose
+
 ### Export Options
 - **Markdown** — Formatted report with match details (a PDF request returns this Markdown for now, ready to print to PDF)
 - **CSV** — Spreadsheet-ready data
@@ -57,7 +69,7 @@ An AI-powered grant matching platform that builds a comprehensive profile of a C
 - **Engine:** TypeScript API routes inside the Next.js app (`frontend/src/server`). Each AI step runs inside a normal Netlify request (about a minute; long steps such as drafting or matching continue in parts on their own), so it works on any Netlify plan; plans with background functions can turn on an optional background function that gives each step up to 15 minutes. (The original Python FastAPI engine in `backend/` is reference only.)
 - **Frontend:** Next.js 16 with TypeScript
 - **Hosting & storage:** Netlify on any plan (website, API, AI steps) and Netlify Blobs (data)
-- **AI:** Claude API (Anthropic) for questionnaire generation, document extraction, profile generation, and grant matching
+- **AI:** Claude API (Anthropic) for the website scan, questionnaire generation, document extraction, grant matching, web discovery, funder research, and application drafting
 - **Auth:** Google OAuth (or temporary guest sign-in) with signed session tokens
 - **Security:** AES-256-GCM encryption for API keys
 - **Document Processing:** PDF (unpdf), DOCX (mammoth), TXT
@@ -73,10 +85,10 @@ An AI-powered grant matching platform that builds a comprehensive profile of a C
 
 ## 7. Current Status
 - **Built:** Complete engine in TypeScript (ported from the original FastAPI backend) with all routes and services
-- **Built:** Complete frontend (Next.js) with setup wizard, profile builder, matching results, and the GrantWriter (drafts you can refine or edit by hand, with earlier versions kept)
+- **Built:** Complete frontend (Next.js) with setup wizard, profile builder, matching results with Top picks and deadline countdowns, and the GrantWriter (Application Checklist, Funder History, drafts you can refine or edit by hand, with earlier versions kept)
 - **Built:** AI service integration with Claude API (AI steps as jobs that fit any Netlify plan, cost and token logging)
 - **Built:** 5-category Excel parser, starter database, Grants.gov search, AI web discovery
-- **Tested:** 1,012 automated engine checks with a mock Claude (9 suites, 561 checks, then 4 of them again in direct job mode, the way Netlify runs AI steps by default), a browser test of the whole journey (437 checks), and a local run on the Netlify runtime
+- **Tested:** 1,251 automated engine checks with a mock Claude (10 suites, 684 checks, then 5 of them again in direct job mode, the way Netlify runs AI steps by default), a browser test of the whole journey (443 checks), and a local run on the Netlify runtime
 - **Deploy:** Netlify only (`docs/deployment.md`); a live-key run with real data is the next milestone
 
 ## 8. Business Model

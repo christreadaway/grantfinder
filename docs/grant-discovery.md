@@ -88,6 +88,29 @@ enter the database from four sources, all merged with automatic deduplication
   finish reading in time, the scan says so and suggests trying again or
   "Enter the basics by hand".
 
+## The Results page
+
+- **Top picks** (at the top): up to 5 of your strongest matches (excellent or
+  good) whose deadline is still open, soonest deadline first; when there are
+  fewer than 5, possible matches fill in. Each says when it is due ("Due
+  [date] · N days left", "Rolling", or "Check the funder's site"), with
+  "Investigate" (opens the funder's page in a new tab; shown only for a real
+  web address) and "Start application" (or "Open application" when one
+  exists).
+- **Sort by** "Best match" or "Deadline soonest" (open deadlines first, then
+  rolling or unknown ones, then passed ones; ties by score), and **Hide not
+  eligible**. Both are remembered in this browser.
+- **Every match card** shows its next due date and a days-left badge (red
+  within 14 days, amber within 45, "Last day", "Past deadline"; no badge for
+  rolling or unknown deadlines).
+- **Computed on every read, never stored:** `GET /api/processing/match-results/latest`
+  and `GET /api/processing/match-results/{session_id}` add to each match
+  `next_deadline` (YYYY-MM-DD; "Annual: October 15" becomes the coming October
+  15; null for rolling or unreadable deadlines), `days_left` (whole days from
+  today, negative once passed, or null) and `deadline_passed`, counted for
+  today in `GRANTFINDER_TIMEZONE` (Central time by default), so the countdown
+  is right whenever the results are opened.
+
 ## Data model additions (used by the grant writer)
 
 `Grant` now carries `source`, `eligibility_notes`, and `funds_for` tags.
@@ -130,9 +153,10 @@ Direct-mode matching settings live in `services/ai.ts`
 Code: `frontend/src/server/services/discovery.ts`, `services/excel.ts`,
 `routes/grants.ts`, `routes/discovery.ts`, `handlers/discovery.ts`; profile
 building and matching in `services/ai.ts`, `routes/processing.ts`,
-`handlers/processing.ts`. Tests: `tests/engine/grants.test.mts` (130 checks),
-`tests/engine/processing.test.mts` (133 checks: website scan, questionnaire,
-documents, matching) and `tests/engine/direct-processing.test.mts` (20
+`handlers/processing.ts`; the Results page in `frontend/src/app/dashboard/page.tsx`.
+Tests: `tests/engine/grants.test.mts` (130 checks),
+`tests/engine/processing.test.mts` (140 checks: website scan, questionnaire,
+documents, matching, and the deadline fields computed when results are read) and `tests/engine/direct-processing.test.mts` (20
 checks: matching in parts, and the scan, Grants.gov, web discovery, documents
 and questionnaire inside one-minute steps).
 `cd ~/grantfinder && bash tests/engine/run_all.sh` also runs the grants and

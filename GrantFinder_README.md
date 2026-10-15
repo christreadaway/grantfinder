@@ -15,8 +15,8 @@ GrantFinder AI scans your website, reads your bulletins and meeting minutes, ask
 2. **Scan your website** — AI crawls your church/school site to learn about your organization (or type the basics if your site blocks bots)
 3. **Answer a smart questionnaire** — AI generates questions based on what grants actually require
 4. **Upload parish documents** — Bulletins, meeting minutes, newsletters, strategic plans, prior grant reports
-5. **Get matched** — Ranked recommendations with explanations of why each grant fits
-6. **Write the application** — requirements, fit and gap analysis, stakeholder questions, drafts in your voice that you can refine or edit by hand (earlier versions are kept), a rubric self-score, and Word/portal exports
+5. **Get matched** — Ranked recommendations with explanations of why each grant fits, Top picks with open deadlines (soonest first), and a days-left countdown on each match with a known deadline
+6. **Write the application** — an Application Checklist (due date, next step, what is ready), requirements (pasted or from a file), the funder's history (what they have actually funded, from your notes, files or a web search, with a suggested ask), fit and gap analysis, stakeholder questions, drafts in your voice that you can refine or edit by hand (earlier versions are kept), a rubric self-score, and Word/portal exports
 
 ### Terminal-Style Processing
 
@@ -101,7 +101,7 @@ Open [http://localhost:3000](http://localhost:3000)
 3. **Load grants**: the starter database, Grants.gov, AI web discovery, and/or your own Excel file
 4. **Add your website URLs**: church site and/or school site (or enter the basics by hand)
 5. **Answer the questions and add documents**, then **Find Matches**
-6. **Write Application** on any match to open the GrantWriter
+6. **Write Application** on any match (or **Start application** on a Top pick) to open the GrantWriter
 
 Your work is saved as you go. Come back later and the dashboard reopens it before showing a step:
 if you already have results it opens on Results; if Claude already wrote your questions it opens on

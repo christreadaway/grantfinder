@@ -26,8 +26,8 @@ Run the tests before opening a pull request:
 
 ```bash
 cd ~/grantfinder
-bash tests/engine/run_all.sh   # 9 engine suites (561 checks), then 4 again in direct job mode: 1,012 checks; mock Claude, no API key needed
-bash tests/e2e/run_e2e.sh      # browser test of the whole journey, 437 checks (setup at the top of the script)
+bash tests/engine/run_all.sh   # 10 engine suites (684 checks), then 5 again in direct job mode: 1,251 checks; mock Claude, no API key needed
+bash tests/e2e/run_e2e.sh      # browser test of the whole journey, 443 checks (setup at the top of the script)
 ```
 
 On Netlify, AI steps run inside normal requests by default (direct job mode). `run_all.sh`

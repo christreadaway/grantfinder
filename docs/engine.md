@@ -122,7 +122,7 @@ What keeps a step from being lost or paid for twice:
 | `json.ts` | Lenient JSON extraction from model output and coercion helpers |
 | `net.ts`, `pdf.ts` | Safe web fetching and crawling; PDF text extraction |
 | `deadlines.ts` | Deadline parsing and urgency |
-| `routes/*.ts` | API routes by area (auth, system, grants, discovery, processing, profile, export, writer) |
+| `routes/*.ts` | API routes by area (auth, system, grants, discovery, processing, profile, export, writer, checklist). The writer's include the guidelines file (`POST /api/writer/applications/{id}/grant-spec/upload`) and the funder history (`POST .../funder-profile`, `POST .../funder-profile/upload`, `DELETE .../funder-profile/files/{name}`); `routes/checklist.ts` serves `GET`/`PUT /api/writer/applications/{id}/checklist`; `POST /api/processing/match-grants/continue` scores grants a matching part didn't reach |
 | `services/*.ts` | Business logic and prompts by area |
 | `handlers/*.ts` | Job handlers by area (every Claude call; they run in all three job modes) |
 
@@ -134,9 +134,11 @@ apikeys/{userId}                  encrypted Claude API key
 grants/{userId}                   Grant[]
 foundations/{userId}              Foundation[]
 profiles/{userId}                 OrganizationProfile
-matches/{userId}/{sessionId}      MatchResults
+matches/{userId}/{sessionId}      MatchResults (next_deadline, days_left, deadline_passed are added when read, never stored)
 applications/{userId}/{appId}     Application
 writer/{userId}/...               writer artifacts (grant specs, fit analyses, gaps, intake, drafts, scorecards)
+writer/{userId}/funder/{grantId}  FunderRecord: funder history notes, files, web research and the funder profile (one per grant)
+writer/{userId}/checklist/{appId} Application Checklist: items ticked by hand and their notes
 jobs/{userId}/{jobId}             Job (input, status, result, error, AI call log, notes)
 ratelimit/{bucket}/{ipHash}       sign-in rate-limit window
 ```
@@ -145,8 +147,8 @@ ratelimit/{bucket}/{ipHash}       sign-in rate-limit window
 
 ```bash
 cd ~/grantfinder
-bash tests/engine/run_all.sh      # 9 suites: foundation, deadlines, grants, processing, writer, regressions, direct, direct-processing, security; then processing, grants, writer, regressions again in direct mode (1,012 checks)
-bash tests/e2e/run_e2e.sh         # real browser through the whole journey on a production build (437 checks)
+bash tests/engine/run_all.sh      # 10 suites: foundation, deadlines, grants, processing, writer, regressions, direct, direct-processing, checklist, security; then processing, grants, writer, regressions, checklist again in direct mode (1,251 checks)
+bash tests/e2e/run_e2e.sh         # real browser through the whole journey on a production build (443 checks)
 ```
 
 `direct.test.mts` and `direct-processing.test.mts` run with `GRANTFINDER_JOB_MODE=direct`, a set

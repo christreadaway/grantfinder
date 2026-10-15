@@ -22,6 +22,7 @@ Chris asked to run GrantFinder entirely on Netlify (no Railway; none of his othe
 5. **Dashboard and sign-in:** a session is cleared only on a real 401 (a 502 or Wi-Fi drop shows "Try again"); no silent replacement of a guest session; guest sign-out warns; saved work reopens before any step shows; returning users land on Results; saved questions and answers come back; already-read documents listed; "Add to my profile only (no new matching)"; phone layout and accessibility fixes.
 6. **Profile:** questionnaire answers merge (never erased); `GET /api/processing/questionnaire`; documents yield key facts (enrollment, percentages, prior grants) saved as evidence the writer drafts from; 60,000 characters read per document; the USCCB group ruling counts as 501(c)(3).
 7. **Client:** polling survives Wi-Fi drops and sleep; plain-English network errors; Safari-safe downloads and copies; heavy file libraries load on first use.
+7b. **Product pillars (Chris, Oct 15):** surface grants with deadlines and links (Top picks, sort by deadline, days-left badges); fast response (guidelines as a file, Add Materials in the writer); optimize the outcome with AI (Funder History: notes, files or web research become a funder profile with verified comparable grants, positioning and a suggested ask, feeding fit, drafts and score); show what's needed and the gaps (Application Checklist with due date, next step, section status, attachments to tick, gaps by owner).
 8. **Docs** updated line by line (engine, writer, discovery, deployment, template format, READMEs, specs, CLAUDE.md tests line); unused legacy `components/`, `hooks/`, `types/` deleted.
 
 ### Technical Details
@@ -30,7 +31,8 @@ Chris asked to run GrantFinder entirely on Netlify (no Railway; none of his othe
 - Agents used: three builders (writer, dashboard/sign-in, processing engine), two reviewers, one docs agent; every change re-verified by the lead before commit.
 
 ### Current Status
-- ✅ Engine: 1,012 checks (9 suites, plus 4 again in direct job mode); browser: 437 checks in both job modes; local Netlify runtime (no background function): 47 API checks, including drafting continued across 4 requests
+- ✅ Engine: 1,251 checks (10 suites, plus 5 again in direct job mode); browser: 443 checks (direct job mode, including Funder History); local Netlify runtime (no background function): 57 API checks, including drafting continued across 4 requests, Funder History, guideline PDF upload and the checklist
+- 🚧 Checklist, Top picks and uploads are covered by engine tests only (browser coverage next session)
 - ✅ No Railway anywhere; Netlify is the only host
 - ✅ Ready to merge to `main`
 - 🚧 Not yet deployed; the real-key run happens when Chris uses it on the deployed site
