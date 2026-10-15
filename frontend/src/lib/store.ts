@@ -64,6 +64,16 @@ interface GrantMatch {
     as_of?: string | null;
     sources: string[];
   } | null;
+  /** Who submits the application (empty or missing: not stated). */
+  applicants?: Array<'school' | 'parish' | 'diocese' | 'teacher' | 'family' | 'nonprofit'>;
+  /** What the funder itself says about religious organizations, word for word. */
+  religious_eligibility_text?: string | null;
+  /** The grant's current status (CLOSED once it is retired). */
+  status?: 'OPEN' | 'Rolling' | 'Check deadline' | 'CLOSED';
+  /** The grant is no longer in the person's database (retired or deleted); tier counts leave it out. */
+  grant_removed?: boolean;
+  /** Ruled out when the results were read (score now 0, not eligible, the explanation says why): the score it had when matched. */
+  score_before?: number | null;
 }
 
 interface MatchResults {

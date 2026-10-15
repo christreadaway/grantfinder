@@ -165,6 +165,11 @@ function logLine(status: ProcessingLog['status'], message: string): ProcessingLo
   return { timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }), status, message };
 }
 
+/** "1 grant", "0 grants", "97 grants" (plural defaults to noun + "s"). */
+function countOf(count: number, noun: string, plural = `${noun}s`): string {
+  return `${count} ${count === 1 ? noun : plural}`;
+}
+
 /** Reject with a timeout error (worded by errorDetail) if the engine doesn't answer in time. */
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -377,7 +382,14 @@ function saveResultsView(view: ResultsView) {
 }
 
 const daysLeftOf = (match: MatchItem): number | null => (typeof match.days_left === 'number' ? match.days_left : null);
-const isRolling = (match: MatchItem): boolean => /rolling/i.test(String(match.deadline ?? ''));
+const isRolling = (match: MatchItem): boolean => match.status === 'Rolling' || /rolling/i.test(String(match.deadline ?? ''));
+
+/** Its grant is gone from the person's database: shown muted, never offered for an application. */
+const isRemoved = (match: MatchItem): boolean => match.grant_removed === true;
+
+/** Ruled out when the results were read (closed, excluded, deadline passed): the score it had when matched. */
+const scoreBeforeOf = (match: MatchItem): number | null =>
+  typeof match.score_before === 'number' && Number.isFinite(match.score_before) ? match.score_before : null;
 
 /** "Oct 15, 2026" for a YYYY-MM-DD date (a calendar date, so no time zone can shift it a day). */
 function formatDate(iso: string): string {
@@ -416,22 +428,41 @@ function byDeadline(a: MatchItem, b: MatchItem): number {
   return byScore(a, b);
 }
 
+/** Removed matches always come last, whatever the sort. */
+const removedLast = (compare: (a: MatchItem, b: MatchItem) => number) =>
+  (a: MatchItem, b: MatchItem): number => Number(isRemoved(a)) - Number(isRemoved(b)) || compare(a, b);
+
 /**
  * Grants worth applying to first: excellent or good matches whose deadline
  * hasn't passed (possible ones fill in when there are fewer than five),
- * soonest deadline first, then best score.
+ * soonest deadline first, then best score. Never a grant that is no longer in
+ * the database, one ruled out (not eligible) or one whose program closed.
  */
 function topPicksOf(matches: MatchItem[]): MatchItem[] {
-  const open = matches.filter((m) => !m.deadline_passed);
+  const open = matches.filter(
+    (m) => !m.deadline_passed && !isRemoved(m) && m.score_tier !== 'not_eligible' && m.status !== 'CLOSED',
+  );
   const strong = open.filter((m) => m.score_tier === 'excellent' || m.score_tier === 'good');
   const possible = open.filter((m) => m.score_tier === 'possible').sort(byDeadline);
   const pool = strong.length >= TOP_PICKS ? strong : [...strong, ...possible.slice(0, TOP_PICKS - strong.length)];
   return [...pool].sort(byDeadline).slice(0, TOP_PICKS);
 }
 
-/** "N days left" on a match card: nothing for rolling or unknown deadlines. */
+/** A lookup table's own entry for a key (never an inherited one such as "constructor"). */
+function ownValue<T>(table: Record<string, T>, key: unknown): T | null {
+  return typeof key === 'string' && Object.prototype.hasOwnProperty.call(table, key) ? table[key] : null;
+}
+
+/**
+ * What the record says about religious organizations. "eligible" only means a religious
+ * organization may apply, not that every rule fits a Catholic school (who applies, where, for what).
+ */
 const RELIGIOUS_CHIP: Record<string, { label: string; tone: 'good' | 'caution' | 'muted' | 'bad'; title: string }> = {
-  eligible: { label: 'Catholic schools eligible', tone: 'good', title: 'The funder accepts applications from Catholic schools and parishes.' },
+  eligible: {
+    label: 'Religious orgs eligible',
+    tone: 'good',
+    title: "Religious organizations may apply. Check the funder's other rules (who applies, where, and for what) before you apply.",
+  },
   secular_purpose_only: {
     label: 'Non-religious uses only',
     tone: 'caution',
@@ -441,17 +472,84 @@ const RELIGIOUS_CHIP: Record<string, { label: string; tone: 'good' | 'caution' |
   excluded: { label: "Doesn't fund religious orgs", tone: 'bad', title: 'The funder does not fund religious organizations or schools.' },
 };
 
+/** The funder's own words about religious organizations, when the record kept them. */
+const funderWordsOf = (match: MatchItem): string | null =>
+  typeof match.religious_eligibility_text === 'string' && match.religious_eligibility_text.trim()
+    ? match.religious_eligibility_text.trim()
+    : null;
+
+/** The religious-eligibility chip: words that couldn't be read as a value still say "not stated". */
+function religiousChipOf(match: MatchItem): { label: string; tone: 'good' | 'caution' | 'muted' | 'bad'; title: string } | null {
+  const words = funderWordsOf(match);
+  const chip = ownValue(RELIGIOUS_CHIP, match.religious_eligibility ?? (words ? 'unclear' : null));
+  if (!chip) return null;
+  return words ? { ...chip, title: `${chip.title} Funder's words: "${words}"` } : chip;
+}
+
+/** Applicants a school or parish can't be: who submits the application instead. */
+const OTHER_APPLICANTS: Record<string, { alone: string; noun: string; sentence: string }> = {
+  diocese: { alone: 'Applies: diocese', noun: 'diocese', sentence: 'The diocese submits the application; ask your diocesan office.' },
+  teacher: { alone: 'Teachers apply', noun: 'teachers', sentence: 'Teachers apply for it themselves.' },
+  family: { alone: 'Families apply', noun: 'families', sentence: 'Families apply for it themselves.' },
+  nonprofit: {
+    alone: 'Nonprofits apply',
+    noun: 'nonprofits',
+    sentence: "A nonprofit organization submits the application; a Catholic school or parish usually applies under its own or its diocese's nonprofit status, so check with the funder.",
+  },
+};
+
+/**
+ * A muted chip when the school or parish can't submit the application itself (a teacher grant,
+ * a diocesan program, a family scholarship). Nothing when it can, or when the record doesn't say.
+ */
+function applicantsChipOf(match: MatchItem): { label: string; title: string } | null {
+  const applicants: unknown[] = Array.isArray(match.applicants) ? match.applicants : [];
+  if (!applicants.length || applicants.includes('school') || applicants.includes('parish')) return null;
+  const others = Array.from(new Set(applicants.filter((a): a is string => Boolean(ownValue(OTHER_APPLICANTS, a)))));
+  if (!others.length) return null;
+  const nouns = others.map((a) => OTHER_APPLICANTS[a].noun);
+  const label = others.length === 1
+    ? OTHER_APPLICANTS[others[0]].alone
+    : `Applies: ${nouns.slice(0, -1).join(', ')} or ${nouns[nouns.length - 1]}`;
+  const sentences = others.map((a) => OTHER_APPLICANTS[a].sentence).join(' ');
+  const title = others.includes('nonprofit') ? sentences : `Your school or parish can't apply for this itself. ${sentences}`;
+  return { label, title };
+}
+
+/** Grant categories (server/types.ts GrantCategory) in plain words. */
+const CATEGORY_LABELS: Record<string, string> = {
+  catholic_school: 'Catholic school',
+  mixed: 'Catholic (parish and school)',
+  church_parish: 'Catholic parish',
+  non_catholic: 'Non-Catholic funder',
+  foundations: 'Foundation',
+};
+
+function categoryLabel(category: unknown): string {
+  const key = String(category ?? '').trim();
+  const label = ownValue(CATEGORY_LABELS, key);
+  if (label) return label;
+  const words = key.replace(/_/g, ' ');
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : '';
+}
+
 /**
  * What a grant's record says about who can apply and how current it is: religious eligibility,
- * where applicants must be, when it was last checked, the typical award, deadline details, the
- * funder's priorities and the eligibility rules. Renders nothing for fields a record lacks.
+ * who submits the application, where applicants must be, when it was last checked, the typical
+ * award, deadline details, the funder's priorities and the eligibility rules. Renders nothing for
+ * fields a record lacks.
  */
 function GrantFacts({ match, compact = false }: { match: MatchItem; compact?: boolean }) {
-  const religious = match.religious_eligibility ? RELIGIOUS_CHIP[match.religious_eligibility] : null;
+  const religious = religiousChipOf(match);
+  const funderWords = funderWordsOf(match);
+  const applicants = applicantsChipOf(match);
   const chips = (
     <div className="flex flex-wrap items-center gap-2">
       {religious && (
         <span className={`info-chip ${religious.tone}`} title={religious.title}>{religious.label}</span>
+      )}
+      {applicants && (
+        <span className="info-chip muted" title={applicants.title} data-applicants-chip>{applicants.label}</span>
       )}
       {match.geography && (
         <span className="info-chip muted" title="Where applicants must be">
@@ -472,11 +570,14 @@ function GrantFacts({ match, compact = false }: { match: MatchItem; compact?: bo
       )}
     </div>
   );
-  if (compact) return religious || match.geography || match.last_verified ? <div className="mt-2">{chips}</div> : null;
+  if (compact) return religious || applicants || match.geography || match.last_verified ? <div className="mt-2">{chips}</div> : null;
   const focus = (match.focus_areas ?? []).filter(Boolean);
   return (
     <div className="mb-4 space-y-2 text-sm">
       {chips}
+      {funderWords && (
+        <p className="break-words"><span className="text-gray-400">Funder&apos;s words:</span> &ldquo;{funderWords}&rdquo;</p>
+      )}
       {match.typical_award && (
         <p className="break-words"><span className="text-gray-400">Typical award:</span> {match.typical_award}</p>
       )}
