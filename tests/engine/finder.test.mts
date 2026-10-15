@@ -191,10 +191,23 @@ misses = religiousMisses([
 ]);
 check('parseReligiousEligibility: empty, non-text and junk -> null', misses.length === 0, misses);
 
-// BUG CHECK: "No restrictions" means anyone may apply, but /^no\b/ reads it as excluded, so matching
-// would rule the grant out ("No need to apply") and web discovery would drop it.
+// "No restrictions" means anyone may apply: it must never rule a grant out ("No need to apply")
+// or make web discovery drop it.
 misses = ['No restrictions', 'No religious restrictions'].filter((input) => religious(input) === 'excluded').map((input) => `${JSON.stringify(input)} -> excluded`);
 check('parseReligiousEligibility: "No restrictions" / "No religious restrictions" are NOT read as excluded', misses.length === 0, misses);
+misses = religiousMisses([
+  ['No restrictions', 'eligible'],
+  ['Not excluded', 'eligible'],
+  ['Catholic schools eligible', 'eligible'], // the app's own CSV label reads back the same
+  ['Religious organizations eligible', 'eligible'],
+  ['Yes, religious schools may apply', 'eligible'],
+  ['Faith-based schools welcome', 'eligible'],
+  ['No, religious organizations are excluded', 'excluded'],
+  ['Does not fund religious organizations', 'excluded'], // the app's own label for excluded
+  ['Eligible for non-religious uses only', 'secular_purpose_only'], // the app's own label
+  ['Not stated: confirm with the funder', 'unclear'], // the app's own label
+]);
+check('parseReligiousEligibility: plain phrasings and the app\'s own labels read back correctly', misses.length === 0, misses);
 
 const dl = details.detailList;
 check('detailList: splits text on commas, semicolons and new lines, trimmed', same(dl('STEM, literacy; arts\nmusic '), ['STEM', 'literacy', 'arts', 'music']), dl('STEM, literacy; arts\nmusic '));

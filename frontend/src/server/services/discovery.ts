@@ -149,6 +149,8 @@ export interface SeedRefreshOutcome {
 }
 
 const DATA_FIELDS_SKIPPED = new Set(['id', 'user_id', 'created_at']);
+/** How a retired starter grant's note begins (it is kept, closed, only while an application uses it). */
+const RETIRED_NOTE_START = "No longer in GrantFinder's starter database";
 const normalName = (name: string) => name.toLowerCase().replace(/[^a-z0-9]/g, '');
 const sameData = (a: Grant, b: Grant) => {
   const pick = (grant: Grant) =>
@@ -213,15 +215,17 @@ export function refreshSeedGrants(
       merged.push(grant);
       continue;
     }
-    retiredNames.push(grant.grant_name);
+    const alreadyRetired = grant.status === 'CLOSED' && Boolean(grant.eligibility_notes?.startsWith(RETIRED_NOTE_START));
     if (keepIds.has(grant.id)) {
-      const note = `No longer in GrantFinder's starter database as of ${today}: the program ended or Catholic schools aren't eligible. Check the funder's site before applying.`;
-      merged.push({
-        ...grant,
-        status: 'CLOSED',
-        eligibility_notes: grant.eligibility_notes?.startsWith('No longer in GrantFinder') ? grant.eligibility_notes : [note, grant.eligibility_notes].filter(Boolean).join(' '),
-      });
+      // Kept for its application. A record an earlier load already closed stays as it is (not retired again).
+      if (alreadyRetired) {
+        merged.push(grant);
+        continue;
+      }
+      const note = `${RETIRED_NOTE_START} as of ${today}: the program ended or Catholic schools aren't eligible. Check the funder's site before applying.`;
+      merged.push({ ...grant, status: 'CLOSED', eligibility_notes: [note, grant.eligibility_notes].filter(Boolean).join(' ') });
     }
+    retiredNames.push(grant.grant_name);
   }
   merged.push(...added);
   return {

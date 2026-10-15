@@ -35,17 +35,23 @@ export function detailList(value: unknown, maxItems = 8): string[] {
 
 /**
  * eligible | secular_purpose_only | excluded | unclear, from the exact value or plain words
- * ("Yes", "religious organizations not eligible", "secular programs only"). Unknown -> null.
+ * ("Yes", "No restrictions", "Catholic schools eligible", "religious organizations not eligible",
+ * "secular programs only"). Unknown -> null. Order matters: "no restrictions" and "not excluded"
+ * mean anyone may apply, so they are read before the words that mean excluded, and a bare "No" only
+ * counts as excluded when it is the whole answer.
  */
 export function parseReligiousEligibility(value: unknown): ReligiousEligibility | null {
-  const raw = text(value).toLowerCase();
+  const raw = text(value).toLowerCase().replace(/\s+/g, ' ');
   if (!raw) return null;
   const exact = raw.replace(/[\s-]+/g, '_');
   if ((RELIGIOUS_ELIGIBILITY_VALUES as string[]).includes(exact)) return exact as ReligiousEligibility;
-  if (/secular|non[-\s]?religious|not\s+for\s+religious|no\s+religious\s+(?:activit|instruct|purpose)/.test(raw)) return 'secular_purpose_only';
-  if (/exclud|ineligible|not\s+eligible|^no\b|not\s+accept|does\s+not\s+fund/.test(raw)) return 'excluded';
-  if (/^(?:yes|y|true|eligible)\b/.test(raw)) return 'eligible';
-  if (/unclear|unknown|check|unsure|not\s+stated/.test(raw)) return 'unclear';
+  if (/\bno (?:religious )?restrictions?\b|\bnot (?:excluded|ineligible)\b/.test(raw)) return 'eligible';
+  if (/secular|non-? ?religious|not for religious|no religious (?:activit|instruct|purpose|use)/.test(raw)) return 'secular_purpose_only';
+  if (/^(?:no|n|false)\.?$/.test(raw) || /exclud|ineligible|not eligible|not accept|(?:does|do) not fund|cannot apply|can't apply/.test(raw)) {
+    return 'excluded';
+  }
+  if (/^(?:yes|y|true)\b/.test(raw) || /\beligible\b|\bmay apply\b|\bcan apply\b|\bwelcome\b/.test(raw)) return 'eligible';
+  if (/unclear|unknown|check|unsure|not stated/.test(raw)) return 'unclear';
   return null;
 }
 
