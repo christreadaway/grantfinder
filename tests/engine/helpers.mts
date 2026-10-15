@@ -14,6 +14,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { todayIso } from '../../frontend/src/server/deadlines.ts';
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const repoRoot = path.resolve(here, '..', '..');
 
@@ -34,7 +36,32 @@ export function setupEnv(name: string, extra: Record<string, string> = {}): stri
     CLAUDE_MODEL: 'claude-sonnet-5-5',
     ...extra,
   });
+  pinToday();
   return dir;
+}
+
+/**
+ * "Today" for the whole suite. GRANTFINDER_TODAY=YYYY-MM-DD (honored by the engine's
+ * deadlines.todayIso() in test mode) pretends it is another day, so the suites can prove they
+ * don't depend on the calendar:
+ *
+ *   cd ~/grantfinder && GRANTFINDER_TODAY=2028-11-20 bash tests/engine/run_all.sh
+ *
+ * Without it, today's real date is pinned when the suite starts, so a run that crosses
+ * midnight can't compute expectations for one day and get the engine's answers for the next.
+ * Tests compute deadlines from deadlines.todayIso()/addDaysIso(), never from fixed dates.
+ */
+function pinToday(): void {
+  const forced = (process.env.GRANTFINDER_TODAY || '').trim();
+  if (!forced) {
+    process.env.GRANTFINDER_TODAY = todayIso();
+    return;
+  }
+  const [y, m, d] = forced.split('-').map(Number);
+  const real = /^\d{4}-\d{2}-\d{2}$/.test(forced) && new Date(Date.UTC(y, m - 1, d)).toISOString().slice(0, 10) === forced;
+  if (!real) throw new Error(`GRANTFINDER_TODAY must be a real date as YYYY-MM-DD (got "${forced}")`);
+  process.env.GRANTFINDER_TODAY = forced;
+  if (todayIso() !== forced) throw new Error(`the engine ignored GRANTFINDER_TODAY=${forced} (is GRANTFINDER_TEST_MODE=1 set?)`);
 }
 
 // ---------------------------------------------------------------------------

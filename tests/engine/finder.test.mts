@@ -42,6 +42,8 @@ type Json = any;
 
 const today = deadlines.todayIso();
 const plusDays = (days: number) => deadlines.addDaysIso(today, days);
+/** Default deadline of the test grants: always about 4.5 months ahead of the suite's today (GRANTFINDER_TODAY in test mode). */
+const OPEN_DEADLINE = plusDays(137);
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
 
@@ -60,7 +62,7 @@ function grantRecord(userId: string, id: string, name: string, extra: Record<str
     user_id: userId,
     created_at: '2026-01-01T00:00:00.000Z',
     grant_name: name,
-    deadline: '2027-03-01',
+    deadline: OPEN_DEADLINE,
     amount: 'Up to $10,000',
     funder: `${name} Fund`,
     description: 'Example description.',
@@ -669,12 +671,12 @@ check('...with next_deadline and days_left recomputed from the new deadline', lF
 check('a deadline moved into the past -> negative days_left, deadline_passed true', lUnclear?.next_deadline === PAST_DEADLINE && lUnclear?.days_left === -2 && lUnclear?.deadline_passed === true, lUnclear);
 check(
   'a match whose grant was deleted keeps its saved values',
-  lBare?.deadline === '2027-03-01' && lBare?.amount === 'Up to $10,000' && lBare?.url === `https://example.org/${BARE_ID}` && lBare?.score === 72 &&
-    lBare?.next_deadline === '2027-03-01' && lBare?.days_left === deadlines.daysUntil('2027-03-01', today),
+  lBare?.deadline === OPEN_DEADLINE && lBare?.amount === 'Up to $10,000' && lBare?.url === `https://example.org/${BARE_ID}` && lBare?.score === 72 &&
+    lBare?.next_deadline === OPEN_DEADLINE && lBare?.days_left === 137 && lBare?.deadline_passed === false,
   lBare,
 );
 const storedM = await repo.getMatchResults(userM.id, sessionM);
-check('the overlay is computed on read: the saved results are unchanged', matchOf(storedM, FULL_ID)?.deadline === '2027-03-01' && matchOf(storedM, FULL_ID)?.amount === 'Up to $10,000', matchOf(storedM, FULL_ID));
+check('the overlay is computed on read: the saved results are unchanged', matchOf(storedM, FULL_ID)?.deadline === OPEN_DEADLINE && matchOf(storedM, FULL_ID)?.amount === 'Up to $10,000', matchOf(storedM, FULL_ID));
 const bySession = await api('GET', `/api/processing/match-results/${sessionM}`, { token: tokenM });
 check('GET /api/processing/match-results/:sessionId shows the same current details', bySession.status === 200 && matchOf(bySession.data, FULL_ID)?.deadline === NEW_DEADLINE && matchOf(bySession.data, FULL_ID)?.days_left === 20, matchOf(bySession.data, FULL_ID));
 
@@ -958,8 +960,8 @@ await repo.updateGrants(userX.id, (list) => [
   grantRecord(userX.id, UNCLEAR_ONLY_ID, 'Example Unclear Only Grant', { religious_eligibility: 'unclear', focus_areas: [] }),
 ]);
 await saveResults(userX.id, 'session_finder_csv', [
-  matchRecord(DETAILED_ID, 'Example Detailed Grant', 'excellent', 90, '2027-03-01'),
-  matchRecord(UNCLEAR_ONLY_ID, 'Example Unclear Only Grant', 'good', 75, '2027-03-01'),
+  matchRecord(DETAILED_ID, 'Example Detailed Grant', 'excellent', 90, OPEN_DEADLINE),
+  matchRecord(UNCLEAR_ONLY_ID, 'Example Unclear Only Grant', 'good', 75, OPEN_DEADLINE),
   matchRecord('grant_00000011fe04', 'Example No Details Grant', 'possible', 60, 'Rolling'),
 ]);
 

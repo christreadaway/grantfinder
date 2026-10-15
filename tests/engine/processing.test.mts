@@ -26,6 +26,8 @@ const ai = await import('../../frontend/src/server/services/ai.ts');
 const processingRoutes = await import('../../frontend/src/server/routes/processing.ts');
 const writer = await import('../../frontend/src/server/services/writer.ts');
 const deadlines = await import('../../frontend/src/server/deadlines.ts');
+/** The test grants' open deadline: about six months after the suite's today (follows GRANTFINDER_TODAY in test mode). */
+const OPEN_DEADLINE = deadlines.addDaysIso(deadlines.todayIso(), 180);
 
 // The docx package lives in frontend/node_modules.
 const frontendRequire = createRequire(path.join(repoRoot, 'frontend', 'package.json'));
@@ -114,7 +116,7 @@ function grant(userId: string, id: string, name: string, extra: Record<string, u
     id,
     user_id: userId,
     grant_name: name,
-    deadline: '2099-06-30',
+    deadline: OPEN_DEADLINE,
     amount: 'Up to $25,000',
     funder: `${name} Funder`,
     description: `Supports ${name.toLowerCase()} for Catholic parishes and schools.`,
@@ -1098,7 +1100,7 @@ check('GET match-results/latest returns the newest results', latest.status === 2
     check(
       `match results (${label}): a fixed date in the past -> that date, negative days, passed; a future date -> not passed`,
       pastFixed?.next_deadline === '2020-01-15' && pastFixed.days_left === dayCount('2020-01-15') && pastFixed.days_left < 0 && pastFixed.deadline_passed === true &&
-        futureFixed?.next_deadline === '2099-06-30' && futureFixed.days_left === dayCount('2099-06-30') && futureFixed.deadline_passed === false,
+        futureFixed?.next_deadline === OPEN_DEADLINE && futureFixed.days_left === dayCount(OPEN_DEADLINE) && futureFixed.days_left === 180 && futureFixed.deadline_passed === false,
       [fields(pastFixed), fields(futureFixed)],
     );
     check(

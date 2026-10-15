@@ -28,6 +28,9 @@ const deadlines = await import('../../frontend/src/server/deadlines.ts');
 const seedFile = JSON.parse(fs.readFileSync(path.join(repoRoot, 'frontend', 'src', 'server', 'data', 'seed_grants.json'), 'utf8'));
 const SEED_GRANTS: Array<Record<string, unknown>> = seedFile.grants;
 const SEED_FOUNDATIONS: Array<Record<string, unknown>> = seedFile.foundations;
+// The starter database is replaced over time: its size is read from the file, never hardcoded.
+const SEED_N = SEED_GRANTS.length;
+const FOUNDATION_N = SEED_FOUNDATIONS.length;
 
 // ---------------------------------------------------------------------------
 // Fake Grants.gov Search2 API
@@ -178,18 +181,19 @@ check('new user has no grants', empty.status === 200 && Array.isArray(empty.data
 // Seed database
 // ---------------------------------------------------------------------------
 
-check('seed file has 24 grants and 8 foundations', SEED_GRANTS.length === 24 && SEED_FOUNDATIONS.length === 8, { grants: SEED_GRANTS.length, foundations: SEED_FOUNDATIONS.length });
+check(`seed file has grants (${SEED_N}) and foundations (${FOUNDATION_N})`, Array.isArray(SEED_GRANTS) && Array.isArray(SEED_FOUNDATIONS) && SEED_N > 0 && FOUNDATION_N > 0, { grants: SEED_N, foundations: FOUNDATION_N });
 
 const seed1 = await api('POST', '/api/discovery/seed', { token: tokenA });
 check(
-  'seed load: found 24, added 24, duplicates 0, total 24',
-  seed1.status === 200 && seed1.data.source === 'seed' && seed1.data.found === 24 && seed1.data.added === 24 && seed1.data.duplicates === 0 && seed1.data.total_grants === 24,
+  `seed load: found ${SEED_N}, added ${SEED_N}, duplicates 0, total ${SEED_N}`,
+  seed1.status === 200 && seed1.data.source === 'seed' && seed1.data.found === SEED_N && seed1.data.added === SEED_N && seed1.data.duplicates === 0 && seed1.data.total_grants === SEED_N,
   seed1.data,
 );
-check('seed notes mention the 8 foundations', seed1.data?.notes?.[0] === 'Starter database also added 8 foundations to monitor', seed1.data?.notes);
+check('first seed load: updated 0, retired 0', seed1.data?.updated === 0 && seed1.data?.retired === 0, seed1.data);
+check(`seed notes mention the ${FOUNDATION_N} foundations`, seed1.data?.notes?.[0] === `Starter database also added ${FOUNDATION_N} foundations to monitor`, seed1.data?.notes);
 
 let grantsA = await grantsOf(tokenA);
-check('GET /api/grants returns the 24 seed grants', grantsA.length === 24 && grantsA.every((g) => g.source === 'seed' && g.user_id === userA.id && /^grant_[0-9a-f]{12}$/.test(g.id)), grantsA.length);
+check(`GET /api/grants returns the ${SEED_N} seed grants`, grantsA.length === SEED_N && grantsA.every((g) => g.source === 'seed' && g.user_id === userA.id && /^grant_[0-9a-f]{12}$/.test(g.id)), grantsA.length);
 const fieldsOk = grantsA.every((g) =>
   ['grant_name', 'deadline', 'amount', 'funder', 'description', 'contact', 'url', 'status', 'geo_qualified', 'category', 'source', 'created_at'].every((f) => typeof g[f] === 'string') &&
   Array.isArray(g.funds_for) && 'funder_stats' in g && 'eligibility_notes' in g,
@@ -213,19 +217,24 @@ const seedStatuses = new Set(SEED_GRANTS.map((g) => g.status));
 check('all seed statuses/geo/categories are valid enum values', grantsA.every((g) => types.GRANT_STATUSES.includes(g.status) && types.GEO_QUALIFIED_VALUES.includes(g.geo_qualified) && types.GRANT_CATEGORIES.includes(g.category)), [...seedStatuses]);
 
 const foundationsA = await api('GET', '/api/grants/foundations', { token: tokenA });
-check('8 seed foundations', foundationsA.status === 200 && foundationsA.data.length === 8 && foundationsA.data.every((f: { id: string }) => /^foundation_[0-9a-f]{12}$/.test(f.id)), foundationsA.data?.length);
+check(`${FOUNDATION_N} seed foundations`, foundationsA.status === 200 && foundationsA.data.length === FOUNDATION_N && foundationsA.data.every((f: { id: string }) => /^foundation_[0-9a-f]{12}$/.test(f.id)), foundationsA.data?.length);
 const koch = foundationsA.data.find((f: { foundation_name: string }) => f.foundation_name === 'Koch Foundation');
 check('seed foundation fields', koch?.website === 'https://www.thekochfoundation.org' && koch?.location === 'Gainesville, FL' && typeof koch?.notes === 'string', koch);
 
 const seed2 = await api('POST', '/api/discovery/seed', { token: tokenA });
 check(
-  'second seed load: added 0, duplicates 24, total still 24',
-  seed2.status === 200 && seed2.data.added === 0 && seed2.data.duplicates === 24 && seed2.data.total_grants === 24,
+  `second seed load: added 0, duplicates ${SEED_N}, total still ${SEED_N}`,
+  seed2.status === 200 && seed2.data.added === 0 && seed2.data.duplicates === SEED_N && seed2.data.total_grants === SEED_N,
+  seed2.data,
+);
+check(
+  'second identical seed load: updated 0, retired 0, no "Updated"/"Retired" notes',
+  seed2.data?.updated === 0 && seed2.data?.retired === 0 && Array.isArray(seed2.data?.notes) && !seed2.data.notes.some((n: string) => /^(Updated|Retired) /.test(n)),
   seed2.data,
 );
 check('second seed load adds no foundations', seed2.data?.notes?.[0] === 'Starter database also added 0 foundations to monitor', seed2.data?.notes);
 const foundationsA2 = await api('GET', '/api/grants/foundations', { token: tokenA });
-check('still 8 foundations after the second load', foundationsA2.data.length === 8, foundationsA2.data.length);
+check(`still ${FOUNDATION_N} foundations after the second load`, foundationsA2.data.length === FOUNDATION_N, foundationsA2.data.length);
 
 // ---------------------------------------------------------------------------
 // Stats, filters, one grant, sources
@@ -235,7 +244,7 @@ const stats = await api('GET', '/api/grants/stats', { token: tokenA });
 const expectCount = (field: string, value: string) => SEED_GRANTS.filter((g) => g[field] === value).length;
 check(
   'stats shape: totals and every enum key',
-  stats.status === 200 && stats.data.total_grants === 24 && stats.data.total_foundations === 8 &&
+  stats.status === 200 && stats.data.total_grants === SEED_N && stats.data.total_foundations === FOUNDATION_N &&
     JSON.stringify(Object.keys(stats.data.by_category)) === JSON.stringify(types.GRANT_CATEGORIES) &&
     JSON.stringify(Object.keys(stats.data.by_status)) === JSON.stringify(types.GRANT_STATUSES) &&
     JSON.stringify(Object.keys(stats.data.by_geo_qualified)) === JSON.stringify(types.GEO_QUALIFIED_VALUES),
@@ -254,9 +263,9 @@ check('?category=mixed filters', mixed.status === 200 && mixed.data.length === e
 const badCategory = await api('GET', '/api/grants?category=parishes', { token: tokenA });
 check('invalid ?category -> 422 with the allowed values', badCategory.status === 422 && /Invalid category "parishes"/.test(badCategory.data.detail) && /church_parish/.test(badCategory.data.detail), badCategory.data);
 const blankCategory = await api('GET', '/api/grants?category=', { token: tokenA });
-check('empty ?category= means no filter', blankCategory.status === 200 && blankCategory.data.length === 24, blankCategory.data?.length);
+check('empty ?category= means no filter', blankCategory.status === 200 && blankCategory.data.length === SEED_N, blankCategory.data?.length);
 const trailing = await api('GET', '/api/grants/', { token: tokenA });
-check('GET /api/grants/ (trailing slash) works', trailing.status === 200 && trailing.data.length === 24, trailing.status);
+check('GET /api/grants/ (trailing slash) works', trailing.status === 200 && trailing.data.length === SEED_N, trailing.status);
 
 const one = await api('GET', `/api/grants/${kenedy.id}`, { token: tokenA });
 check('GET /api/grants/:id returns the grant', one.status === 200 && one.data.id === kenedy.id && one.data.grant_name === kenedy.grant_name, one.data);
@@ -268,7 +277,7 @@ check("another user's grant -> 404", otherUser.status === 404, otherUser.data);
 const sources1 = await api('GET', '/api/discovery/sources', { token: tokenA });
 check(
   'sources: total and by_source after seeding',
-  sources1.status === 200 && sources1.data.total_grants === 24 && JSON.stringify(sources1.data.by_source) === JSON.stringify({ seed: 24 }),
+  sources1.status === 200 && sources1.data.total_grants === SEED_N && JSON.stringify(sources1.data.by_source) === JSON.stringify({ seed: SEED_N }),
   sources1.data,
 );
 check(
@@ -288,7 +297,7 @@ const gov1 = await call('POST', '/api/discovery/grants-gov', { token: tokenA, js
 check('Grants.gov runs as a background job', typeof gov1.jobId === 'string', gov1.jobId);
 check(
   'Grants.gov: found 3 (ids deduplicated across keywords, blank listings skipped), added 3',
-  gov1.status === 200 && gov1.data.source === 'grants_gov' && gov1.data.found === 3 && gov1.data.added === 3 && gov1.data.duplicates === 0 && gov1.data.total_grants === 27,
+  gov1.status === 200 && gov1.data.source === 'grants_gov' && gov1.data.found === 3 && gov1.data.added === 3 && gov1.data.duplicates === 0 && gov1.data.total_grants === SEED_N + 3,
   gov1.data,
 );
 check(
@@ -321,7 +330,7 @@ check(
 );
 
 const gov2 = await call('POST', '/api/discovery/grants-gov', { token: tokenA, json: { keywords: ['school security', 'food pantry'] } });
-check('Grants.gov again: added 0, duplicates 3', gov2.status === 200 && gov2.data.added === 0 && gov2.data.duplicates === 3 && gov2.data.total_grants === 27, gov2.data);
+check('Grants.gov again: added 0, duplicates 3', gov2.status === 200 && gov2.data.added === 0 && gov2.data.duplicates === 3 && gov2.data.total_grants === SEED_N + 3, gov2.data);
 
 govRequests.length = 0;
 await call('POST', '/api/discovery/grants-gov', { token: tokenA, json: { keywords: ['library'], max_results: 5 } });
@@ -848,7 +857,7 @@ const sourcesA = await api('GET', '/api/discovery/sources', { token: tokenA });
 const bySource = sourcesA.data.by_source;
 check(
   'sources: seed, grants_gov, web_discovery and upload all counted',
-  bySource.seed === 24 && bySource.grants_gov > 0 && bySource.web_discovery > 0 && bySource.upload === 6 &&
+  bySource.seed === SEED_N && bySource.grants_gov > 0 && bySource.web_discovery > 0 && bySource.upload === 6 &&
     sourcesA.data.total_grants === Object.values(bySource as Record<string, number>).reduce((a, b) => a + b, 0),
   bySource,
 );

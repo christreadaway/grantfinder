@@ -29,6 +29,9 @@ const store = await import('../../frontend/src/server/store.ts');
 const jobs = await import('../../frontend/src/server/jobs.ts');
 const ai = await import('../../frontend/src/server/services/ai.ts');
 const types = await import('../../frontend/src/server/types.ts');
+const deadlines = await import('../../frontend/src/server/deadlines.ts');
+/** An open deadline about six months after the suite's today (follows GRANTFINDER_TODAY in test mode). */
+const OPEN_DEADLINE = deadlines.addDaysIso(deadlines.todayIso(), 180);
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Json = any;
@@ -73,7 +76,7 @@ function grant(userId: string, id: string, name: string) {
     id,
     user_id: userId,
     grant_name: name,
-    deadline: '2099-06-30',
+    deadline: OPEN_DEADLINE,
     amount: 'Up to $25,000',
     funder: `${name} Funder`,
     description: `Supports ${name.toLowerCase()} for Catholic parishes and schools.`,
