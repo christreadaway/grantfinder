@@ -16,18 +16,20 @@ GrantFinder AI scans your website, reads your bulletins and meeting minutes, ask
 3. **Answer a smart questionnaire** — AI generates questions based on what grants actually require
 4. **Upload parish documents** — Bulletins, meeting minutes, newsletters, strategic plans, prior grant reports
 5. **Get matched** — Ranked recommendations with explanations of why each grant fits
-6. **Write the application** — requirements, fit and gap analysis, stakeholder questions, drafts in your voice, a rubric self-score, and Word/portal exports
+6. **Write the application** — requirements, fit and gap analysis, stakeholder questions, drafts in your voice that you can refine or edit by hand (earlier versions are kept), a rubric self-score, and Word/portal exports
 
 ### Terminal-Style Processing
 
 Watch the AI work in real-time with a terminal interface:
 
 ```
-[14:32:03] Scanning https://yourparish.org/about...
-[14:32:04] ✓ Extracted: Parish founded 1978
-[14:32:04] ✓ Extracted: ~1,200 registered families
-[14:32:05] Scanning /school...
-[14:32:06] ✓ Extracted: PreK-8, 250 students
+[14:32:03] → Processing 1 document(s)...
+[14:32:03] → Reading march-bulletin.pdf...
+[14:32:09] ✓ march-bulletin.pdf: 2 grant-relevant item(s) extracted
+[14:32:09] → → Playground equipment is 30 years old
+[14:32:09] → → 4 fact(s) for the application writer
+[14:32:10] → Scoring your grants and foundations against your profile...
+[14:33:05] ✓ === MATCHING COMPLETE ===
 ```
 
 ### Product Roadmap
@@ -94,15 +96,17 @@ Open [http://localhost:3000](http://localhost:3000)
 
 ### Setup in the App
 
-1. **Sign in with Google** (or **Continue as guest** when guest sign-in is on)
+1. **Sign in with Google** (or **Continue as guest** when guest sign-in is on; guest work is saved in that one browser only, so come back in the same browser and export what you need before you sign out)
 2. **Enter your Claude API key** — [Get one from Anthropic](https://console.anthropic.com/)
 3. **Load grants**: the starter database, Grants.gov, AI web discovery, and/or your own Excel file
 4. **Add your website URLs**: church site and/or school site (or enter the basics by hand)
 5. **Answer the questions and add documents**, then **Find Matches**
 6. **Write Application** on any match to open the GrantWriter
 
-Your work is saved as you go. Come back later and the dashboard picks up where you left off,
-with your applications listed at the top.
+Your work is saved as you go. Come back later and the dashboard reopens it before showing a step:
+if you already have results it opens on Results, your questions come back with your answers filled
+in, and your applications are listed at the top. If your internet drops, nothing is lost: click
+**Try again**.
 
 ### Deploy to the Web
 
@@ -119,7 +123,7 @@ Upload an Excel file (.xlsx) with these columns:
 | Column | Required | Description |
 |--------|----------|-------------|
 | Grant Name | ✅ | Name of the grant |
-| Granting Authority | ✅ | Foundation or organization |
+| Granting Authority | | Foundation or organization |
 | Deadline | | Date (YYYY-MM-DD) or "Rolling" |
 | Amount Min | | Minimum grant amount |
 | Amount Max | | Maximum grant amount |
@@ -153,16 +157,20 @@ Uploads merge into your database (nothing is deleted), up to 4 MB per file.
 - Capital campaign materials
 - Budget documents
 
-**Formats:** PDF, DOCX, TXT (up to 4 MB each). What Claude finds is added to your profile as
-evidence the GrantWriter can cite.
+**Formats:** PDF, DOCX, TXT, up to 4 MB each (for a bigger report, the Documents step explains how
+to save a smaller text copy). Claude reads the first 60,000 characters of each document, so upload
+the later pages of a long report as a separate file. What Claude finds, including up to 15 key facts
+per document (enrollment, results, prior grants), is added to your profile as evidence the
+GrantWriter can cite. The Documents step lists the files already in your profile; to add more
+without matching again, use **Add to my profile only (no new matching)**.
 
 ---
 
 ## 🎨 Interface
 
-- **Dark mode by default** (light mode available)
+- **Dark mode** (a light theme exists in the styles, but there is no switch for it yet)
 - **Terminal-style processing view** — watch the AI work in real-time
-- **Mobile responsive** — works on phone, tablet, desktop
+- **Mobile responsive** — works on phone, tablet, desktop (the browser test checks the dashboard, results and writer on a phone-sized screen: no sideways scrolling)
 
 ---
 

@@ -24,18 +24,21 @@ sheet uses "Foundation Name" (or "Name") instead of "Grant Name".
 
 Each grant sheet should have the following columns:
 
-## Required Columns
+## Required Column
 
 | Column Name | Description | Example |
 |------------|-------------|---------|
-| Grant Name | Name of the grant | "KaBOOM! Build It Yourself Grant" |
-| Description | What the grant funds | "Funds playground equipment for community organizations" |
+| Grant Name | Name of the grant ("Foundation Name" on the foundations sheet) | "KaBOOM! Build It Yourself Grant" |
+
+A row without a grant name is skipped. Everything else is optional, but matching works far
+better with a description.
 
 ## Optional Columns
 
 | Column Name | Description | Example |
 |------------|-------------|---------|
-| Granting Authority | Foundation or organization | "KaBOOM!" |
+| Description | What the grant funds (strongly recommended) | "Funds playground equipment for community organizations" |
+| Granting Authority | Foundation or organization (shown as "Unknown" when missing) | "KaBOOM!" |
 | Deadline | Due date (YYYY-MM-DD) or "Rolling" | "2026-05-01" or "Rolling" |
 | Amount Min | Minimum grant amount | 5000 |
 | Amount Max | Maximum grant amount | 15000 |

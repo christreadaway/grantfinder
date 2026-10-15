@@ -2,7 +2,7 @@
 
 **Repository:** `grantfinder`  
 **Filename:** `grantfinder-PRODUCT_SPEC.md`  
-**Last Updated:** 2026-10-14
+**Last Updated:** 2026-10-15
 
 ---
 
@@ -51,6 +51,7 @@ The following features have been implemented based on development sessions:
 22. GrantWriter (v2.0 application writer): requirements, fit/gap analysis, stakeholder intake, voice-conditioned drafting, rubric self-scoring, refinement, and Word/Markdown/portal exports with human approval gates (`docs/grant-writer.md`)
 23. Recurring "Annual: October 15" deadlines and the Kenedy Memorial Foundation record in the starter database
 24. October 2026: moved everything onto Netlify. The engine was ported to TypeScript (`frontend/src/server`), AI steps run as background jobs, data and sign-ins persist in Netlify Blobs, and the dashboard resumes saved work (`docs/engine.md`, `docs/deployment.md`)
+25. October 2026: GrantWriter hand edits with earlier versions and "Restore this version", live limit and banned-phrase checks at export, `[NEEDS INPUT]` placeholders listed per section, and "Draft missing sections" after a partial run (`docs/grant-writer.md`). Questionnaire answers are kept across new question sets, documents add key facts the writer drafts from, and sign-ins survive network blips (`docs/grant-discovery.md`, `docs/deployment.md`)
 
 ---
 

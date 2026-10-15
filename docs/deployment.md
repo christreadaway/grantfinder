@@ -78,7 +78,9 @@ needs no Anthropic key of its own.
 Guest sign-in is tied to one browser. Google sign-in follows you to any computer.
 
 **Important:** a guest account and a Google account are separate. If you start an application as
-a guest, finish it as that guest in the same browser, or export your work first.
+a guest, finish it as that guest in the same browser, or export your work first. After you sign out
+of a guest session, or start a new guest session in the same browser, the earlier guest work can't
+be opened again from the screens; GrantFinder asks before either one.
 
 1. Go to [console.cloud.google.com](https://console.cloud.google.com) and create a project (or pick one).
 2. Open **APIs & Services**, then **Credentials**. If Google asks you to configure the consent screen
@@ -107,17 +109,21 @@ a guest, finish it as that guest in the same browser, or export your work first.
 | Google popup says the origin isn't allowed | Your Netlify address isn't in the Google client | Step 5.4 |
 | **Anthropic rejected your Claude API key** | Typo or revoked key | Re-enter the key on the dashboard's API Key step |
 | **Your Anthropic account is out of API credits** | No balance left | Add credits at console.anthropic.com (Billing), then retry |
+| **Your Anthropic account reached its monthly API spending cap** (or **hit a spending limit that was set on it**) | A spending limit on the Anthropic account | Raise it at platform.claude.com/settings/billing (the message names the page), then try again |
+| **Can't reach GrantFinder right now**, **Couldn't reach GrantFinder to reopen your saved work**, **Lost the connection to GrantFinder**, or **Lost contact with GrantFinder while this step was running** | The internet connection dropped, or Netlify had a brief error. Your sign-in and saved work are kept, and a step that was running keeps running on Netlify | Check your internet, then click **Try again** (or the same button again: a running step is picked back up, not started twice). Don't start a new guest session; it would be empty |
+| Sign-in page says **Your session ended** | The sign-in expired (sessions last 30 days) or was refused, for example after `SECRET_KEY` changed | Sign in with Google again and your work is there. A guest session can't be reopened |
 | **Couldn't start the background worker** | The AI worker function wasn't deployed | Netlify > **Logs** > **Functions** should list `grantfinder-jobs-background`; if not, **Trigger deploy** |
-| **This step ran out of time** | An AI step passed Netlify's 15-minute limit | Try again. Drafting keeps finished sections and does the missing ones first |
+| **This step ran out of time**, **Claude was still working when this step reached its time limit**, or **The background worker stopped unexpectedly** | An AI step reached Netlify's 15-minute limit, or its worker stopped | Try it again; anything that finished was saved. In the writer, **Draft missing sections** drafts only the sections with no draft yet |
 | Website scan says the site **blocks automated reading** | Many parish sites block bots | Use **Enter the basics by hand** or **Skip to questions**; upload documents for detail |
 | Writer says **requirements were inferred** | The funder's page couldn't be read | Paste the guidelines under **Paste guidelines and re-analyze** |
-| An upload says **larger than 4 MB** | Netlify's request size limit | Save a smaller copy (fewer images or pages) and upload again |
+| An upload says it is **larger than 4 MB** (or over the **limit 4 MB**) | Netlify's request size limit | Save a smaller copy (fewer images or pages) and upload again. For a big report, add a plain-text (.txt) copy instead; the Documents step explains how |
 
 ## Where the logs are
 
-- **Easiest:** the dashboard's **Copy debug report** link (top right) and the writer's
-  **Copy debug bundle** button. Each copies a paste-ready report of recent steps, every error with
-  its internal detail, and the AI calls behind it. No keys or secrets are included.
+- **Easiest:** the dashboard's **Copy debug report** link (top right; only a bug icon on a phone)
+  and the writer's **Copy debug bundle** button. Each copies a paste-ready report of recent steps,
+  every error with its internal detail, and the AI calls behind it. No keys or secrets are included.
+  If the browser blocks copying, the report downloads as a `.md` file instead.
 - **Netlify:** **Logs**, then **Functions**. `___netlify-server-handler` is the engine API;
   `grantfinder-jobs-background` is the AI worker. Every line is one JSON record.
 - **Website build:** **Deploys**, then the deploy's log.
@@ -129,9 +135,11 @@ Paste any of these into Claude Code when something breaks.
 
 - **Each AI step can run up to 15 minutes** (Netlify's background function limit). Matching and
   drafting are built to finish well inside it and keep partial work if they don't.
-- **Uploads are limited to 4 MB** each.
-- **Guest accounts live in one browser.** Clearing the browser's site data loses access to that
-  guest's work. Use Google sign-in for anything you'll come back to on another computer.
+- **Uploads are limited to 4 MB** each, and Claude reads the first 60,000 characters of each
+  document. For a long report, upload the later pages as a separate file.
+- **Guest accounts live in one browser.** Clearing the browser's site data, or signing out, loses
+  access to that guest's work. Use Google sign-in for anything you'll come back to on another
+  computer.
 - **Data stays in Netlify Blobs** across deploys. To wipe everything, delete the `grantfinder`
   store under **Blobs** in the Netlify site menu.
 - **Netlify's free plan is enough** for one school. Each AI step's progress checks count as

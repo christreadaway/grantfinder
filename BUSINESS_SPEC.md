@@ -19,9 +19,9 @@ An AI-powered grant matching platform that builds a comprehensive profile of a C
 
 ### Organization Profile Building (4 Input Sources)
 1. **Website Scanning** — Async crawler extracts org info, programs, demographics from the school/parish website
-2. **AI Questionnaire** — Claude generates targeted questions based on grant categories; dynamic follow-ups based on answers
+2. **AI Questionnaire** — Claude writes up to 20 targeted questions based on the grants in the database; answers are saved by question text, so a new set of questions keeps (and pre-fills) earlier answers
 3. **Free-Form Notes** — Open text area for additional context, unique programs, special circumstances
-4. **Document Upload** — PDF, DOCX, TXT extraction for annual reports, budgets, accreditation documents
+4. **Document Upload** — PDF, DOCX, TXT extraction for annual reports, budgets, accreditation documents; up to 15 key facts per document become evidence the GrantWriter drafts from
 
 ### Grant Database (5 Categories)
 1. **Church/Parish** — Religious organization-specific grants
@@ -33,7 +33,7 @@ An AI-powered grant matching platform that builds a comprehensive profile of a C
 ### Grant Data Structure
 - **Required Fields:** Grant Name, Deadline, Amount, Funder, Description, Contact, URL, Status, Geo Qualified
 - **Optional:** Funder Stats (historical giving data)
-- **Upload:** Excel/CSV with flexible column mapping
+- **Upload:** Excel (.xlsx) with flexible column mapping
 
 ### AI Matching Engine
 - **Probability Scoring (0-100%)** with weighted factors:
@@ -44,14 +44,14 @@ An AI-powered grant matching platform that builds a comprehensive profile of a C
   - Completeness (5%) — How much profile data is available for matching?
 
 ### Terminal-Style Processing UI
-- Real-time processing status with SSE streaming
+- Real-time progress from background jobs (the website checks each running step every 1-3 seconds, and keeps checking through a Wi-Fi drop)
 - Stage-by-stage progress updates
 - Professional dark mode aesthetic
 
 ### Export Options
-- **Markdown** — Formatted report with match details
+- **Markdown** — Formatted report with match details (a PDF request returns this Markdown for now, ready to print to PDF)
 - **CSV** — Spreadsheet-ready data
-- **JSON** — Machine-readable format for integrations
+- **Grant applications (GrantWriter)** — Word (.docx), Markdown, portal paste-in text with per-field counts, and a JSON form-field map
 
 ## 5. Tech Stack
 - **Engine:** TypeScript API routes inside the Next.js app (`frontend/src/server`) plus a Netlify background function for long AI work (the original Python FastAPI engine in `backend/` is reference only)
@@ -73,10 +73,10 @@ An AI-powered grant matching platform that builds a comprehensive profile of a C
 
 ## 7. Current Status
 - **Built:** Complete engine in TypeScript (ported from the original FastAPI backend) with all routes and services
-- **Built:** Complete frontend (Next.js) with setup wizard, profile builder, matching results, and the GrantWriter
+- **Built:** Complete frontend (Next.js) with setup wizard, profile builder, matching results, and the GrantWriter (drafts you can refine or edit by hand, with earlier versions kept)
 - **Built:** AI service integration with Claude API (background jobs, cost and token logging)
 - **Built:** 5-category Excel parser, starter database, Grants.gov search, AI web discovery
-- **Tested:** 406 automated engine checks with a mock Claude, a browser test of the whole journey, and a local run on the Netlify runtime
+- **Tested:** 515 automated engine checks (7 suites) with a mock Claude, a browser test of the whole journey (436 checks), and a local run on the Netlify runtime
 - **Deploy:** Netlify only (`docs/deployment.md`); a live-key run with real data is the next milestone
 
 ## 8. Business Model

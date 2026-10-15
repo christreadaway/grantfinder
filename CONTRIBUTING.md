@@ -15,8 +15,8 @@ The website and the engine are one Next.js app in `frontend/` (the engine is Typ
 `frontend/src/server`; see `docs/engine.md`). The old Python engine in `backend/` is reference only.
 
 ```bash
-cd frontend
-npm install
+cd ~/grantfinder/frontend
+sfw npm install            # if sfw isn't installed, use: npm install
 cp .env.example .env.local
 # Optional: edit .env.local (guest sign-in is on by default)
 npm run dev
@@ -25,13 +25,14 @@ npm run dev
 Run the tests before opening a pull request:
 
 ```bash
-bash tests/engine/run_all.sh   # engine suites, mock Claude, no API key needed
-bash tests/e2e/run_e2e.sh      # browser test of the whole journey (setup at the top of the script)
+cd ~/grantfinder
+bash tests/engine/run_all.sh   # 7 engine suites (515 checks), mock Claude, no API key needed
+bash tests/e2e/run_e2e.sh      # browser test of the whole journey, 436 checks (setup at the top of the script)
 ```
 
 ## Code Style
 
-- **TypeScript/JavaScript**: Follow ESLint configuration (`npx eslint src/server` must stay clean)
+- **TypeScript/JavaScript**: Follow ESLint configuration (`cd ~/grantfinder/frontend && npx eslint src/server` must stay clean)
 - **Python** (legacy `backend/` only): Follow PEP 8 guidelines
 - **Commits**: Use clear, descriptive commit messages
 

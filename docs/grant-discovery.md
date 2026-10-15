@@ -19,6 +19,8 @@ enter the database from four sources, all merged with automatic deduplication
 2. Complete the profile (website scan, questionnaire, documents, free-form notes).
    If your website blocks automated reading, use "Enter the basics by hand" or
    "Skip to questions" on the Website step; uploaded documents add the detail.
+   To add documents later without matching again, use "Add to my profile only
+   (no new matching)" on the Documents step.
 3. Run Grants.gov search + AI web discovery — both use the profile to target
    the search, so they find more relevant grants after the profile exists.
 4. Optionally upload your own Excel on top.
@@ -33,6 +35,12 @@ enter the database from four sources, all merged with automatic deduplication
 - **Full context scoring**: questionnaire answers (verbatim Q&A pairs),
   free-form notes, previous grants, and student count now feed the scoring
   prompt. Previously questionnaire answers and free-form text were discarded.
+- **Answers are never erased**: answers are saved by question text and merged,
+  so answering a new set of questions updates repeated questions in place and
+  keeps every earlier answer (a blank answer changes nothing). The 501(c)(3)
+  and food pantry fields change only on a clear yes or no; an answer that
+  mentions the USCCB group ruling (or the Official Catholic Directory) counts
+  as yes for 501(c)(3).
 - **Foundations are matched**: Category 5 foundations are converted to
   monitorable opportunities and scored alongside grants.
 - **Coverage guarantee**: every grant in the database gets a match entry.
@@ -42,21 +50,39 @@ enter the database from four sources, all merged with automatic deduplication
   rather than producing placeholder scores.
 - **Parallel scoring**: 10 grants per Claude call, 4 calls in flight. Matching
   runs as a background job (up to 15 minutes); it stops starting new batches
-  after 12 minutes and marks anything left as "Not AI-scored".
-- **Documents feed the writer**: every need or signal extracted from an
-  uploaded document is also saved to the profile's evidence list, which the
-  grant writer cites.
+  after 12 minutes and marks anything left as "Not AI-scored". A batch Claude
+  couldn't score because of a passing problem (overloaded, rate limit,
+  timeout, network) is tried once more, one batch at a time, before it is
+  labeled "Not AI-scored".
+- **Documents feed the writer**: Claude reads up to the first 60,000
+  characters of each uploaded document and returns its needs and signals plus
+  up to 15 key facts a grant writer can cite (enrollment, percentages,
+  outcomes, prior grants), in the document's own numbers and words. Every item
+  and key fact is saved to the profile's evidence list, which the grant writer
+  drafts from. Evidence is deduplicated by text (uploading the same document
+  again adds nothing) and capped at 200 items: when a document pushes it over,
+  the oldest document items go first, and items you or the writer added are
+  never removed.
 - **Deeper website scan**: the org's site is crawled (homepage + up to 5
   grant-relevant internal pages like /about, /school, /ministries, /news)
-  instead of fetching just the single URL.
+  instead of fetching just the single URL. Scanning the same addresses again
+  while a scan runs joins that scan; scanning different (corrected) addresses
+  starts a new scan, and once it has started the older scan is not saved to
+  the profile.
 
-## Data model additions (for the future grant writer)
+## Data model additions (used by the grant writer)
 
 `Grant` now carries `source`, `eligibility_notes`, and `funds_for` tags.
 `OrganizationProfile` now carries `questionnaire_answers` (verbatim Q&A) and
 `free_form_notes`. These give an application-drafting feature (v2.0 PRD) the
 raw material it needs: what the funder requires, and everything the user told
-us about the organization.
+us about the organization. A document's extraction result also carries
+`key_facts` (at most 15), which become profile evidence.
+
+The questions Claude wrote are saved per user: `GET /api/processing/questionnaire`
+returns them (404 "No questionnaire yet" before the first set), so the
+dashboard shows them again after a reload, with earlier answers filled in,
+without a new AI call.
 
 ## Configuration
 
@@ -72,5 +98,8 @@ Constants in `frontend/src/server/config.ts`:
 - `WEBSITE_CRAWL_MAX_PAGES` — pages crawled per org website
 
 Code: `frontend/src/server/services/discovery.ts`, `services/excel.ts`,
-`routes/grants.ts`, `routes/discovery.ts`, `handlers/discovery.ts`. Tests:
-`tests/engine/grants.test.mts` (130 checks).
+`routes/grants.ts`, `routes/discovery.ts`, `handlers/discovery.ts`; profile
+building and matching in `services/ai.ts`, `routes/processing.ts`,
+`handlers/processing.ts`. Tests: `tests/engine/grants.test.mts` (130 checks)
+and `tests/engine/processing.test.mts` (132 checks: website scan,
+questionnaire, documents, matching).
