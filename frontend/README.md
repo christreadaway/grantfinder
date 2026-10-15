@@ -34,6 +34,6 @@ bash tests/e2e/run_e2e.sh
 
 The engine tests use a mock Claude (no API key needed): 10 suites (693 checks), then the processing,
 grants, writer, regressions and checklist suites again in direct job mode, the way Netlify runs AI
-steps by default (567 more, 1,260 checks in all). The browser test (443 checks) has a one-time setup at the
+steps by default (567 more, 1,260 checks in all). The browser test (453 checks) has a one-time setup at the
 top of `tests/e2e/run_e2e.sh`; put `E2E_JOB_MODE=direct` in front of it to run AI steps in direct
 mode too.

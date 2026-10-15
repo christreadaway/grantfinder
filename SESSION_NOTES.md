@@ -9,13 +9,16 @@ This file contains a complete history of Claude Code sessions for this repositor
 
 ---
 
-## 2026-10-15 (afternoon) — First Netlify Deploy: Claude Key Rejected by Netlify's AI Gateway, Fixed
+## 2026-10-15 (afternoon) — First Netlify Deploy: AI Gateway Key Fix, Sonnet 5.5, Paste Text as a Document
 
 ### What We Built
 - Merged `claude/relaxed-curie-sj0zvu` to `main` (PR #2) after re-running every gate on the exact commit (1,251 engine checks, typecheck, lint).
 - First deploy failed on purpose (`SECRET_KEY is not set`); Chris added `SECRET_KEY` and `ALLOW_GUEST_LOGIN`.
 - Then the API Key step said **Anthropic rejected this API key** for an active key. Root cause: Netlify's AI Gateway injects `ANTHROPIC_BASE_URL` (and `ANTHROPIC_API_KEY`) into every function on credit-based plans. The engine passed `ANTHROPIC_BASE_URL` to the SDK (and the SDK reads it by default anyway), so the key went to Netlify's gateway, which refused it with a 401. Anthropic never saw the key.
 - Fix: every Claude client now gets `baseURL: https://api.anthropic.com` explicitly and `authToken: null`; `ANTHROPIC_BASE_URL` is ignored; tests use `GRANTFINDER_CLAUDE_BASE_URL`. The rejected-key message now quotes what Anthropic said, `api_key_rejected` is logged with host, status and request id, and `/api/health` plus the debug report show `claude_api`.
+- Default model is now Claude Sonnet 5.5 (`claude-sonnet-5-5`, same $2 / $10 per million tokens as Sonnet 5). The engine already avoided everything Sonnet 5.5 rejects (thinking disabled, forced `tool_choice`, sampling params, `budget_tokens`); the mock Claude now refuses those with Anthropic's 400 so no suite passes if they creep in.
+- **Or paste text** on the Documents step and in the writer's Add Materials card: pick what it is (a past proposal that was funded, funder or reviewer comments, an analysis, report or data, other notes), paste, **Add this text**. The page turns it into a `.txt` whose first line tells Claude what it is and uploads it like any document (`frontend/src/app/PasteMaterial.tsx`; no server change).
+- Tests: engine 1,260 (693 + 567 direct); browser 453 (10 new paste checks).
 
 ### Technical Details
 - `frontend/src/server/config.ts` (`ANTHROPIC_API_URL`, `anthropicBaseUrl()`, `anthropicHost()`), `claude.ts` (both clients, `verifyApiKey`, `apiErrorMessage`), `routes/system.ts` (health, debug report).

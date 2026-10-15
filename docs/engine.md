@@ -154,7 +154,7 @@ ratelimit/{bucket}/{ipHash}       sign-in rate-limit window
 ```bash
 cd ~/grantfinder
 bash tests/engine/run_all.sh      # 10 suites: foundation, deadlines, grants, processing, writer, regressions, direct, direct-processing, checklist, security; then processing, grants, writer, regressions, checklist again in direct mode (1,260 checks)
-bash tests/e2e/run_e2e.sh         # real browser through the whole journey on a production build (443 checks)
+bash tests/e2e/run_e2e.sh         # real browser through the whole journey on a production build (453 checks)
 ```
 
 `direct.test.mts` and `direct-processing.test.mts` run with `GRANTFINDER_JOB_MODE=direct`, a set
