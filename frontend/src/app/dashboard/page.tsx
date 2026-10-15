@@ -493,6 +493,28 @@ function GrantFacts({ match, compact = false }: { match: MatchItem; compact?: bo
   );
 }
 
+/**
+ * Says a newer starter database is out (the monthly grant research) and updates this user's copy
+ * in place: same grant ids, so applications and results keep working.
+ */
+function StarterUpdateNotice({ updated, busy, onUpdate, results }: { updated: string; busy: boolean; onUpdate: () => void; results: boolean }) {
+  return (
+    <div role="status" className="rounded-xl border border-[var(--card-border)] bg-[var(--card-bg)] px-4 py-3 text-sm flex flex-wrap items-center justify-between gap-3">
+      <p className="min-w-0 break-words">
+        <span className="font-semibold">The starter grant database was updated {formatDate(updated)}.</span>{' '}
+        <span className="text-gray-400">
+          Current deadlines, new grants, and programs that ended are ready for your copy.
+          {results ? ' Run matching again afterwards to score any new grants.' : ''}
+        </span>
+      </p>
+      <button type="button" className="btn btn-secondary text-sm" onClick={onUpdate} disabled={busy}>
+        {busy ? <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" /> : <Database className="w-4 h-4" aria-hidden="true" />}
+        Update my grants
+      </button>
+    </div>
+  );
+}
+
 function DeadlineBadge({ match }: { match: MatchItem }) {
   if (match.deadline_passed) return <span className="deadline-badge past">Past deadline</span>;
   const days = daysLeftOf(match);
@@ -605,6 +627,10 @@ export default function Dashboard() {
   const [grantStats, setGrantStats] = useState<GrantStats | null>(null);
   const [discoveredTotal, setDiscoveredTotal] = useState(0);
   const [discoveryStatus, setDiscoveryStatus] = useState<string | null>(null);
+  /** The newer starter database's date (YYYY-MM-DD) when one is out and this user's grants are from an older one. */
+  const [starterUpdate, setStarterUpdate] = useState<string | null>(null);
+  /** What "Update my grants" did, shown on the results page (other discovery messages belong to the grant step). */
+  const [resultsNotice, setResultsNotice] = useState<string | null>(null);
   const [discoveryBusy, setDiscoveryBusy] = useState<DiscoverySource | null>(null);
   const [discoveryFocus, setDiscoveryFocus] = useState('');
   const [churchUrl, setChurchUrl] = useState('');
@@ -732,7 +758,7 @@ export default function Dashboard() {
           if (!isSessionEnded(error)) console.warn(`[GrantFinder] Could not load ${what}; carrying on without it:`, error);
           return fallback;
         });
-      const [stats, profile, apps, latest, keyStatus, jobs, savedQuestions] = await Promise.all([
+      const [stats, profile, apps, latest, keyStatus, jobs, savedQuestions, sources] = await Promise.all([
         read<GrantStats | null>('your grant database', api.getGrantStats(), null),
         read<SavedProfile | null>('your organization profile', api.getProfile(), null),
         read<ApplicationSummary[]>('your applications', api.listApplications(), []),
@@ -740,8 +766,14 @@ export default function Dashboard() {
         read<{ is_set?: boolean } | null>('whether your Claude key is saved', api.getApiKeyStatus(), null),
         optional<JobSummary[]>('steps still running from before', api.listJobs(), []),
         optional<unknown>('the saved questions', api.getSavedQuestionnaire(), null),
+        optional<{ starter?: { updated?: string; update_available?: boolean } } | null>(
+          'whether the starter database was updated',
+          api.getDiscoverySources(),
+          null,
+        ),
       ]);
       if (!active) return;
+      setStarterUpdate(sources?.starter?.update_available && sources.starter.updated ? sources.starter.updated : null);
       if (failures.some((failure) => isSessionEnded(failure.error))) {
         // /api/auth/api-key/status is an auth route, so lib/api leaves its 401 to the page.
         endSession();
@@ -936,6 +968,12 @@ export default function Dashboard() {
       if (source === 'seed') {
         result = await api.loadStarterDatabase();
         summary = `Starter database loaded: ${result.added} grants added (${result.total_grants} total).`;
+        setStarterUpdate(null);
+        // Results read each grant's current details, so they show the refreshed deadlines right away.
+        if (matchResults) {
+          const refreshed = await api.getLatestMatchResults().catch(() => null);
+          if (refreshed) setMatchResults(refreshed);
+        }
       } else if (source === 'grants_gov') {
         result = await api.searchGrantsGov();
         summary = `Grants.gov: found ${result.found}, added ${result.added} new (${result.total_grants} total).`;
@@ -945,10 +983,12 @@ export default function Dashboard() {
       }
       const notes = Array.isArray(result.notes) ? result.notes.join(' ') : '';
       setDiscoveryStatus(notes ? `${summary} ${notes}` : summary);
+      if (currentStep === 'results') setResultsNotice(notes ? `${summary} ${notes}` : summary);
       setDiscoveredTotal(result.total_grants);
     } catch (error) {
       console.error(`[GrantFinder] Discovery (${source}) failed:`, error);
       setDiscoveryStatus(`Discovery failed: ${errorDetail(error, 'request failed')}`);
+      if (currentStep === 'results') setResultsNotice(`The update failed: ${errorDetail(error, 'request failed')}`);
     } finally {
       setDiscoveryBusy(null);
       setJobProgress(null);
@@ -1444,6 +1484,11 @@ export default function Dashboard() {
                 Discover grants automatically, upload your own Excel file, or both.
                 Everything merges into one database with duplicates removed.
               </p>
+              {starterUpdate && (
+                <div className="mb-6">
+                  <StarterUpdateNotice updated={starterUpdate} busy={discoveryBusy !== null} onUpdate={() => runDiscovery('seed')} results={false} />
+                </div>
+              )}
 
               <div className="grid gap-3 mb-6">
                 <button
@@ -2003,6 +2048,12 @@ export default function Dashboard() {
           )}
           {!restoring && currentStep === 'results' && matchResults && (
             <div className="space-y-6">
+              {starterUpdate && (
+                <StarterUpdateNotice updated={starterUpdate} busy={discoveryBusy !== null} onUpdate={() => runDiscovery('seed')} results />
+              )}
+              {!starterUpdate && resultsNotice && (
+                <p role="status" className="text-sm text-gray-400 break-words">{resultsNotice}</p>
+              )}
               {/* Summary */}
               <div className="card">
                 <h2 className="text-2xl font-bold mb-4">Match Results</h2>

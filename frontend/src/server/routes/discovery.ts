@@ -14,8 +14,8 @@ import { HttpError } from '../errors';
 import type { GrantsGovJobInput, WebSearchJobInput } from '../handlers/discovery';
 import { optionalString } from '../http';
 import { startJob } from '../jobs';
-import { logger } from '../log';
 import { todayIso } from '../deadlines';
+import { logger } from '../log';
 import { getGrants, getProfile, listApplications } from '../repo';
 import type { Router } from '../router';
 import {
@@ -24,7 +24,16 @@ import {
   loadSeedGrants,
   mergeFoundationsIntoDatabase,
   refreshSeedIntoDatabase,
+  seedVersion,
 } from '../services/discovery';
+import { keyPart, kv } from '../store';
+
+/** The edition of the starter database a user last loaded, so the website can say when a newer one is out. */
+const seedLoadedKey = (userId: string) => `seedloaded/${keyPart(userId)}`;
+interface SeedLoaded {
+  version: string;
+  loaded_at: string;
+}
 
 /** More keywords than this would keep the job running for many minutes. */
 const MAX_KEYWORDS = 10;
@@ -93,7 +102,10 @@ export function registerDiscoveryRoutes(router: Router): void {
     const keepIds = new Set((await listApplications(user.id)).map((app) => app.grant_id));
     const refresh = await refreshSeedIntoDatabase(user.id, seed.grants, seed.previousNames, keepIds, todayIso());
     const foundations = await mergeFoundationsIntoDatabase(user.id, seed.foundations);
+    const loaded: SeedLoaded = { version: seedVersion(), loaded_at: new Date().toISOString() };
+    await kv().set(seedLoadedKey(user.id), loaded);
     logger.info('seed_merged', {
+      version: loaded.version,
       user_id: user.id,
       found: seed.grants.length,
       added: refresh.added,
@@ -157,10 +169,19 @@ export function registerDiscoveryRoutes(router: Router): void {
       const source = grant.source || 'upload';
       bySource[source] = (bySource[source] ?? 0) + 1;
     }
+    const loaded = await kv().get<SeedLoaded>(seedLoadedKey(user.id));
+    const current = seedVersion();
     return {
       total_grants: grants.length,
       by_source: bySource,
       available_sources: AVAILABLE_SOURCES,
+      starter: {
+        // The starter database's last research date, and the edition this user last loaded.
+        updated: current,
+        loaded: loaded?.version ?? null,
+        // Only for someone who has starter grants: a newer edition is waiting for them.
+        update_available: (bySource.seed ?? 0) > 0 && loaded?.version !== current,
+      },
     };
   });
 }

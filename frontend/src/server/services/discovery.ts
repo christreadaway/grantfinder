@@ -383,6 +383,15 @@ export function makeGrant(
 interface SeedFile {
   grants?: unknown[];
   foundations?: unknown[];
+  /** YYYY-MM-DD of the last research run (tools/grant-research). */
+  updated?: string;
+  version?: string;
+}
+
+/** Which edition of the starter database this deploy carries (its last research date). */
+export function seedVersion(): string {
+  const data = seed as unknown as SeedFile;
+  return textOf(data.updated) || textOf(data.version) || 'unknown';
 }
 
 /**
