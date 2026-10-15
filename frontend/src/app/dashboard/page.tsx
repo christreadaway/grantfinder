@@ -2527,7 +2527,7 @@ export default function Dashboard() {
                           target="_blank"
                           rel="noopener noreferrer"
                           className="text-[var(--primary)] text-sm hover:underline"
-                          aria-label={`Visit ${match.grant_name}'s website (opens in a new tab)`}
+                          aria-label={`Visit Grant Website: ${match.grant_name} (opens in a new tab)`}
                         >
                           Visit Grant Website <span aria-hidden="true">→</span>
                         </a>
@@ -2542,7 +2542,7 @@ export default function Dashboard() {
                           onClick={() => handleWriteApplication(match)}
                           disabled={Boolean(busy)}
                           className={`btn ${notEligible ? 'btn-secondary' : 'btn-primary'} text-sm`}
-                          aria-label={notEligible ? `Write an application for ${match.grant_name} anyway` : `Write an application for ${match.grant_name}`}
+                          aria-label={notEligible ? `Write anyway: ${match.grant_name}` : `Write Application: ${match.grant_name}`}
                         >
                           {notEligible ? 'Write anyway' : <>Write Application <span aria-hidden="true">→</span></>}
                         </button>

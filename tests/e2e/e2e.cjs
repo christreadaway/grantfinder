@@ -59,6 +59,12 @@ const VALID_KEY = 'sk-ant-test-e2e-1';
 const KEY_RE = /sk-ant-[A-Za-z0-9_]/;
 const SECOND_KEY = 'sk-ant-test-e2e-2';
 const KENEDY = 'Kenedy Memorial Foundation Grants';
+/** The results chip for religious_eligibility "eligible" (it means religious organizations may apply). */
+const ELIGIBLE_CHIP = 'Religious orgs eligible';
+/** Grant categories as the results show them. */
+const CATEGORY_LABELS = ['Catholic school', 'Catholic (parish and school)', 'Catholic parish', 'Non-Catholic funder', 'Foundation'];
+/** Every main-list card's "Write Application" button (Top picks say "Start application: ..." instead). */
+const WRITE_BUTTON = /^Write (Application|anyway): /;
 
 // =============================================================================
 // Results
@@ -462,6 +468,40 @@ const card = (page, heading) => page.locator('.card').filter({ has: page.getByRo
 
 const escapeRe = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+/** One grant's main-list button: "Write Application" (named "Write Application: <grant>", visible text first for voice control), or "Write anyway" when not eligible. */
+const writeButtonFor = (scope, grant) =>
+  scope.getByRole('button', { name: new RegExp(`^Write (Application|anyway): ${escapeRe(grant)}$`) });
+
+/** A match card in the results list, found by its grant name. */
+const matchCard = (page, grant) => page.locator('.card').filter({ has: page.getByRole('heading', { name: grant, exact: true }) }).first();
+
+/**
+ * Every main-list card's grant name with the names of its "Write Application" button and "Visit Grant
+ * Website" link (their aria-labels), and whether any "→" in them is hidden from screen readers.
+ */
+async function matchCardNames(page) {
+  return page.evaluate(() => Array.from(document.querySelectorAll('.card'))
+    .filter((el) => el.querySelector('h3') && !el.hasAttribute('data-grant-removed'))
+    .map((el) => {
+      const button = Array.from(el.querySelectorAll('button')).find((b) => /^Write (Application|anyway)/.test(b.textContent.trim()));
+      const link = Array.from(el.querySelectorAll('a')).find((a) => /Visit Grant Website/.test(a.textContent));
+      // The text a screen reader would read: everything but aria-hidden parts.
+      const spoken = (node) => {
+        const copy = node.cloneNode(true);
+        copy.querySelectorAll('[aria-hidden="true"]').forEach((hidden) => hidden.remove());
+        return copy.textContent;
+      };
+      const arrowsHidden = [button, link].filter(Boolean).every((node) => !spoken(node).includes('→'));
+      return {
+        grant: el.querySelector('h3').textContent.trim(),
+        button: button ? button.getAttribute('aria-label') : null,
+        link: link ? link.getAttribute('aria-label') : null,
+        hasLink: Boolean(link),
+        arrowsHidden,
+      };
+    }));
+}
+
 /** One drafted section's card in the writer, found by its title. */
 const sectionCard = (scope, title) => {
   const page = typeof scope.page === 'function' ? scope.page() : scope; // inner locators must come from the page
@@ -729,7 +769,7 @@ async function journey(browser) {
     S.kenedyId = kenedy && kenedy.id;
     const kenedySeed = SEED_GRANTS.find((g) => g.grant_name === KENEDY) || {};
     check(`Kenedy grant present with the starter deadline ("${kenedySeed.deadline}")`, kenedy && kenedy.deadline === kenedySeed.deadline && /^Annual: /.test(kenedy.deadline), kenedy);
-    check('Kenedy carries its verified facts (Catholic schools eligible, Texas, last verified)',
+    check('Kenedy carries its verified facts (religious orgs eligible, Texas, last verified)',
       kenedy && kenedy.religious_eligibility === 'eligible' && kenedy.geo_qualified === 'Yes - TX Only' && /^\d{4}-\d{2}-\d{2}$/.test(kenedy.last_verified || ''), kenedy);
     const stats = await api('GET', '/api/grants/stats', { token: S.token });
     check(`grant stats total ${SEED_COUNT}`, stats.data?.total_grants === SEED_COUNT, stats.data);
@@ -959,7 +999,7 @@ async function journey(browser) {
     if (!matched) throw new Error('no results to check (matching did not finish)');
     S.counts = await tierCounts(page);
     const total = Object.values(S.counts).reduce((a, b) => a + b, 0);
-    const cards = page.getByRole('button', { name: /Write Application/ });
+    const cards = page.getByRole('button', { name: WRITE_BUTTON });
     S.matchesShown = await cards.count();
     const latest = await api('GET', '/api/processing/match-results/latest', { token: S.token });
     const L = latest.data || {};
@@ -982,11 +1022,33 @@ async function journey(browser) {
       const text = await kenedyCard.innerText();
       check('Kenedy shows its AI score (92%)', /92%/.test(text), text.slice(0, 200));
       check(`Kenedy shows its "${KENEDY_DEADLINE}" deadline`, text.includes(KENEDY_DEADLINE), text.slice(0, 300));
-      check('Kenedy card shows "Catholic schools eligible"', text.includes('Catholic schools eligible'), text.slice(0, 600));
+      check(`Kenedy card shows "${ELIGIBLE_CHIP}" (not the old "Catholic schools eligible", which claimed too much)`,
+        text.includes(ELIGIBLE_CHIP) && !text.includes('Catholic schools eligible'), text.slice(0, 600));
+      const chipTitle = (await kenedyCard.locator('.info-chip', { hasText: ELIGIBLE_CHIP }).first().getAttribute('title').catch(() => null)) || '';
+      check('...and its tooltip says what it means (religious organizations may apply; check the other rules)',
+        /Religious organizations may apply/.test(chipTitle) && /other rules/.test(chipTitle), chipTitle);
       check('Kenedy card shows when it was verified', /(Partly verified|Verified) [A-Z][a-z]{2} \d{1,2}, \d{4}/.test(text), text.slice(0, 600));
       check('Kenedy card shows who can apply', /Who can apply:/.test(text), text.slice(0, 900));
       check('Kenedy (Texas-only) was not ruled out for a Texas parish', !/^0%$/m.test(text));
+      check('Kenedy card names its category in plain words ("Catholic (parish and school)")',
+        (await kenedyCard.locator('[data-category]').innerText().catch(() => '')).trim() === 'Catholic (parish and school)',
+        await kenedyCard.locator('[data-category]').innerText().catch((e) => e.message));
+      check(`Kenedy's buttons say which grant to a screen reader, visible text first ("Write Application: ${KENEDY}")`,
+        (await kenedyCard.getByRole('button', { name: `Write Application: ${KENEDY}`, exact: true }).count()) === 1);
+      check(`...and so does its link ("Visit Grant Website: ${KENEDY} (opens in a new tab)")`,
+        (await kenedyCard.getByRole('link', { name: `Visit Grant Website: ${KENEDY} (opens in a new tab)`, exact: true }).count()) === 1);
     }
+    const named = await matchCardNames(page);
+    const badButtons = named.filter((c) => c.button !== `Write Application: ${c.grant}` && c.button !== `Write anyway: ${c.grant}`);
+    const badLinks = named.filter((c) => c.hasLink && c.link !== `Visit Grant Website: ${c.grant} (opens in a new tab)`);
+    check('every match card\'s "Write Application" button is named for its grant', named.length === S.matchesShown && badButtons.length === 0,
+      `${named.length} cards vs ${S.matchesShown} buttons; wrong: ${JSON.stringify(badButtons.slice(0, 3))}`);
+    check('every match card\'s "Visit Grant Website" link is named for its grant and says it opens a new tab',
+      named.some((c) => c.hasLink) && badLinks.length === 0, JSON.stringify(badLinks.slice(0, 3)));
+    check('screen readers never read the "→" arrows', named.every((c) => c.arrowsHidden), named.filter((c) => !c.arrowsHidden).map((c) => c.grant).slice(0, 5));
+    const categories = Array.from(new Set((await page.locator('[data-category]').allInnerTexts()).map((c) => c.trim())));
+    check('categories read as plain words ("Non-Catholic funder", never "Non Catholic" or "non_catholic")',
+      categories.includes('Non-Catholic funder') && categories.every((c) => !c || CATEGORY_LABELS.includes(c)), categories);
     const kenedyMatch = (L.matches || []).find((m) => m.grant_name === KENEDY);
     check('Kenedy is "excellent" in the saved results', kenedyMatch && kenedyMatch.score_tier === 'excellent', kenedyMatch && kenedyMatch.score_tier);
     const religiousOut = (L.matches || []).filter((m) => /does not fund religious organizations/i.test(m.explanation || ''));
@@ -1009,13 +1071,14 @@ async function journey(browser) {
     const mdText = md.buf.toString('utf8');
     check('Markdown export downloads (grant_matches.md)', md.name === 'grant_matches.md', md.name);
     check('Markdown report has a title, summary and Kenedy', /^# /m.test(mdText) && /Excellent/i.test(mdText) && mdText.includes(KENEDY), mdText.slice(0, 200));
-    check('Markdown report includes the grant facts (religious eligibility, last verified)', /\| Religious eligibility \| Catholic schools eligible \|/.test(mdText) && /\| Last verified \| \d{4}-\d{2}-\d{2} \|/.test(mdText), mdText.slice(0, 300));
+    // The report's wording is the engine's (services/exportResults.ts): either label means "eligible" was exported.
+    check('Markdown report includes the grant facts (religious eligibility, last verified)', /\| Religious eligibility \| (Religious orgs eligible|Religious organizations eligible|Catholic schools eligible) \|/.test(mdText) && /\| Last verified \| \d{4}-\d{2}-\d{2} \|/.test(mdText), mdText.slice(0, 300));
     check('CSV has the grant-facts columns', ['Geography', 'Religious Eligibility', 'Deadline Notes', 'Typical Award', 'Funder Priorities', 'Eligibility Notes', 'Last Verified'].every((c) => (rows[0] || []).includes(c)), rows[0]);
 
     const picks = card(page, /Top picks/);
     const picksText = await picks.innerText();
     check('Top picks lists Kenedy (excellent, deadline still open)', picksText.includes(KENEDY), picksText.slice(0, 400));
-    check('Top picks show eligibility chips', /Catholic schools eligible|Non-religious uses only|Religious eligibility not stated/.test(picksText), picksText.slice(0, 600));
+    check('Top picks show eligibility chips', /Religious orgs eligible|Non-religious uses only|Religious eligibility not stated/.test(picksText), picksText.slice(0, 600));
 
     const ics = await downloadFrom(page, () => page.getByRole('button', { name: 'Add Deadlines to Calendar' }).click(), errorBox);
     const icsText = ics.buf.toString('utf8');
@@ -1032,7 +1095,7 @@ async function journey(browser) {
   // ---------------------------------------------------------------- writer handoff
   await step('"Write Application" on the Kenedy match opens the writer', async () => {
     if (kenedyCard && (await kenedyCard.count())) {
-      await kenedyCard.getByRole('button', { name: /Write Application/ }).click();
+      await writeButtonFor(kenedyCard, KENEDY).click();
     } else {
       info('Kenedy card missing; creating the application through the API so the writer can still be tested');
       const created = await api('POST', '/api/writer/applications', { token: S.token, json: { grant_id: S.kenedyId } });
@@ -1537,7 +1600,7 @@ async function basics(browser) {
     });
     const text = await page.getByText(/AI web discovery: found|Discovery failed/).first().innerText();
     info(`web discovery: ${text} | banner: ${seen.join(' | ')}`);
-    check('web discovery finished with a summary', /AI web discovery: found \d+, added \d+ new \(\d+ total\)/.test(text), text);
+    check('web discovery finished with a summary ("found N grant(s), added N new (N total)")', /AI web discovery: found (1 grant|\d+ grants), added \d+ new \(\d+ total\)/.test(text), text);
     check('web discovery showed "Claude is searching the web"', seen.some((t) => /searching the web/i.test(t)), seen);
     check('web discovery showed the job\'s own progress line', seen.some((t) => /searching the web for grants that fit|usually 1-3 minutes/i.test(t)), seen);
     const calls = await promptsFor('web_discovery_v1', before);
@@ -1611,6 +1674,41 @@ async function basics(browser) {
     check('uploaded foundation added', Array.isArray(foundations) && foundations.some((f) => f.foundation_name === 'Example Catholic Fund'), Array.isArray(foundations) ? foundations.map((f) => f.foundation_name) : foundations);
   });
 
+  await step('A discovery after the database was counted: the Website step shows the new total', async () => {
+    await goToStep(page, 'website', SECOND_KEY);
+    // The page counted the database at the upload. One more grant arrives behind its back (another
+    // tab), so the next discovery's total is one higher than the page's count.
+    const extra = await makeXlsx({
+      'Mixed Church-School': [{
+        'Grant Name': 'Example Classroom Supplies Grant',
+        Funder: 'Example Classroom Fund',
+        Deadline: daysFromToday(75),
+        Description: 'Funds classroom supplies for schools in Texas.',
+        URL: `${SITE}/grant-guidelines`,
+        Status: 'OPEN',
+        'Geo Qualified': 'TX',
+      }],
+    });
+    const form = new FormData();
+    form.append('file', new Blob([extra], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), 'one-more.xlsx');
+    const uploaded = await api('POST', '/api/grants/upload', { token, form });
+    check('one more grant added through the engine', uploaded.status === 200, `${uploaded.status} ${uploaded.text.slice(0, 200)}`);
+    const total = ((await api('GET', '/api/grants/stats', { token })).data || {}).total_grants;
+    // Through the step bar both ways ("Continue" would recount on its own).
+    await page.getByRole('button', { name: 'Grant Database', exact: true }).click();
+    await page.getByRole('heading', { name: 'Build Your Grant Database' }).waitFor({ timeout: 10000 });
+    await page.getByRole('button', { name: /Load Starter Database/ }).click();
+    const status = page.getByText(/Starter database loaded|Discovery failed/).first();
+    await status.waitFor({ timeout: 60000 });
+    const text = await status.innerText();
+    check(`the discovery summary has the new total (${total})`, text.includes(`(${total} total)`), text);
+    check('the summary counts in plain words ("0 grants added", never "1 grants")', /Starter database loaded: 0 grants added/.test(text) && !/\b1 grants\b/.test(text), text);
+    await page.getByRole('button', { name: 'Website', exact: true }).click();
+    await page.getByRole('heading', { name: 'Enter Website URLs' }).waitFor({ timeout: 10000 });
+    const shown = await page.locator('[data-grant-total]').innerText().catch(() => '(no total shown)');
+    check(`the Website step shows the new total (${total} grants), not the count from before the discovery`, shown.includes(`${total} grants in your database`), shown);
+  });
+
   await step('"Enter the basics by hand" saves a profile without a website', async () => {
     await goToStep(page, 'website', SECOND_KEY);
     await openBasicsForm(page);
@@ -1680,15 +1778,15 @@ async function basics(browser) {
     check('no document lines when none were uploaded', !lines.some((l) => /Processing \d+ document/.test(l)), lines);
     await page.getByRole('heading', { name: 'Match Results' }).waitFor({ timeout: 30000 });
     const counts = await tierCounts(page);
-    const cards = await page.getByRole('button', { name: /Write Application/ }).count();
+    const cards = await page.getByRole('button', { name: WRITE_BUTTON }).count();
     check('results render for the second guest', cards >= SEED_COUNT && Object.values(counts).reduce((a, b) => a + b, 0) === cards, `${JSON.stringify(counts)} cards=${cards}`);
     check('Kenedy listed for the second guest too', (await page.getByRole('heading', { name: KENEDY, exact: true }).count()) === 1);
     check('second guest has no applications yet', (await page.getByRole('heading', { name: /Your applications/ }).count()) === 0);
     check('grants Claude did not score say so plainly ("Not AI-scored")', (await page.getByText(/Not AI-scored/).count()) > 0);
     check('the uploaded grant is in the results', (await page.getByRole('heading', { name: CUSTOM, exact: true }).count()) === 1);
     const customText = await page.locator('.card').filter({ has: page.getByRole('heading', { name: CUSTOM, exact: true }) }).first().innerText();
-    check('uploaded grant card shows its facts (eligible chip, region, typical award, priorities)',
-      customText.includes('Catholic schools eligible') && customText.includes('Example County, Texas') && /Typical award: \$5,000/.test(customText) && /What they fund now: Facility repairs; Safety upgrades/.test(customText), customText.slice(0, 700));
+    check(`uploaded grant card shows its facts ("${ELIGIBLE_CHIP}" chip, region, typical award, priorities)`,
+      customText.includes(ELIGIBLE_CHIP) && customText.includes('Example County, Texas') && /Typical award: \$5,000/.test(customText) && /What they fund now: Facility repairs; Safety upgrades/.test(customText), customText.slice(0, 700));
     const secularCard = page.locator('.card').filter({ has: page.getByRole('heading', { name: SECULAR_ONLY, exact: true }) }).first();
     const secularText = await secularCard.innerText();
     check('a funder that excludes religious organizations is Not Eligible, with the reason and the chip',
@@ -1696,6 +1794,108 @@ async function basics(browser) {
     const latest2 = (await api('GET', '/api/processing/match-results/latest', { token })).data || {};
     const secularMatch = (latest2.matches || []).find((m) => m.grant_name === SECULAR_ONLY);
     check('...and Claude never scored it (ruled out before any AI call)', secularMatch && secularMatch.score === 0 && secularMatch.score_tier === 'not_eligible' && /No need to apply/.test(secularMatch.explanation || ''), secularMatch);
+  });
+
+  await step('Not eligible: "Write anyway" says why and asks first; cancelling creates nothing', async () => {
+    await goToStep(page, 'results', SECOND_KEY);
+    const secularCard = matchCard(page, SECULAR_ONLY);
+    const anyway = secularCard.getByRole('button', { name: `Write anyway: ${SECULAR_ONLY}`, exact: true });
+    check('a not-eligible card offers "Write anyway", named for its grant', (await anyway.count()) === 1 && (await anyway.innerText()).trim() === 'Write anyway',
+      (await secularCard.getByRole('button').allInnerTexts()).join(' | '));
+    check('..."Write anyway" is the secondary style (not the primary "Write Application")', /\bbtn-secondary\b/.test((await anyway.getAttribute('class')) || ''), await anyway.getAttribute('class'));
+    const customButton = writeButtonFor(matchCard(page, CUSTOM), CUSTOM);
+    check('an eligible card keeps "Write Application" (primary)', (await customButton.innerText()).replace(/\s+/g, ' ').trim() === 'Write Application →' &&
+      /\bbtn-primary\b/.test((await customButton.getAttribute('class')) || ''), await customButton.innerText());
+    const badge = await secularCard.locator('.score-badge').evaluate((el) => getComputedStyle(el).backgroundColor);
+    check('the Not Eligible score badge is styled (class "not_eligible")', badge && badge !== 'rgba(0, 0, 0, 0)' && badge !== 'transparent', badge);
+
+    const appsBefore = (await api('GET', '/api/writer/applications', { token })).data || [];
+    let asked = '';
+    const cancel = (dialog) => {
+      asked = dialog.message();
+      dialog.dismiss().catch(() => {});
+    };
+    // Removed afterwards, so it can never answer a later question (the sign-out warning) by mistake.
+    page.on('dialog', cancel);
+    try {
+      await anyway.click();
+      await sleep(1500);
+    } finally {
+      page.off('dialog', cancel);
+    }
+    check('"Write anyway" asks first, with the reason it is not eligible', /not eligible/i.test(asked) && /does not fund religious organizations/i.test(asked) && /anyway\?/i.test(asked), asked);
+    check('cancelling stays on the results', /\/dashboard$/.test(page.url()) && (await onStep(page, 'results')), page.url());
+    const appsAfter = (await api('GET', '/api/writer/applications', { token })).data || [];
+    check('cancelling creates no application', Array.isArray(appsAfter) && appsAfter.length === appsBefore.length && !appsAfter.some((a) => a.grant_name === SECULAR_ONLY),
+      Array.isArray(appsAfter) ? appsAfter.map((a) => a.grant_name) : appsAfter);
+  });
+
+  await step('Results as the engine marks them when read: a removed grant, one ruled out since matching, who applies, the funder\'s words', async () => {
+    await goToStep(page, 'results', SECOND_KEY);
+    // Two of today's top picks become a removed grant and a grant ruled out since matching.
+    const picksBefore = (await card(page, /Top picks/).locator('li p.font-semibold').allInnerTexts()).map((t) => t.trim());
+    const [REMOVED, RULED_OUT] = picksBefore.filter((name) => ![KENEDY, CUSTOM, BLOCKED_GRANT, SECULAR_ONLY].includes(name));
+    if (!REMOVED || !RULED_OUT) throw new Error(`Top picks has too few grants to work with: ${JSON.stringify(picksBefore)}`);
+    const RULED_OUT_WHY = 'Program closed: the funder ended this grant program.';
+    const FUNDER_WORDS = 'Faith-based applicants: please call the program officer first';
+    const saved = (await api('GET', '/api/processing/match-results/latest', { token })).data || {};
+    const scoreBefore = ((saved.matches || []).find((m) => m.grant_name === RULED_OUT) || {}).score;
+    const pattern = '**/api/processing/match-results/latest';
+    const markResults = async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      body.matches = (body.matches || []).map((m) => {
+        if (m.grant_name === REMOVED) return { ...m, grant_removed: true };
+        if (m.grant_name === RULED_OUT) return { ...m, score_before: m.score, score: 0, score_tier: 'not_eligible', explanation: RULED_OUT_WHY };
+        if (m.grant_name === CUSTOM) return { ...m, applicants: ['teacher'] };
+        if (m.grant_name === BLOCKED_GRANT) return { ...m, religious_eligibility: null, religious_eligibility_text: FUNDER_WORDS };
+        return m;
+      });
+      await route.fulfill({ response, json: body });
+    };
+    await page.route(pattern, markResults);
+    try {
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await waitForDashboard(page);
+      await goToStep(page, 'results', SECOND_KEY);
+      await matchCard(page, REMOVED).waitFor({ timeout: 20000 });
+      const picksText = await card(page, /Top picks/).innerText();
+
+      const removedCard = matchCard(page, REMOVED);
+      const removedText = await removedCard.innerText();
+      check('a grant no longer in the database says "No longer in your grant database"', removedText.includes('No longer in your grant database'), removedText.slice(0, 300));
+      check('...offers no Write Application button', (await removedCard.getByRole('button').count()) === 0, (await removedCard.getByRole('button').allInnerTexts()).join(' | '));
+      check('...shows no score and no chips that suggest eligibility', !/\d+%/.test(removedText) && (await removedCard.locator('.info-chip').count()) === 0, removedText.slice(0, 300));
+      check('...is never in Top picks', !picksText.includes(REMOVED), picksText.slice(0, 500));
+      const headings = (await page.locator('.card h3').allInnerTexts()).map((t) => t.trim());
+      check('...and is listed last', headings[headings.length - 1] === REMOVED, headings.slice(-3));
+
+      const ruledCard = matchCard(page, RULED_OUT);
+      const ruledText = (await ruledCard.innerText()).replace(/\s+/g, ' ');
+      check(`a grant ruled out since matching says "Was ${scoreBefore}% when matched; now not eligible: <why>"`,
+        typeof scoreBefore === 'number' && ruledText.includes(`Was ${scoreBefore}% when matched; now not eligible: ${RULED_OUT_WHY}`), ruledText.slice(0, 700));
+      check('...shows 0% and only "Write anyway"', (await ruledCard.locator('.score-badge').innerText()).trim() === '0%' &&
+        (await writeButtonFor(ruledCard, RULED_OUT).innerText()).trim() === 'Write anyway', ruledText.slice(0, 300));
+      check('...and leaves Top picks', !picksText.includes(RULED_OUT), picksText.slice(0, 500));
+
+      const applicantsChip = matchCard(page, CUSTOM).locator('[data-applicants-chip]');
+      check('a grant teachers apply for says "Teachers apply"', (await applicantsChip.count()) === 1 && (await applicantsChip.innerText()).trim() === 'Teachers apply',
+        (await matchCard(page, CUSTOM).locator('.info-chip').allInnerTexts()).join(' | '));
+      check('...and its tooltip says the school can\'t apply itself', /can't apply for this itself/i.test((await applicantsChip.getAttribute('title').catch(() => '')) || ''),
+        await applicantsChip.getAttribute('title').catch((e) => e.message));
+
+      const wordsCard = matchCard(page, BLOCKED_GRANT);
+      const notStated = wordsCard.locator('.info-chip', { hasText: 'Religious eligibility not stated' });
+      check('funder\'s words that could not be read still show "Religious eligibility not stated"', (await notStated.count()) === 1,
+        (await wordsCard.locator('.info-chip').allInnerTexts()).join(' | '));
+      check('...with the funder\'s words in the chip\'s tooltip', ((await notStated.getAttribute('title').catch(() => '')) || '').includes(FUNDER_WORDS),
+        await notStated.getAttribute('title').catch((e) => e.message));
+      check('...and in the details ("Funder\'s words: ...")', (await wordsCard.innerText()).includes(`Funder's words: “${FUNDER_WORDS}”`), (await wordsCard.innerText()).slice(0, 600));
+    } finally {
+      await page.unroute(pattern, markResults);
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await waitForDashboard(page);
+    }
   });
 
   await step('Saved key: the API Key step offers "Keep my saved key"', async () => {
@@ -1710,7 +1910,7 @@ async function basics(browser) {
   await step('Writer: with no guidelines pasted, the grant\'s own web page is read', async () => {
     await goToStep(page, 'results', SECOND_KEY);
     const customCard = page.locator('.card').filter({ has: page.getByRole('heading', { name: CUSTOM, exact: true }) }).first();
-    await customCard.getByRole('button', { name: /Write Application/ }).click();
+    await writeButtonFor(customCard, CUSTOM).click();
     await page.waitForURL(/\/writer\?id=/, { timeout: 30000 });
     await page.getByRole('heading', { name: CUSTOM }).waitFor({ timeout: 20000 });
     check('no urgency banner for a deadline two months away', (await page.getByText(/Deadline soon/).count()) === 0);
@@ -1729,7 +1929,7 @@ async function basics(browser) {
   await step('Writer: when the grant\'s web page can\'t be read, the person is told', async () => {
     await goToStep(page, 'results', SECOND_KEY);
     const blockedCard = page.locator('.card').filter({ has: page.getByRole('heading', { name: BLOCKED_GRANT, exact: true }) }).first();
-    await blockedCard.getByRole('button', { name: /Write Application/ }).click();
+    await writeButtonFor(blockedCard, BLOCKED_GRANT).click();
     await page.waitForURL(/\/writer\?id=/, { timeout: 30000 });
     await page.getByRole('heading', { name: BLOCKED_GRANT }).waitFor({ timeout: 20000 });
     // Like real Claude with no guidelines: an inferred rubric and sections marked INFERRED.
@@ -1880,7 +2080,7 @@ async function errors(browser) {
       await clearFailures();
     }
     const labeled = await page.getByText(/Not AI-scored: Claude was unavailable \(overloaded\)/).count();
-    const cards = await page.getByRole('button', { name: /Write Application/ }).count();
+    const cards = await page.getByRole('button', { name: WRITE_BUTTON }).count();
     info(`${labeled} of ${cards} match cards say Claude was unavailable`);
     check('grants Claude could not score say "Not AI-scored: Claude was unavailable (overloaded)"', labeled > 0, `${labeled} of ${cards}`);
     check('hard-filter results still work while Claude is down (Not Eligible grants)', (await tierCounts(page)).not_eligible >= 2, await tierCounts(page));
@@ -1895,7 +2095,7 @@ async function errors(browser) {
   await step('Drafting while Claude keeps failing: finished sections are kept, the error says what to do', async () => {
     const kenedyCard = page.locator('.card').filter({ has: page.getByRole('heading', { name: KENEDY, exact: true }) }).first();
     if (await kenedyCard.count()) {
-      await kenedyCard.getByRole('button', { name: /Write Application/ }).click();
+      await writeButtonFor(kenedyCard, KENEDY).click();
     } else {
       info('(setting up: no results on screen, opening the Kenedy application through the API)');
       const grants = (await api('GET', '/api/grants', { token })).data || [];
@@ -2238,6 +2438,33 @@ async function persist(browser) {
     await page.getByRole('heading', { name: 'Match Results' }).waitFor({ timeout: 20000 });
     const counts = await tierCounts(page);
     check('results after restart have the same counts', JSON.stringify(counts) === JSON.stringify(state.counts), `${JSON.stringify(counts)} vs ${JSON.stringify(state.counts)}`);
+  });
+
+  await step('Step bar on a mid-size screen (900px): the current step stays in view', async () => {
+    await page.setViewportSize({ width: 900, height: 900 });
+    try {
+      await waitForDashboard(page);
+      const bar = page.locator('[data-step-bar]');
+      /** Whether a step's button is fully inside the step bar's visible strip. */
+      const inView = async (label) => {
+        const [strip, button] = await Promise.all([bar.boundingBox(), page.getByRole('button', { name: label, exact: true }).boundingBox()]);
+        return Boolean(strip && button && button.x >= strip.x - 1 && button.x + button.width <= strip.x + strip.width + 1);
+      };
+      // Clicked from script so the test itself never scrolls the bar.
+      await page.getByRole('button', { name: 'Website', exact: true }).evaluate((el) => el.click());
+      await page.getByRole('heading', { name: 'Enter Website URLs' }).waitFor({ timeout: 10000 });
+      await sleep(300);
+      check('900px: the Website step is in view after opening it', await inView('Website'));
+      await page.getByRole('button', { name: 'Results', exact: true }).evaluate((el) => el.click());
+      await page.getByRole('heading', { name: 'Match Results' }).waitFor({ timeout: 10000 });
+      await sleep(300);
+      check('900px: the active "Results" step is in view (the bar scrolls to it)', await inView('Results'),
+        JSON.stringify(await Promise.all([bar.boundingBox(), page.getByRole('button', { name: 'Results', exact: true }).boundingBox()])));
+      const overflow = await page.evaluate(() => Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - window.innerWidth);
+      check('900px: the page itself never scrolls sideways (only the step bar does)', overflow <= 1, `${overflow}px`);
+    } finally {
+      await page.setViewportSize({ width: 1280, height: 900 });
+    }
   });
 
   await step('Browser: the application writer picks up where it was', async () => {
