@@ -30,9 +30,10 @@ Chris asked to run GrantFinder entirely on Netlify (no Railway; none of his othe
 - Agents used: three builders (writer, dashboard/sign-in, processing engine), two reviewers, one docs agent; every change re-verified by the lead before commit.
 
 ### Current Status
-- ✅ Engine suites, browser test, and local Netlify runs passing (counts in PROJECT_STATUS.md)
+- ✅ Engine: 1,012 checks (9 suites, plus 4 again in direct job mode); browser: 437 checks in both job modes; local Netlify runtime (no background function): 47 API checks, including drafting continued across 4 requests
 - ✅ No Railway anywhere; Netlify is the only host
-- 🚧 Not yet merged to `main` or deployed; real-key run happens when Chris uses it on the deployed site
+- ✅ Ready to merge to `main`
+- 🚧 Not yet deployed; the real-key run happens when Chris uses it on the deployed site
 
 ### Branch Info
 - Branch: `claude/relaxed-curie-sj0zvu` (pushed). Merge into `main` on GitHub, then Netlify deploys from `main`.

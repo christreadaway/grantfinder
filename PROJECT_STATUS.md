@@ -17,7 +17,7 @@
 
 ## Tests (all passing)
 - Engine: `cd ~/grantfinder && bash tests/engine/run_all.sh` runs 9 suites (561 checks), then processing, grants, writer and regressions again in direct job mode (451 checks): 1,012 checks.
-- Browser: `bash tests/e2e/run_e2e.sh` runs 7 phases on a production build: 436 checks in-process, 437 with `E2E_JOB_MODE=direct` (how Netlify runs it).
+- Browser: `bash tests/e2e/run_e2e.sh` runs 7 phases on a production build: 437 checks, passing both in-process and with `E2E_JOB_MODE=direct` (how Netlify runs it).
 - Netlify runtime (local `netlify build` + `netlify serve`, no background function): 47 API checks including document parsing, Excel upload, hand edits, Word export, and drafting continued across 4 requests.
 
 ## Known Limits
