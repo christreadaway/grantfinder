@@ -3,8 +3,10 @@
  * and grant scoring. Port of backend/services/ai_service.py plus the
  * profile-merge rules from backend/routers/processing.py.
  *
- * Prompts are the Python text verbatim. Claude is only called through the
- * job's client (claude.ts) and answers are parsed leniently (json.ts).
+ * Prompts are the Python text verbatim, except that the document prompt also
+ * asks for citable key facts (they become profile evidence for the writer).
+ * Claude is only called through the job's client (claude.ts) and answers are
+ * parsed leniently (json.ts).
  * Fatal Claude errors (bad key, no credits, unknown model) always propagate;
  * where the Python silently fell back, the fallback here says plainly that
  * it is not an AI assessment.
@@ -56,8 +58,19 @@ export const MATCH_BATCH_SIZE = 10;
 export const MATCH_CONCURRENCY = 4;
 /** Match results expire 90 days after they are created (spec v2.6). */
 export const MATCH_EXPIRY_DAYS = 90;
-/** The Python sent the first 30,000 characters of a document to Claude. */
-export const DOCUMENT_TEXT_LIMIT = 30000;
+/**
+ * Characters of a document sent to Claude (a hard cap). The Python sent
+ * 30,000, which cut most grant reports off before their results and numbers.
+ */
+export const DOCUMENT_TEXT_LIMIT = 60000;
+/** At most this many key facts are kept from one document. */
+export const MAX_KEY_FACTS = 15;
+/**
+ * The shared profile keeps at most this many evidence items. When a document
+ * pushes it over, the oldest items taken from documents go first; items the
+ * person or the writer added are never removed here.
+ */
+export const MAX_PROFILE_EVIDENCE = 200;
 /** The Python summarized the first 50 grants for the questionnaire prompt. */
 export const QUESTIONNAIRE_GRANT_SAMPLE = 50;
 /** Every grant that Claude did not actually score has an explanation starting with this. */
@@ -138,6 +151,28 @@ function stringItems(value: unknown): string[] {
   return single ? [single] : [];
 }
 
+/**
+ * Half of an emoji (a lone UTF-16 surrogate, e.g. left by cutting text at a
+ * character limit) makes the Claude API reject the whole request as invalid
+ * JSON. Replaced with U+FFFD, which keeps the length unchanged.
+ */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
+export function wellFormed(text: string): string {
+  return text.replace(LONE_SURROGATE, '\uFFFD');
+}
+
+/** The first `limit` characters of `text`, never ending in half an emoji. */
+export function cutText(text: string, limit: number): string {
+  let cut = text;
+  if (text.length > limit) {
+    cut = text.slice(0, limit);
+    const last = cut.charCodeAt(cut.length - 1);
+    if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1);
+  }
+  return wellFormed(cut);
+}
+
 /** The same minimal profile the Python created before the first scan/answers. */
 export function minimalProfile(userId: string): OrganizationProfile {
   return normalizeProfile({ user_id: userId, organization_name: '', organization_type: 'parish', city: '', state: '', sources: [] });
@@ -184,7 +219,7 @@ export function usStateCode(value: string): string | null {
 export function buildScanPrompt(websiteContent: string): string {
   return `Analyze these Catholic parish/school website(s) and extract structured information.
 
-${websiteContent}
+${wellFormed(websiteContent)}
 
 Extract and return a JSON object with:
 {
@@ -408,6 +443,75 @@ function answerText(value: unknown): string {
   }
 }
 
+/** A question's text as a comparison key: trimmed, with case and spacing ignored. */
+export function questionKey(question: unknown): string {
+  return typeof question === 'string' ? question.replace(/\s+/g, ' ').trim().toLowerCase() : '';
+}
+
+/** No answer at all: nothing, empty text, or a list of those (an emptied text box, "Select...", no boxes ticked). */
+export function isBlankAnswer(value: unknown): boolean {
+  if (value === null || value === undefined) return true;
+  if (typeof value === 'string') return value.trim() === '';
+  if (Array.isArray(value)) return value.every(isBlankAnswer);
+  return false;
+}
+
+/**
+ * Questionnaire answers are never erased. Earlier answers stay in their
+ * order; a new answer to the same question (same text, ignoring case and
+ * spacing) replaces the earlier one in place (an older duplicate of that
+ * question is dropped, since it would contradict the new answer); answers to
+ * questions not seen before are added at the end.
+ */
+export function mergeQuestionnaireAnswers(
+  existing: Array<Record<string, unknown>>,
+  incoming: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  const merged = [...existing];
+  const positions = new Map<string, number[]>();
+  merged.forEach((entry, index) => {
+    const key = questionKey(entry?.question);
+    if (!key) return;
+    positions.set(key, [...(positions.get(key) ?? []), index]);
+  });
+  const superseded = new Set<number>();
+  for (const pair of incoming) {
+    const key = questionKey(pair.question);
+    const at = key ? positions.get(key) : undefined;
+    if (at) {
+      merged[at[0]] = pair;
+      at.slice(1).forEach((index) => superseded.add(index));
+      positions.set(key, [at[0]]);
+    } else {
+      if (key) positions.set(key, [merged.length]);
+      merged.push(pair);
+    }
+  }
+  return merged.filter((_, index) => !superseded.has(index));
+}
+
+/** true/false for a clear yes or no (true, "No", "Yes, through the diocese"); null for anything else. */
+export function yesNoValue(value: unknown): boolean | null {
+  if (typeof value === 'boolean') return value;
+  const text = answerText(value).trim().toLowerCase();
+  if (['true', 'yes', 'y', '1'].includes(text)) return true;
+  if (['false', 'no', 'n', '0'].includes(text)) return false;
+  if (/^(yes|yeah|yep)\b/.test(text)) return true;
+  if (/^(no|nope)\b/.test(text)) return false;
+  return null;
+}
+
+/**
+ * The answer to a 501(c)(3) question. Catholic parishes and schools are
+ * usually exempt through the USCCB group ruling (listed in the Official
+ * Catholic Directory), so an answer that says so counts as yes.
+ */
+function taxExemptAnswer(value: unknown): boolean | null {
+  const text = answerText(value).toLowerCase();
+  if (/group (ruling|exemption)|usccb|official catholic directory/.test(text) && !/\bnot\b|n['\u2019]t\b/.test(text)) return true;
+  return yesNoValue(value);
+}
+
 /** A yes/no question that asks whether the organization has (runs, sponsors...) a school. */
 const HAS_SCHOOL_QUESTION = /\b(have|has|operate|operates|run|runs|sponsor|sponsors|include|includes|support|supports|own|owns|is there|affiliated|associated|attached)\b[^?]*\bschool/;
 /** ...and not one about something else that merely mentions the school ("security concerns at your school?"). */
@@ -415,13 +519,19 @@ const OTHER_SCHOOL_TOPIC = /secur|safety|concern|repair|renovat|need|budget|gran
 
 /**
  * Port of submit_questionnaire's mapping of well-known questions onto profile
- * fields. Every answer is also kept verbatim in questionnaire_answers.
+ * fields. Every answer is also kept verbatim in questionnaire_answers, merged
+ * with the earlier answers (mergeQuestionnaireAnswers): the Python replaced
+ * the whole list, so answering a second questionnaire erased the first.
+ * Blank answers are skipped: they never replace an earlier answer.
  * Fixes: has_school only follows a yes/no question about having a school
  * (the Python let "Is your school accredited?" -> No, or "Security concerns
  * at your school?" -> No, set has_school to false); a state is only taken
  * from an answer that names a US state (the Python stored "True" as the
  * state for "Do you own real estate?"); the organization-type question now
- * sets organization_type/has_school.
+ * sets organization_type/has_school; 501(c)(3) and food pantry change only
+ * on a clear yes or no (the Python turned "Yes, through the USCCB group
+ * ruling" into "not a 501(c)(3)"); a yes/no answer is never saved as the
+ * annual budget.
  */
 export function applyQuestionnaireAnswers(
   profile: OrganizationProfile,
@@ -431,8 +541,9 @@ export function applyQuestionnaireAnswers(
 ): OrganizationProfile {
   const next: OrganizationProfile = { ...profile };
   const qaPairs: Array<Record<string, unknown>> = [];
-  for (const { question_id: questionId, answer } of answers) {
-    const questionText = questionsById.get(questionId) ?? `Question ${questionId}`;
+  for (const { question_id: questionId, answer, question } of answers) {
+    if (isBlankAnswer(answer)) continue;
+    const questionText = (typeof question === 'string' && question.trim()) || questionsById.get(questionId)?.trim() || `Question ${questionId}`;
     qaPairs.push({ question: questionText, answer });
 
     const q = questionText.toLowerCase();
@@ -444,15 +555,17 @@ export function applyQuestionnaireAnswers(
       (yesNo ? HAS_SCHOOL_QUESTION.test(q) && !OTHER_SCHOOL_TOPIC.test(q) : lower.includes('school'));
 
     if (q.includes('501')) {
-      next.is_501c3 = isYes;
+      const exempt = taxExemptAnswer(answer);
+      if (exempt !== null) next.is_501c3 = exempt;
     } else if (q.includes('food pantry') || q.includes('food assistance')) {
-      next.has_food_pantry = isYes;
+      const pantry = yesNoValue(answer);
+      if (pantry !== null) next.has_food_pantry = pantry;
     } else if (schoolDecides) {
       next.has_school = yesNo ? isYes : true;
     } else if (q.includes('state') && answerStr && answerStr.length <= 30) {
       const code = yesNo ? null : usStateCode(answerStr);
       if (code && !next.state) next.state = code;
-    } else if (q.includes('budget') && answerStr) {
+    } else if (q.includes('budget') && answerStr && !yesNo) {
       next.annual_budget = answerStr;
     } else if (q.includes('grant') && (q.includes('past') || q.includes('previous') || q.includes('received'))) {
       if (answerStr && !yesNo && lower !== 'none') next.previous_grants = addUnique(next.previous_grants, answerStr);
@@ -470,7 +583,7 @@ export function applyQuestionnaireAnswers(
       }
     }
   }
-  next.questionnaire_answers = qaPairs;
+  next.questionnaire_answers = mergeQuestionnaireAnswers(next.questionnaire_answers, qaPairs);
   if (freeFormText) {
     next.free_form_notes = freeFormText;
     next.sources = addUnique(next.sources, 'User free-form text');
@@ -483,28 +596,39 @@ export function applyQuestionnaireAnswers(
 // Prompt 3: document signals
 // =============================================================================
 
+/**
+ * The Python prompt (needs and signals) plus key facts: the numbers and
+ * results a grant writer cites, which "focus on actionable needs" left out.
+ */
 export function buildDocumentPrompt(text: string, filename: string): string {
   return `Analyze this document from a Catholic parish or school and extract information relevant to grant applications.
 
-DOCUMENT: ${filename}
+DOCUMENT: ${wellFormed(filename)}
 CONTENT:
-${text.slice(0, DOCUMENT_TEXT_LIMIT)}
+${cutText(text, DOCUMENT_TEXT_LIMIT)}
 
 Extract and categorize any mentions of:
 1. Facility needs (repairs, renovations, equipment)
 2. Program needs (new programs, program expansions, staffing)
 3. Security concerns (safety issues, security equipment needs)
 4. Other grant-relevant signals (financial challenges, growth opportunities, community needs)
+5. Key facts a grant writer could cite: enrollment and demographics, percentages (for example, the share of families receiving tuition assistance), outcomes and results, prior grants received (funder, amount, and year), program descriptions, staff counts, founding year
 
 IMPORTANT: Ignore irrelevant content like mass times, prayer intentions, event announcements.
-Focus on actionable needs that could be addressed with grant funding.
+For items 1-4, focus on actionable needs that could be addressed with grant funding.
+For key facts:
+- Include only facts this document states. Never invent, estimate, round, or calculate a number.
+- Write each fact as one short sentence that keeps the document's own numbers and wording, with the year or time period when the document gives one.
+- List at most ${MAX_KEY_FACTS}, the most useful for a grant application first. Leave out the names of students and families.
+- If the document states no such facts, return an empty list.
 
 Return a JSON object:
 {
     "facility_needs": ["List of specific facility needs mentioned"],
     "program_needs": ["List of specific program needs mentioned"],
     "security_concerns": ["List of specific security concerns mentioned"],
-    "other_signals": ["Other relevant information for grant matching"]
+    "other_signals": ["Other relevant information for grant matching"],
+    "key_facts": ["Concrete facts stated in the document, one short sentence each"]
 }
 
 Return ONLY the JSON object, no other text.`;
@@ -515,18 +639,47 @@ export interface DocumentSignals {
   program_needs: string[];
   security_concerns: string[];
   other_signals: string[];
+  key_facts: string[];
 }
 
-/** The four signal lists, or null when the answer had no JSON object. */
+/** The document prompt's own placeholder lines, which a model sometimes echoes when it found nothing. */
+const DOCUMENT_TEMPLATE_ECHOES = new Set([
+  'list of specific facility needs mentioned',
+  'list of specific program needs mentioned',
+  'list of specific security concerns mentioned',
+  'other relevant information for grant matching',
+  'concrete facts stated in the document, one short sentence each',
+]);
+
+const notTemplateEcho = (item: string) => !DOCUMENT_TEMPLATE_ECHOES.has(itemKey(item));
+
+/** Key facts as plain sentences: list or single text, {"fact": ...} objects read, bullets and blanks dropped, at most MAX_KEY_FACTS. */
+function factItems(value: unknown): string[] {
+  const raw = Array.isArray(value) ? value : [value];
+  const facts: string[] = [];
+  for (const item of raw) {
+    const record = isRecord(item) ? item : null;
+    const text = typeof item === 'string' ? item : record ? asString(record.fact ?? record.text ?? record.summary ?? record.statement) : '';
+    const fact = cleanText(text.replace(/\s+/g, ' ').replace(/^(?:[-*\u2022]|\d{1,2}[.)])\s+/, ''));
+    if (fact && notTemplateEcho(fact)) facts.push(fact);
+  }
+  return mergeUnique([], facts).slice(0, MAX_KEY_FACTS);
+}
+
+/**
+ * The signal lists and key facts, or null when the answer had no JSON object.
+ * An answer without key_facts (the Python format) gives an empty list.
+ */
 export function parseDocumentSignals(text: string): DocumentSignals | null {
   const data = extractJsonObject(text);
   if (!data) return null;
-  const list = (value: unknown) => mergeUnique([], stringItems(value));
+  const list = (value: unknown) => mergeUnique([], stringItems(value).filter(notTemplateEcho));
   return {
     facility_needs: list(data.facility_needs),
     program_needs: list(data.program_needs),
     security_concerns: list(data.security_concerns),
     other_signals: list(data.other_signals),
+    key_facts: factItems(data.key_facts ?? data.facts),
   };
 }
 
@@ -535,33 +688,78 @@ export function documentEvidenceId(filename: string, item: string): string {
   return `ev_${crypto.createHash('sha1').update(`${filename}\n${item}`).digest('hex').slice(0, 10)}`;
 }
 
+/** What one document added to (and, at the cap, removed from) profile.evidence. */
+export interface DocumentMergeStats {
+  evidence_added: number;
+  evidence_dropped: number;
+}
+
+/**
+ * Keep evidence at MAX_PROFILE_EVIDENCE: the oldest document items go first,
+ * then (only if still needed) the oldest of `justAdded`. Items of any other
+ * type (stakeholder answers, the person's own notes) are never removed.
+ */
+export function capEvidence(
+  evidence: Array<Record<string, unknown>>,
+  justAdded: ReadonlySet<Record<string, unknown>> = new Set(),
+): Array<Record<string, unknown>> {
+  const excess = evidence.length - MAX_PROFILE_EVIDENCE;
+  if (excess <= 0) return evidence;
+  const fromDocument = (entry: Record<string, unknown>) => entry?.type === 'document';
+  const candidates = [
+    ...evidence.filter((entry) => fromDocument(entry) && !justAdded.has(entry)),
+    ...evidence.filter((entry) => fromDocument(entry) && justAdded.has(entry)),
+  ];
+  const dropped = new Set(candidates.slice(0, excess));
+  return evidence.filter((entry) => !dropped.has(entry));
+}
+
 /**
  * Add a document's signals to the shared profile: needs lists (deduplicated,
- * case-insensitive) and one evidence entry per item, which is how uploaded
- * documents reach the GrantWriter's drafts.
+ * case-insensitive) and one evidence entry per item and key fact, which is
+ * how uploaded documents reach the GrantWriter's drafts. Evidence is
+ * deduplicated by normalized text across the whole profile (so uploading the
+ * same document again adds nothing) and capped at MAX_PROFILE_EVIDENCE.
  */
-export function mergeDocumentIntoProfile(profile: OrganizationProfile, result: DocumentExtractionResult): OrganizationProfile {
+export function mergeDocumentIntoProfile(
+  profile: OrganizationProfile,
+  result: DocumentExtractionResult,
+  stats?: DocumentMergeStats,
+): OrganizationProfile {
   const next: OrganizationProfile = { ...profile };
   next.facility_needs = mergeUnique(next.facility_needs, result.facility_needs);
   next.program_needs = mergeUnique(next.program_needs, result.program_needs);
   next.security_concerns = mergeUnique(next.security_concerns, result.security_concerns);
 
   const evidence = [...next.evidence];
-  const seen = new Set(evidence.map((entry) => itemKey(asString(entry.summary))).filter(Boolean));
-  const items = [...result.facility_needs, ...result.program_needs, ...result.security_concerns, ...result.other_signals];
+  const seen = new Set(evidence.map((entry) => itemKey(asString(entry?.summary))).filter(Boolean));
+  const added = new Set<Record<string, unknown>>();
+  const items = [
+    ...result.facility_needs,
+    ...result.program_needs,
+    ...result.security_concerns,
+    ...result.other_signals,
+    ...(result.key_facts ?? []),
+  ];
   for (const item of items) {
     const key = itemKey(item);
     if (!key || seen.has(key)) continue;
     seen.add(key);
-    evidence.push({
+    const entry = {
       id: documentEvidenceId(result.filename, item),
       type: 'document',
       summary: item,
       source_ref: `Document: ${result.filename}`,
       linked_programs: [],
-    });
+    };
+    evidence.push(entry);
+    added.add(entry);
   }
-  next.evidence = evidence;
+  next.evidence = capEvidence(evidence, added);
+  if (stats) {
+    stats.evidence_added = next.evidence.filter((entry) => added.has(entry)).length;
+    stats.evidence_dropped = evidence.length - next.evidence.length;
+  }
   next.sources = addUnique(next.sources, `Document: ${result.filename}`);
   return next;
 }

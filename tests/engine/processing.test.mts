@@ -23,6 +23,8 @@ const repo = await import('../../frontend/src/server/repo.ts');
 const store = await import('../../frontend/src/server/store.ts');
 const jobs = await import('../../frontend/src/server/jobs.ts');
 const ai = await import('../../frontend/src/server/services/ai.ts');
+const processingRoutes = await import('../../frontend/src/server/routes/processing.ts');
+const writer = await import('../../frontend/src/server/services/writer.ts');
 
 // The docx package lives in frontend/node_modules.
 const frontendRequire = createRequire(path.join(repoRoot, 'frontend', 'package.json'));
@@ -218,6 +220,7 @@ const userA = await userIdOf(tokenA);
 const unauth = await Promise.all([
   api('POST', '/api/processing/scan-website', { json: { church_url: siteUrl } }),
   api('POST', '/api/processing/generate-questionnaire'),
+  api('GET', '/api/processing/questionnaire'),
   api('POST', '/api/processing/submit-questionnaire', { json: { answers: [] } }),
   api('POST', '/api/processing/upload-document', { form: fileForm('a.txt', 'hello') }),
   api('GET', '/api/processing/profile'),
@@ -368,6 +371,46 @@ check(
 const profileB = await api('GET', '/api/processing/profile', { token: tokenB });
 check('failed scan saved nothing', profileB.status === 404, profileB.data);
 
+// Re-scan with corrected addresses while a scan is still running.
+await mock.reset();
+await mock.delay('website_scan_v1', 1500);
+const slowScan = await api('POST', '/api/processing/scan-website', { token: tokenA, json: { church_url: siteUrl } });
+const sameUrls = await api('POST', '/api/processing/scan-website', { token: tokenA, json: { church_url: `${siteUrl}/` } });
+const corrected = await api('POST', '/api/processing/scan-website', { token: tokenA, json: { church_url: siteUrl, school_url: `${siteUrl}/school` } });
+check(
+  'scan with the same addresses while one runs -> 409 attached to the running scan (a trailing slash is the same address)',
+  slowScan.status === 202 && sameUrls.status === 409 && sameUrls.data.job_id === slowScan.data.job_id && sameUrls.data.running === true &&
+    /already running/.test(sameUrls.data.detail),
+  [slowScan.data, sameUrls.data],
+);
+check(
+  'scan with different addresses while one runs -> a new scan starts (not attached to the old one)',
+  corrected.status === 202 && /^job_/.test(corrected.data.job_id) && corrected.data.job_id !== slowScan.data.job_id,
+  corrected.data,
+);
+const bothStarted = slowScan.status === 202 && corrected.status === 202;
+const [slowDone, correctedDone]: Json[] = bothStarted
+  ? await Promise.all([waitForJob(tokenA, slowScan.data.job_id), waitForJob(tokenA, corrected.data.job_id)])
+  : [null, null];
+await mock.delay('website_scan_v1', 0);
+const slowJob = await storedJob(userA, slowScan.data?.job_id);
+check(
+  'the older scan finishing last does not overwrite the newer one: it fails with a plain message, the newer one is saved',
+  slowDone?.status === 'failed' && slowDone.error?.status === 409 && /newer website scan/.test(slowDone.error.detail) && !/\u2014/.test(slowDone.error.detail) &&
+    correctedDone?.status === 'done' && correctedDone.result?.organization_basics?.name === 'St. Example Catholic Parish' &&
+    (slowJob?.notes ?? []).some((n: string) => n.includes('Not saved: a newer website scan')) &&
+    (await profileOf(tokenA)).school_website_url === `${siteUrl}/school`,
+  [slowDone?.error, correctedDone?.status],
+);
+check(
+  'scan exclusive keys: same addresses (ignoring case of the host, a trailing slash) share a key, other addresses do not',
+  processingRoutes.scanExclusiveKey('https://Example.org/', null) === processingRoutes.scanExclusiveKey('https://example.org', null) &&
+    processingRoutes.scanExclusiveKey('https://example.org', null) !== processingRoutes.scanExclusiveKey('https://example.org', 'https://school.example.org') &&
+    processingRoutes.scanExclusiveKey('https://example.org', null) !== processingRoutes.scanExclusiveKey(null, 'https://example.org') &&
+    /^processing\.scan_website:[0-9a-f]{12}$/.test(processingRoutes.scanExclusiveKey('https://example.org', null)),
+  processingRoutes.scanExclusiveKey('https://example.org', null),
+);
+
 // ===========================================================================
 // 4. Questionnaire
 // ===========================================================================
@@ -382,9 +425,25 @@ check(
 await repo.saveGrants(userA, testGrants(userA) as Json);
 await repo.saveFoundations(userA, [testFoundation(userA)] as Json);
 
+const noSavedQ = await api('GET', '/api/processing/questionnaire', { token: tokenA });
+check(
+  'GET /api/processing/questionnaire before any questionnaire -> 404 "No questionnaire yet"',
+  noSavedQ.status === 404 && noSavedQ.data.detail === 'No questionnaire yet',
+  noSavedQ.data,
+);
+
 await mock.reset();
 const questionnaire = await call('POST', '/api/processing/generate-questionnaire', { token: tokenA });
 const questions: Json[] = questionnaire.data?.questions ?? [];
+const savedQ = await api('GET', '/api/processing/questionnaire', { token: tokenA });
+check(
+  'GET /api/processing/questionnaire after generating -> exactly the generate result (same questions, same shape)',
+  savedQ.status === 200 && JSON.stringify(savedQ.data) === JSON.stringify(questionnaire.data) &&
+    JSON.stringify(Object.keys(savedQ.data).sort()) === JSON.stringify(['questions', 'total_questions']) && savedQ.data.total_questions === 10,
+  savedQ.data,
+);
+const otherUserQ = await api('GET', '/api/processing/questionnaire', { token: tokenB });
+check("another user can't read the saved questionnaire (404 for them)", otherUserQ.status === 404 && otherUserQ.data.detail === 'No questionnaire yet', otherUserQ.data);
 check(
   'questionnaire job returns {questions, total_questions} parsed from a fenced answer',
   questionnaire.status === 200 && questions.length === 10 && questionnaire.data.total_questions === 10,
@@ -518,6 +577,68 @@ check(
   profileG.previous_grants,
 );
 
+// Answers are merged, never erased.
+const tokenH = await guest();
+const userH = await userIdOf(tokenH);
+const saveQuestionsH = (list: Json[]) =>
+  store.kv().set(`questionnaires/${store.keyPart(userH)}`, { questions: list, total_questions: list.length, created_at: new Date().toISOString(), source: 'ai' });
+const submitH = (answers: Json[]) => api('POST', '/api/processing/submit-questionnaire', { token: tokenH, json: { answers } });
+const Q_501 = 'Is your parish a registered 501(c)(3) nonprofit?';
+const Q_GRANTS = 'Which grants has your organization received in the past five years?';
+const Q_PANTRY = 'Does your parish operate a food pantry?';
+const Q_BUDGET = 'Do you have a budget for security improvements?';
+await saveQuestionsH([qText(1, Q_501, 'text'), qText(2, Q_GRANTS, 'text'), qText(3, Q_PANTRY, 'text'), qText(4, Q_BUDGET)]);
+const firstH = await submitH([
+  { question_id: 1, answer: 'Yes, through the USCCB group ruling' },
+  { question_id: 2, answer: 'Diocesan HVAC grant (2023)' },
+  { question_id: 3, answer: 'Yes, we serve 120 families each month' },
+  { question_id: 4, answer: true },
+]);
+const afterFirstH = await profileOf(tokenH);
+check(
+  'a "Yes, ..." sentence counts as yes: 501(c)(3) stays true and the food pantry is set (the Python read both as "no")',
+  firstH.status === 200 && firstH.data.answers_recorded === 4 && afterFirstH.is_501c3 === true && afterFirstH.has_food_pantry === true,
+  [firstH.data, afterFirstH.is_501c3, afterFirstH.has_food_pantry],
+);
+check('a yes/no answer to a budget question is not saved as the annual budget', afterFirstH.annual_budget === null, afterFirstH.annual_budget);
+
+// A newer questionnaire: different ids, one question reworded only in case and spacing, one new question, one blank answer.
+await saveQuestionsH([qText(1, `  ${Q_GRANTS.toUpperCase()}  `, 'text'), qText(2, Q_PANTRY, 'text'), qText(3, 'How many students are enrolled in your school?', 'text')]);
+const secondH = await submitH([
+  { question_id: 1, answer: 'Diocesan HVAC grant (2023); parish capital campaign match (2025)' },
+  { question_id: 2, answer: '   ' },
+  { question_id: 3, answer: '240' },
+]);
+const qaH: Json[] = (await profileOf(tokenH)).questionnaire_answers;
+check(
+  'second submission answering a subset keeps every earlier answer in order, updates the repeated one in place, adds the new one',
+  secondH.status === 200 && secondH.data.answers_recorded === 2 && qaH.length === 5 &&
+    qaH[0].question === Q_501 && qaH[0].answer === 'Yes, through the USCCB group ruling' &&
+    qaH[1].answer === 'Diocesan HVAC grant (2023); parish capital campaign match (2025)' &&
+    qaH[2].question === Q_PANTRY && qaH[2].answer === 'Yes, we serve 120 families each month' &&
+    qaH[3].question === Q_BUDGET && qaH[3].answer === true &&
+    qaH[4].question === 'How many students are enrolled in your school?' && qaH[4].answer === '240',
+  qaH,
+);
+check('a blank answer never erases or flips anything (food pantry still yes)', (await profileOf(tokenH)).has_food_pantry === true);
+const thirdH = await submitH([{ question_id: 99, question: Q_501, answer: 'No' }]);
+const afterThirdH = await profileOf(tokenH);
+check(
+  'question text sent with an answer is used (it replaces the earlier 501(c)(3) answer in place; "No" still maps to false)',
+  thirdH.status === 200 && afterThirdH.questionnaire_answers.length === 5 && afterThirdH.questionnaire_answers[0].answer === 'No' &&
+    afterThirdH.is_501c3 === false && !afterThirdH.questionnaire_answers.some((p: Json) => p.question === 'Question 99'),
+  afterThirdH.questionnaire_answers,
+);
+const merged = ai.mergeQuestionnaireAnswers(
+  [{ question: 'A?', answer: 1 }, { question: 'B?', answer: 2 }, { question: 'a?', answer: 'old duplicate' }, { note: 'not a Q&A pair' }],
+  [{ question: ' A? ', answer: 3 }, { question: 'C?', answer: 4 }],
+);
+check(
+  'mergeQuestionnaireAnswers: replaced in place, an older duplicate of the same question dropped, other entries kept, new ones appended',
+  JSON.stringify(merged) === JSON.stringify([{ question: ' A? ', answer: 3 }, { question: 'B?', answer: 2 }, { note: 'not a Q&A pair' }, { question: 'C?', answer: 4 }]),
+  merged,
+);
+
 // Fallback questionnaire for non-fatal errors only.
 await mock.fail('questionnaire_v1', 529, 'overloaded_error', 3);
 const qOverloaded = await call('POST', '/api/processing/generate-questionnaire', { token: tokenA });
@@ -529,6 +650,12 @@ check(
 );
 const storedDefault: Json = await store.kv().get(`questionnaires/${store.keyPart(userA)}`);
 check('fallback questionnaire is the one saved for answer mapping', storedDefault?.source === 'default' && storedDefault.questions.length === 8, storedDefault?.source);
+const savedDefault = await api('GET', '/api/processing/questionnaire', { token: tokenA });
+check(
+  'GET /api/processing/questionnaire returns the newest questionnaire (the standard one after a fallback), matching what answers map to',
+  savedDefault.status === 200 && JSON.stringify(savedDefault.data) === JSON.stringify(qOverloaded.data),
+  savedDefault.data?.total_questions,
+);
 
 await mock.fail('questionnaire_v1', 401, 'authentication_error', 1);
 const qFatal = await call('POST', '/api/processing/generate-questionnaire', { token: tokenA });
@@ -594,17 +721,31 @@ check('no profile was created by rejected uploads', (await api('GET', '/api/proc
 await mock.reset();
 const bulletin = fs.readFileSync(path.join(FIXTURES, 'bulletin.txt'), 'utf8');
 const txt = await uploadAndWait(tokenC, 'bulletin.txt', bulletin);
+const UPLOAD_RESULT_KEYS = ['document_id', 'extracted_text_length', 'facility_needs', 'filename', 'key_facts', 'other_signals', 'program_needs', 'security_concerns'];
+const KEY_FACTS = [
+  'The school enrolls 240 students in grades PK-8.',
+  '38% of school families receive tuition assistance in the 2025-26 school year.',
+  'The parish received a $15,000 grant from the Diocese of Example in 2023 to repair the HVAC system.',
+  'School enrollment grew 12% over the last two years.',
+];
 check(
-  'txt upload -> DocumentExtractionResult with every field',
+  'txt upload -> DocumentExtractionResult with every field, including key_facts',
   txt.status === 200 && /^[0-9a-f-]{36}$/.test(txt.data.document_id) && txt.data.filename === 'bulletin.txt' &&
     txt.data.extracted_text_length === bulletin.trim().length && txt.data.facility_needs.length === 2 && txt.data.program_needs.length === 2 &&
     txt.data.security_concerns.length === 1 && txt.data.other_signals.length === 2 &&
-    JSON.stringify(Object.keys(txt.data).sort()) ===
-      JSON.stringify(['document_id', 'extracted_text_length', 'facility_needs', 'filename', 'other_signals', 'program_needs', 'security_concerns']),
+    JSON.stringify(txt.data.key_facts) === JSON.stringify(KEY_FACTS) &&
+    JSON.stringify(Object.keys(txt.data).sort()) === JSON.stringify(UPLOAD_RESULT_KEYS),
   txt.data,
 );
 const docPrompt = (await prompts('document_signals_v1'))[0] ?? '';
 check('document prompt (document_signals_v1) has the filename and text', docPrompt.includes('DOCUMENT: bulletin.txt') && docPrompt.includes('parish hall roof leaks during heavy rain'), docPrompt.slice(0, 300));
+check(
+  'document prompt asks for key facts: citable, the document\'s own numbers and wording, at most 15, never invented',
+  docPrompt.includes('"key_facts"') && /enrollment and demographics/.test(docPrompt) && /prior grants received \(funder, amount, and year\)/.test(docPrompt) &&
+    /keeps the document's own numbers and wording/.test(docPrompt) && /at most 15/.test(docPrompt) && /Never invent/.test(docPrompt) &&
+    docPrompt.includes('Return ONLY the JSON object, no other text.'),
+  docPrompt.slice(-1600),
+);
 
 const docProfile = await profileOf(tokenC);
 const evidence: Json[] = docProfile.evidence ?? [];
@@ -615,11 +756,24 @@ check(
   docProfile,
 );
 check(
-  'every extracted item became profile evidence for the GrantWriter',
-  evidence.length === 7 && evidence.every((e) => /^ev_[0-9a-f]{10}$/.test(e.id) && e.type === 'document' && e.source_ref === 'Document: bulletin.txt' &&
+  'every extracted item and key fact became profile evidence for the GrantWriter (7 signals + 3 new facts; the 4th fact repeats a signal)',
+  evidence.length === 10 && evidence.every((e) => /^ev_[0-9a-f]{10}$/.test(e.id) && e.type === 'document' && e.source_ref === 'Document: bulletin.txt' &&
     Array.isArray(e.linked_programs) && e.linked_programs.length === 0 && typeof e.summary === 'string') &&
-    evidence.some((e) => e.summary === 'School enrollment grew 12% over the last two years') && new Set(evidence.map((e) => e.id)).size === 7,
+    evidence.some((e) => e.summary === 'School enrollment grew 12% over the last two years') && new Set(evidence.map((e) => e.id)).size === 10,
   evidence,
+);
+check(
+  'key facts land in profile.evidence with the document\'s source_ref, de-duplicated by normalized text',
+  KEY_FACTS.slice(0, 3).every((fact) => evidence.some((e) => e.summary === fact && e.source_ref === 'Document: bulletin.txt' && e.type === 'document')) &&
+    evidence.filter((e) => /^school enrollment grew 12% over the last two years\.?$/i.test(e.summary)).length === 1,
+  evidence.map((e) => e.summary),
+);
+// services/writer.ts builds the Map (fit_gap_v1) and Draft (section_draft_v1) prompts from profileSlice(profile).
+const sliceForWriter = typeof writer.profileSlice === 'function' ? JSON.stringify(writer.profileSlice(docProfile)) : '(writer.profileSlice not found)';
+check(
+  'the writer\'s profile slice (Map and Draft prompts) carries the key facts and their source',
+  KEY_FACTS.slice(0, 3).every((fact) => sliceForWriter.includes(JSON.stringify(fact))) && sliceForWriter.includes('Document: bulletin.txt'),
+  sliceForWriter.slice(0, 300),
 );
 const txtJob = await storedJob(userC, txt.jobId);
 check(
@@ -633,9 +787,10 @@ check(
 const again = await uploadAndWait(tokenC, 'bulletin.txt', bulletin);
 const againProfile = await profileOf(tokenC);
 check(
-  'uploading the same document twice does not duplicate needs, evidence, or sources',
-  again.status === 200 && againProfile.facility_needs.length === 2 && againProfile.program_needs.length === 2 &&
-    againProfile.security_concerns.length === 1 && againProfile.evidence.length === 7 &&
+  'uploading the same document twice does not duplicate needs, evidence (key facts included), or sources',
+  again.status === 200 && JSON.stringify(again.data.key_facts) === JSON.stringify(KEY_FACTS) && againProfile.facility_needs.length === 2 &&
+    againProfile.program_needs.length === 2 && againProfile.security_concerns.length === 1 && againProfile.evidence.length === 10 &&
+    KEY_FACTS.slice(0, 3).every((fact) => againProfile.evidence.filter((e: Json) => e.summary === fact).length === 1) &&
     againProfile.sources.filter((s: string) => s === 'Document: bulletin.txt').length === 1,
   againProfile,
 );
@@ -660,19 +815,48 @@ const pdfProfile = await profileOf(tokenC);
 check(
   '.pdf upload: text extracted and new signals added to needs and evidence',
   pdf.status === 200 && pdfPrompt.includes('The gym roof leaks over the stage.') && pdfProfile.facility_needs.length === 3 &&
-    pdfProfile.evidence.length === 9 && pdfProfile.evidence.some((e: Json) => e.summary === 'Finance council approved a 10% local match' && e.source_ref === 'Document: minutes.pdf'),
+    pdfProfile.evidence.length === 12 && pdfProfile.evidence.some((e: Json) => e.summary === 'Finance council approved a 10% local match' && e.source_ref === 'Document: minutes.pdf'),
   [pdf.data, pdfProfile.evidence.length],
+);
+check(
+  'an answer without key_facts (the old format) works as before: same result shape with key_facts: []',
+  Array.isArray(pdf.data.key_facts) && pdf.data.key_facts.length === 0 && JSON.stringify(Object.keys(pdf.data).sort()) === JSON.stringify(UPLOAD_RESULT_KEYS),
+  pdf.data,
 );
 await mock.reset();
 
-const longText = `START_MARKER ${'Parish hall roof repairs are needed. '.repeat(900)} MARKER_BEYOND_LIMIT`;
+const mediumText = `START_MARKER ${'Parish hall roof repairs are needed. '.repeat(1200)} END_OF_MEDIUM_MARKER`;
+const mediumDoc = await uploadAndWait(tokenC, 'medium.txt', mediumText);
+const mediumPrompt = (await prompts('document_signals_v1'))[0] ?? '';
+const mediumJob = await storedJob(userC, mediumDoc.jobId);
+check(
+  'a 44,000-character document is sent whole (the Python cut it at 30,000), with no "cut" note',
+  mediumDoc.status === 200 && mediumText.length > 40000 && mediumPrompt.includes('END_OF_MEDIUM_MARKER') &&
+    !(mediumJob?.notes ?? []).some((n: string) => /Read the first/.test(n)),
+  [mediumText.length, mediumJob?.notes],
+);
+await mock.reset();
+
+const longText = `START_MARKER ${'Parish hall roof repairs are needed. '.repeat(1700)} MARKER_BEYOND_LIMIT`;
 const longDoc = await uploadAndWait(tokenC, 'long.txt', longText);
 const longPrompt = (await prompts('document_signals_v1'))[0] ?? '';
+const longJob = await storedJob(userC, longDoc.jobId);
 check(
-  'long document: full length reported, only the first 30,000 characters sent (as in the Python)',
-  longDoc.status === 200 && longDoc.data.extracted_text_length === longText.length && longText.length > 30000 &&
-    longPrompt.includes('START_MARKER') && !longPrompt.includes('MARKER_BEYOND_LIMIT'),
+  'long document: full length reported, only the first 60,000 characters sent',
+  longDoc.status === 200 && longDoc.data.extracted_text_length === longText.length && longText.length > ai.DOCUMENT_TEXT_LIMIT &&
+    ai.DOCUMENT_TEXT_LIMIT === 60000 && longPrompt.includes('START_MARKER') && !longPrompt.includes('MARKER_BEYOND_LIMIT'),
   longDoc.data,
+);
+check(
+  'a cut document gets a job note saying how much was read',
+  (longJob?.notes ?? []).some((n: string) => n.includes(`Read the first 60,000 of ${longText.length.toLocaleString('en-US')} characters of "long.txt"`)),
+  longJob?.notes,
+);
+check(
+  'cutting text never leaves half an emoji (the Claude API rejects that as invalid JSON)',
+  ai.cutText('ab\u{1F64F}cd', 3) === 'ab' && ai.cutText('ab\u{1F64F}cd', 4) === 'ab\u{1F64F}' && ai.wellFormed('x\uD83Dy') === 'x\uFFFDy' &&
+    ai.buildDocumentPrompt('Roof \uD83D', 'a.txt').includes('Roof \uFFFD'),
+  ai.cutText('ab\u{1F64F}cd', 3),
 );
 
 const evidenceBefore = (await profileOf(tokenC)).evidence.length;
@@ -686,7 +870,76 @@ check(
   docBusy.status === 503 && docBusy.data.detail === 'Document processing failed: Claude is overloaded right now. Wait a minute and try again.',
   docBusy.data,
 );
+await mock.reset();
+await mock.fixtures({ document_signals_v1: { text: '{"facility_needs": ["Gym roof', stop_reason: 'max_tokens' } });
+const docCutOff = await uploadAndWait(tokenC, 'other.txt', 'The sanctuary carpet is worn through.');
+await mock.fixtures({ document_signals_v1: 'I am sorry, but I cannot help with that document.' });
+const docUnreadable = await uploadAndWait(tokenC, 'other.txt', 'The sanctuary carpet is worn through.');
+check(
+  'an answer cut off at max_tokens says so and what to do (uploading the same file again would fail the same way); other unreadable answers keep the old message',
+  docCutOff.status === 502 && /"other\.txt" was cut off before it finished\. Upload a shorter version/.test(docCutOff.data.detail) &&
+    docUnreadable.status === 502 &&
+    docUnreadable.data.detail === 'Document processing failed: Claude\'s answer about "other.txt" couldn\'t be read. Upload the document again.',
+  [docCutOff.data, docUnreadable.data],
+);
 check('failed document jobs changed nothing', (await profileOf(tokenC)).evidence.length === evidenceBefore);
+await mock.reset();
+
+// Evidence stays at a sensible cap: the oldest document items go first, never the person's own items.
+const tokenK = await guest();
+const userK = await userIdOf(tokenK);
+await saveKey(tokenK);
+const ownItems = Array.from({ length: 5 }, (_, i) => ({ id: `ev_own_${i}`, type: i % 2 ? 'stakeholder_answer' : 'note', summary: `Own item ${i}`, source_ref: 'Principal', linked_programs: [] }));
+const oldDocItems = Array.from({ length: 190 }, (_, i) => ({ id: `ev_old_${i}`, type: 'document', summary: `Old document fact ${i}`, source_ref: 'Document: old-report.pdf', linked_programs: [] }));
+await repo.saveProfile(userK, { ...ai.minimalProfile(userK), evidence: [ownItems[0], ...oldDocItems.slice(0, 100), ...ownItems.slice(1), ...oldDocItems.slice(100)] } as Json);
+const manyFacts = Array.from({ length: 17 }, (_, i) => `Fact number ${i + 1} from the annual report.`);
+await mock.fixtures({
+  document_signals_v1: JSON.stringify({ facility_needs: [], program_needs: [], security_concerns: [], other_signals: [], key_facts: manyFacts }),
+});
+const capped = await uploadAndWait(tokenK, 'annual-report.txt', 'Annual report text for the cap test.');
+const cappedProfile = await profileOf(tokenK);
+const cappedJob = await storedJob(userK, capped.jobId);
+const cappedIds = new Set(cappedProfile.evidence.map((e: Json) => e.id));
+check(
+  'at most 15 key facts per document are kept (and returned)',
+  capped.status === 200 && JSON.stringify(capped.data.key_facts) === JSON.stringify(manyFacts.slice(0, 15)),
+  capped.data?.key_facts?.length,
+);
+check(
+  'evidence capped at 200: the 10 oldest document items were dropped; the person\'s own items and the new facts were kept',
+  cappedProfile.evidence.length === ai.MAX_PROFILE_EVIDENCE && ai.MAX_PROFILE_EVIDENCE === 200 &&
+    ownItems.every((item) => cappedIds.has(item.id)) && oldDocItems.slice(0, 10).every((item) => !cappedIds.has(item.id)) &&
+    oldDocItems.slice(10).every((item) => cappedIds.has(item.id)) &&
+    manyFacts.slice(0, 15).every((fact) => cappedProfile.evidence.some((e: Json) => e.summary === fact && e.source_ref === 'Document: annual-report.txt')) &&
+    (cappedJob?.notes ?? []).some((n: string) => /removed the 10 oldest item\(s\) that came from documents/.test(n)),
+  [cappedProfile.evidence.length, cappedJob?.notes],
+);
+await mock.reset();
+
+const odd = ai.parseDocumentSignals(JSON.stringify({
+  facility_needs: ['List of specific facility needs mentioned', 'Roof leaks'],
+  other_signals: 'None',
+  key_facts: [
+    { fact: 'Founded in 1952.' },
+    '- 38% of families receive tuition assistance.',
+    '38% of families receive tuition assistance',
+    'Concrete facts stated in the document, one short sentence each',
+    '',
+    'N/A',
+    42,
+  ],
+}));
+check(
+  'key facts parse leniently: {"fact": ...} objects read, bullets stripped, duplicates, blanks and template echoes dropped',
+  JSON.stringify(odd) === JSON.stringify({
+    facility_needs: ['Roof leaks'],
+    program_needs: [],
+    security_concerns: [],
+    other_signals: [],
+    key_facts: ['Founded in 1952.', '38% of families receive tuition assistance.'],
+  }),
+  odd,
+);
 
 // ===========================================================================
 // 6. Matching prerequisites

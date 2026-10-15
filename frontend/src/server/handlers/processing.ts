@@ -9,7 +9,7 @@
  */
 import { JOB_MAX_RUNTIME_MS } from '../config';
 import { ClaudeError, errorMessage, HttpError, isFatalClaudeError } from '../errors';
-import type { JobContext, JobHandler } from '../jobs';
+import { jobsPrefix, type Job, type JobContext, type JobHandler } from '../jobs';
 import { logger } from '../log';
 import { crawlSite, type CrawlResult } from '../net';
 import { getFoundations, getGrants, getProfile, saveMatchResults, updateProfile } from '../repo';
@@ -19,6 +19,7 @@ import {
   buildScanPrompt,
   defaultQuestionnaire,
   matchGrants,
+  MAX_PROFILE_EVIDENCE,
   mergeDocumentIntoProfile,
   mergeScanIntoProfile,
   minimalProfile,
@@ -29,6 +30,7 @@ import {
   QUESTIONNAIRE_GRANT_SAMPLE,
   questionnaireKey,
   withFoundations,
+  type DocumentMergeStats,
   type StoredQuestionnaire,
 } from '../services/ai';
 import { kv } from '../store';
@@ -59,6 +61,11 @@ export interface DocumentJobInput {
   /** Length of the full extracted text (the Python reported this, not the capped length). */
   text_length: number;
 }
+
+/** A scan that finished after the person started a newer one (e.g. with corrected addresses). */
+export const SCAN_SUPERSEDED =
+  'You started a newer website scan while this one was running, so this one was not saved to your profile. ' +
+  "Wait for the newer scan to finish; its results are the ones that count.";
 
 /**
  * Non-fatal Claude failures in a single-call step (scan, document) fail the
@@ -100,6 +107,38 @@ export function unreadableWebsiteMessage(urls: string[], problems: string[]): st
     'Instead, use "Enter the basics by hand" or "Skip to questions" on this step, then upload documents ' +
     '(bulletins, annual reports, newsletters) in the Documents step and add details in the free-form notes on the questions step.'
   );
+}
+
+/** Job ids start with their creation second: job_20261014T231502Z_ab12cd34. */
+const JOB_SECOND_PREFIX = 'job_YYYYMMDDTHHMMSSZ'.length;
+
+/**
+ * Id of a website scan this person started after this one, if any. Scans of
+ * different addresses may run side by side (each has its own exclusive key),
+ * and the older one must not overwrite the newer one's results when it
+ * finishes last.
+ */
+async function newerScanJob(ctx: JobContext): Promise<string | null> {
+  const prefix = jobsPrefix(ctx.userId);
+  const ownSecond = ctx.job.id.slice(0, JOB_SECOND_PREFIX);
+  const keys = (await kv().list(prefix)).filter((key) => {
+    const id = key.slice(prefix.length);
+    return id !== ctx.job.id && id.slice(0, JOB_SECOND_PREFIX) >= ownSecond;
+  });
+  for (const key of keys.slice(-20)) {
+    const job = await kv().get<Job>(key);
+    if (job && job.kind === PROCESSING_JOB_KINDS.scanWebsite && job.created_at > ctx.job.created_at) return job.id;
+  }
+  return null;
+}
+
+/** Stop (409) when the person started a newer scan: its results are the ones that count. */
+async function stopIfSuperseded(ctx: JobContext, stage: 'before_claude' | 'before_save'): Promise<void> {
+  const newer = await newerScanJob(ctx);
+  if (!newer) return;
+  logger.warn('website_scan_superseded', { user_id: ctx.userId, job_id: ctx.job.id, newer_job_id: newer, stage });
+  ctx.note(`Not saved: a newer website scan (${newer}) was started while this one was running`);
+  throw new HttpError(409, SCAN_SUPERSEDED);
 }
 
 async function scanWebsite(ctx: JobContext): Promise<WebsiteScanResult> {
@@ -145,6 +184,8 @@ async function scanWebsite(ctx: JobContext): Promise<WebsiteScanResult> {
     logger.warn('website_scan_partial', { user_id: ctx.userId, urls_read: urlsRead, problems: [...problems] });
   }
 
+  // Not worth paying Claude for a scan the person already replaced.
+  await stopIfSuperseded(ctx, 'before_claude');
   await ctx.progress('Asking Claude to pull out your parish and school details...');
   const ai = await ctx.claude();
   let answer: string;
@@ -159,6 +200,7 @@ async function scanWebsite(ctx: JobContext): Promise<WebsiteScanResult> {
     throw new HttpError(502, "Website scan failed: Claude's answer couldn't be read. Please run the scan again.");
   }
 
+  await stopIfSuperseded(ctx, 'before_save');
   await ctx.progress('Saving what we found to your profile...');
   await updateProfile(ctx.userId, (current) =>
     mergeScanIntoProfile(current ?? minimalProfile(ctx.userId), result, { churchUrl, schoolUrl, urlsRead }),
@@ -217,36 +259,70 @@ async function generateQuestionnaire(ctx: JobContext): Promise<Questionnaire> {
 // Document signals
 // =============================================================================
 
+const count = (n: number) => n.toLocaleString('en-US');
+
 async function uploadDocument(ctx: JobContext): Promise<DocumentExtractionResult> {
   const input = ctx.input as DocumentJobInput;
-  await ctx.progress(`Reading ${input.filename} with Claude...`);
+  const fullLength = input.text_length ?? input.text.length;
+  const cut = fullLength > input.text.length;
+  if (cut) {
+    const share = Math.floor((input.text.length / fullLength) * 100);
+    ctx.note(
+      `Read the first ${count(input.text.length)} of ${count(fullLength)} characters of "${input.filename}" (${share}%); ` +
+        'the rest was not sent to Claude. To include later pages, upload them as a separate file.',
+    );
+  }
+  await ctx.progress(
+    cut
+      ? `Reading ${input.filename} with Claude (the first ${count(input.text.length)} of ${count(fullLength)} characters)...`
+      : `Reading ${input.filename} with Claude...`,
+  );
   const ai = await ctx.claude();
   let answer: string;
+  let stopReason: string | null = null;
   try {
-    answer = (await ai.call({
+    const response = await ai.call({
       stage: 'documents',
       promptId: PROMPT_IDS.documents,
       prompt: buildDocumentPrompt(input.text, input.filename),
-      maxTokens: 2000,
-    })).text;
+      // Needs lists plus up to 15 key facts from a long report.
+      maxTokens: 4000,
+    });
+    answer = response.text;
+    stopReason = response.stopReason;
   } catch (error) {
     throw stepFailed('Document processing', error);
   }
   const signals = parseDocumentSignals(answer);
   if (!signals) {
-    logger.error('document_unreadable_answer', { user_id: ctx.userId, filename: input.filename, answer_preview: answer.slice(0, 200) });
-    throw new HttpError(502, `Document processing failed: Claude's answer about "${input.filename}" couldn't be read. Upload the document again.`);
+    // Lengths only: Claude's answer about a document can quote the document.
+    logger.error('document_unreadable_answer', { user_id: ctx.userId, filename: input.filename, answer_chars: answer.length, stop_reason: stopReason });
+    // Uploading again would fail the same way when the answer was cut off or declined.
+    const why =
+      stopReason === 'max_tokens'
+        ? `Claude's answer about "${input.filename}" was cut off before it finished. Upload a shorter version (for example, only the pages that matter).`
+        : stopReason === 'refusal'
+          ? `Claude declined to read "${input.filename}". Check that it is the right file, or upload a different document.`
+          : `Claude's answer about "${input.filename}" couldn't be read. Upload the document again.`;
+    throw new HttpError(502, `Document processing failed: ${why}`);
   }
 
   const result: DocumentExtractionResult = {
     document_id: input.document_id,
     filename: input.filename,
-    extracted_text_length: input.text_length ?? input.text.length,
+    extracted_text_length: fullLength,
     ...signals,
   };
   await ctx.progress('Adding what we found to your profile...');
   // Creates the profile when the website scan was skipped (the Python dropped these signals).
-  await updateProfile(ctx.userId, (current) => mergeDocumentIntoProfile(current ?? minimalProfile(ctx.userId), result));
+  const stats: DocumentMergeStats = { evidence_added: 0, evidence_dropped: 0 };
+  await updateProfile(ctx.userId, (current) => mergeDocumentIntoProfile(current ?? minimalProfile(ctx.userId), result, stats));
+  ctx.note(
+    `Claude found ${signals.key_facts.length} key fact(s); ${stats.evidence_added} new evidence item(s) were added to the profile for the writer (repeats are skipped)`,
+  );
+  if (stats.evidence_dropped) {
+    ctx.note(`Profile evidence is capped at ${MAX_PROFILE_EVIDENCE} items: removed the ${stats.evidence_dropped} oldest item(s) that came from documents`);
+  }
   logger.info('document_signals_saved', {
     user_id: ctx.userId,
     document_id: result.document_id,
@@ -254,6 +330,11 @@ async function uploadDocument(ctx: JobContext): Promise<DocumentExtractionResult
     program_needs: result.program_needs.length,
     security_concerns: result.security_concerns.length,
     other_signals: result.other_signals.length,
+    key_facts: signals.key_facts.length,
+    evidence_added: stats.evidence_added,
+    evidence_dropped: stats.evidence_dropped,
+    chars_sent: input.text.length,
+    chars_total: fullLength,
   });
   return result;
 }

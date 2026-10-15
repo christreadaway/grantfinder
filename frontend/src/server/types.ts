@@ -272,6 +272,8 @@ export interface Questionnaire {
 export interface QuestionnaireAnswer {
   question_id: number;
   answer: unknown;
+  /** The question text the person saw, when the website sends it (wins over the id lookup). */
+  question?: string | null;
 }
 
 export interface DocumentExtractionResult {
@@ -282,6 +284,8 @@ export interface DocumentExtractionResult {
   program_needs: string[];
   security_concerns: string[];
   other_signals: string[];
+  /** Citable facts stated in the document (at most 15); also saved as profile evidence for the writer. */
+  key_facts?: string[];
 }
 
 export interface DiscoveryResult {

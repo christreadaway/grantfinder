@@ -28,7 +28,9 @@ import { getGrants, getMatchResults, getProfile, updateMatchResults, updateProfi
 import type { Router } from '../router';
 import {
   applyQuestionnaireAnswers,
+  cutText,
   DOCUMENT_TEXT_LIMIT,
+  isBlankAnswer,
   latestMatchSessionId,
   minimalProfile,
   questionnaireKey,
@@ -36,11 +38,12 @@ import {
 } from '../services/ai';
 import { documentExtension, extractDocumentText, INVALID_DOCUMENT_TYPE, isAllowedDocument } from '../services/documents';
 import { kv } from '../store';
-import type { QuestionnaireAnswer } from '../types';
+import type { Questionnaire, QuestionnaireAnswer, QuestionnaireQuestion } from '../types';
 import { applyProfileUpdate, parseProfileBody } from './profile';
 
 export const NO_MATCH_RESULTS = 'No match results yet. Run matching first.';
 const NO_PROFILE = 'No profile found. Please complete the setup process.';
+export const NO_QUESTIONNAIRE = 'No questionnaire yet';
 /** Room for multipart boundaries and headers around the file itself. */
 const MULTIPART_OVERHEAD_BYTES = 64 * 1024;
 
@@ -65,6 +68,31 @@ function websiteUrl(raw: string | null): string | null {
   return url;
 }
 
+/** An address as compared for "same scan": host case, a trailing slash, and #fragments ignored. */
+function comparableUrl(url: string | null): string {
+  if (!url) return '';
+  try {
+    const parsed = new URL(url);
+    return `${parsed.protocol}//${parsed.host}${parsed.pathname.replace(/\/+$/, '')}${parsed.search}`;
+  } catch {
+    return url.trim().toLowerCase();
+  }
+}
+
+/**
+ * Exclusive key of a website scan: the same addresses attach to the scan
+ * already running (409, as for a double click), while corrected addresses
+ * start a new scan instead of waiting on the old one.
+ */
+export function scanExclusiveKey(churchUrl: string | null, schoolUrl: string | null): string {
+  const digest = crypto
+    .createHash('sha256')
+    .update(`${comparableUrl(churchUrl)}\n${comparableUrl(schoolUrl)}`)
+    .digest('hex')
+    .slice(0, 12);
+  return `${PROCESSING_JOB_KINDS.scanWebsite}:${digest}`;
+}
+
 function megabytes(bytes: number): string {
   return (bytes / (1024 * 1024)).toFixed(1).replace(/\.0$/, '');
 }
@@ -82,7 +110,10 @@ function wholeNumber(value: unknown): number | null {
   return null;
 }
 
-/** QuestionnaireSubmission: {answers: [{question_id, answer}], free_form_text?} with readable 422s. */
+/**
+ * QuestionnaireSubmission: {answers: [{question_id, answer, question?}], free_form_text?}
+ * with readable 422s. `question` (the text the person saw) is optional.
+ */
 function parseSubmission(body: Record<string, unknown>): { answers: QuestionnaireAnswer[]; freeFormText: string | null } {
   if (body.answers === undefined || body.answers === null) {
     throw new HttpError(422, 'Field "answers" is required: a list of {"question_id": number, "answer": ...}.');
@@ -98,7 +129,8 @@ function parseSubmission(body: Record<string, unknown>): { answers: Questionnair
     const questionId = wholeNumber(record.question_id);
     if (questionId === null) throw new HttpError(422, `answers[${index}].question_id must be a whole number.`);
     if (!('answer' in record)) throw new HttpError(422, `answers[${index}].answer is required.`);
-    return { question_id: questionId, answer: record.answer };
+    const question = typeof record.question === 'string' ? record.question.replace(/\s+/g, ' ').trim().slice(0, 1000) : '';
+    return { question_id: questionId, answer: record.answer, ...(question ? { question } : {}) };
   });
   const freeFormText = optionalString(body, 'free_form_text')?.trim() || null;
   return { answers, freeFormText };
@@ -129,7 +161,7 @@ async function scanWebsite(ctx: RequestContext): Promise<Response> {
   const schoolUrl = websiteUrl(optionalString(body, 'school_url'));
   if (!churchUrl && !schoolUrl) throw new HttpError(400, 'At least one website URL is required');
   const input: ScanJobInput = { church_url: churchUrl, school_url: schoolUrl };
-  return startJob(ctx, PROCESSING_JOB_KINDS.scanWebsite, input);
+  return startJob(ctx, PROCESSING_JOB_KINDS.scanWebsite, input, { exclusiveKey: scanExclusiveKey(churchUrl, schoolUrl) });
 }
 
 async function generateQuestionnaire(ctx: RequestContext): Promise<Response> {
@@ -140,24 +172,49 @@ async function generateQuestionnaire(ctx: RequestContext): Promise<Response> {
   return startJob(ctx, PROCESSING_JOB_KINDS.generateQuestionnaire, {});
 }
 
-/** No Claude call here, so it stays synchronous (as in the Python). */
+/** The questions of a saved questionnaire that answers can be mapped to. */
+function savedQuestions(stored: StoredQuestionnaire | null): QuestionnaireQuestion[] {
+  if (!stored || !Array.isArray(stored.questions)) return [];
+  return stored.questions.filter(
+    (question) => Number.isInteger(question?.id) && typeof question.question === 'string' && question.question.trim() !== '',
+  );
+}
+
+/**
+ * No Claude call here, so it stays synchronous (as in the Python). Answers
+ * are merged into the earlier ones (never erased); blank answers are skipped.
+ */
 async function submitQuestionnaire(ctx: RequestContext) {
   const user = await ctx.user();
   const { answers, freeFormText } = parseSubmission(await ctx.json());
   const stored = await kv().get<StoredQuestionnaire>(questionnaireKey(user.id));
   const questionsById = new Map<number, string>();
-  for (const question of stored?.questions ?? []) {
-    if (typeof question?.id === 'number' && typeof question.question === 'string') questionsById.set(question.id, question.question);
-  }
-  const unmatched = answers.filter((answer) => !questionsById.has(answer.question_id)).length;
+  for (const question of savedQuestions(stored)) questionsById.set(question.id, question.question);
+  const unmatched = answers.filter((answer) => !answer.question && !questionsById.has(answer.question_id)).length;
   if (unmatched) {
     logger.warn('questionnaire_answers_unmatched', { user_id: user.id, unmatched, has_questionnaire: Boolean(stored) });
   }
-  await updateProfile(user.id, (current) =>
+  const recorded = answers.filter((answer) => !isBlankAnswer(answer.answer)).length;
+  const saved = await updateProfile(user.id, (current) =>
     applyQuestionnaireAnswers(current ?? minimalProfile(user.id), answers, freeFormText, questionsById),
   );
-  logger.info('questionnaire_submitted', { user_id: user.id, answers: answers.length, free_form: Boolean(freeFormText) });
-  return { message: 'Questionnaire submitted successfully', answers_recorded: answers.length };
+  logger.info('questionnaire_submitted', {
+    user_id: user.id,
+    answers: answers.length,
+    recorded,
+    blank_skipped: answers.length - recorded,
+    answers_saved_total: saved?.questionnaire_answers.length ?? 0,
+    free_form: Boolean(freeFormText),
+  });
+  return { message: 'Questionnaire submitted successfully', answers_recorded: recorded };
+}
+
+/** The questionnaire last generated for this person, in the generate step's result shape (so a reload doesn't pay for a new one). */
+async function savedQuestionnaire(ctx: RequestContext): Promise<Questionnaire> {
+  const user = await ctx.user();
+  const questions = savedQuestions(await kv().get<StoredQuestionnaire>(questionnaireKey(user.id)));
+  if (!questions.length) throw new HttpError(404, NO_QUESTIONNAIRE);
+  return { questions, total_questions: questions.length };
 }
 
 async function uploadDocument(ctx: RequestContext): Promise<Response> {
@@ -182,10 +239,17 @@ async function uploadDocument(ctx: RequestContext): Promise<Response> {
   const input: DocumentJobInput = {
     document_id: crypto.randomUUID(),
     filename,
-    text: text.slice(0, DOCUMENT_TEXT_LIMIT),
+    text: cutText(text, DOCUMENT_TEXT_LIMIT),
     text_length: text.length,
   };
-  logger.info('document_uploaded', { user_id: user.id, filename, type: documentExtension(filename), bytes: entry.size, chars: text.length });
+  logger.info('document_uploaded', {
+    user_id: user.id,
+    filename,
+    type: documentExtension(filename),
+    bytes: entry.size,
+    chars: text.length,
+    chars_sent: input.text.length,
+  });
   // Several documents may be processing at once; each is its own job.
   return startJob(ctx, PROCESSING_JOB_KINDS.uploadDocument, input, { exclusiveKey: null });
 }
@@ -231,6 +295,7 @@ async function toggleShortlist(ctx: RequestContext) {
 export function registerProcessingRoutes(router: Router): void {
   router.post('/api/processing/scan-website', scanWebsite);
   router.post('/api/processing/generate-questionnaire', generateQuestionnaire);
+  router.get('/api/processing/questionnaire', savedQuestionnaire);
   router.post('/api/processing/submit-questionnaire', submitQuestionnaire);
   router.post('/api/processing/upload-document', uploadDocument);
 
