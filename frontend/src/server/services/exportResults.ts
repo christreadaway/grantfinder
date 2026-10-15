@@ -83,10 +83,33 @@ export function generatedLabel(date: Date): string {
 // =============================================================================
 
 const CSV_HEADER = [
-  'Rank', 'Grant Name', 'Funder', 'Amount', 'Deadline', 'Score (%)', 'Tier', 'Category', 'Geo Qualified', 'Contact', 'URL', 'Explanation',
-  'Geography', 'Religious Eligibility', 'Deadline Notes', 'Typical Award', 'Funder Priorities', 'Eligibility Notes', 'Last Verified',
+  'Rank', 'Grant Name', 'Funder', 'Amount', 'Deadline', 'Score (%)', 'Tier', 'Status', 'Category', 'Geo Qualified', 'Contact', 'URL', 'Explanation',
+  'Geography', 'Religious Eligibility', 'Deadline Notes', 'Typical Award', 'Funder Priorities', 'Eligibility Notes', 'Last Verified', 'Confidence',
   'Past Award Levels', 'Catholic School Track Record', 'Funder Outlook',
 ];
+
+/** The Status of a grant that is no longer in the person's grant database (retired or deleted after matching). */
+export const STATUS_REMOVED = 'Removed: no longer in your grant database';
+
+/**
+ * Where a match stands today, in words: removed from the grant database; ruled out since it was
+ * matched ("CLOSED; not eligible now (was 88%)"); otherwise the grant's current status (OPEN,
+ * Rolling, Check deadline, CLOSED), or nothing for results saved before status was carried.
+ */
+export function matchStatusLabel(match: GrantMatch): string {
+  if (match.grant_removed) return STATUS_REMOVED;
+  const status = match.status ?? '';
+  if (typeof match.score_before === 'number') {
+    const now = `not eligible now (was ${match.score_before}%)`;
+    return status ? `${status}; ${now}` : `${now.charAt(0).toUpperCase()}${now.slice(1)}`;
+  }
+  return status;
+}
+
+/** "verified", "partial" or nothing: how much of the grant record was confirmed on the funder's site. */
+function confidenceText(match: GrantMatch): string {
+  return match.confidence === 'verified' || match.confidence === 'partial' ? match.confidence : '';
+}
 
 /** How the religious_eligibility values read to a person. */
 export const RELIGIOUS_ELIGIBILITY_LABELS: Record<string, string> = {
@@ -119,6 +142,7 @@ export function matchesCsv(matches: GrantMatch[]): string {
       match.deadline,
       match.score,
       match.score_tier,
+      matchStatusLabel(match),
       match.category,
       match.geo_qualified,
       match.contact,
@@ -131,6 +155,7 @@ export function matchesCsv(matches: GrantMatch[]): string {
       (match.focus_areas ?? []).join('; '),
       match.eligibility_notes ?? '',
       match.last_verified ?? '',
+      confidenceText(match),
       match.funder_intel?.applicable ? match.funder_intel.award_levels ?? '' : '',
       match.funder_intel?.applicable ? match.funder_intel.catholic_school_track_record ?? '' : '',
       match.funder_intel?.applicable ? match.funder_intel.outlook ?? '' : '',
@@ -169,6 +194,7 @@ function cell(value: unknown): string {
 const pct = (value: unknown): string => `${typeof value === 'number' && Number.isFinite(value) ? value : 0}%`;
 
 export function matchesMarkdown(matches: GrantMatch[], results: MatchResults, now: Date, notice?: string): string {
+  const removed = Array.isArray(results.matches) ? results.matches.filter((match) => match.grant_removed).length : 0;
   const lines: string[] = ['# GrantFinder AI - Match Results', ''];
   if (notice) lines.push(`> ${notice}`, '');
   lines.push(
@@ -182,6 +208,7 @@ export function matchesMarkdown(matches: GrantMatch[], results: MatchResults, no
     `- Possible Matches (50-69%): ${results.possible_matches}`,
     `- Weak Matches (25-49%): ${results.weak_matches}`,
     `- Not Eligible (0-24%): ${results.not_eligible}`,
+    ...(removed ? [`- No longer in your grant database (not counted above): ${removed}`] : []),
     '',
     '---',
     '',
@@ -205,6 +232,7 @@ export function matchesMarkdown(matches: GrantMatch[], results: MatchResults, no
       `| Funder | ${cell(match.funder)} |`,
       `| Amount | ${cell(match.amount)} |`,
       `| Deadline | ${cell(match.deadline)} |`,
+      ...(matchStatusLabel(match) ? [`| Status | ${cell(matchStatusLabel(match))} |`] : []),
       `| Category | ${cell(titleCase(match.category))} |`,
       `| Geographic | ${cell(match.geo_qualified)} |`,
       ...(match.geography ? [`| Where applicants must be | ${cell(match.geography)} |`] : []),
@@ -213,7 +241,9 @@ export function matchesMarkdown(matches: GrantMatch[], results: MatchResults, no
       ...(match.typical_award ? [`| Typical award | ${cell(match.typical_award)} |`] : []),
       ...(match.focus_areas?.length ? [`| Funder priorities | ${cell(match.focus_areas.join('; '))} |`] : []),
       ...(match.eligibility_notes ? [`| Who can apply | ${cell(match.eligibility_notes)} |`] : []),
-      ...(match.last_verified ? [`| Last verified | ${cell(match.last_verified)} |`] : []),
+      ...(match.last_verified
+        ? [`| Last verified | ${cell(match.last_verified)}${match.confidence === 'partial' ? ' (partly verified)' : ''} |`]
+        : []),
       ...(match.funder_intel?.applicable && match.funder_intel.award_levels ? [`| Past award levels | ${cell(match.funder_intel.award_levels)} |`] : []),
       ...(match.funder_intel?.applicable && match.funder_intel.catholic_school_track_record
         ? [`| Catholic school track record | ${cell(match.funder_intel.catholic_school_track_record)} |`]
@@ -295,11 +325,15 @@ function foldIcsLine(line: string): string {
 const icsDate = (iso: string) => iso.replace(/-/g, '');
 const icsStamp = (date: Date) => date.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
 
-/** The matches that go on the calendar: an upcoming due date, and a tier worth a reminder (or shortlisted). */
+/**
+ * The matches that go on the calendar: an upcoming due date, and a tier worth a reminder (or
+ * shortlisted). Never a grant no longer in the grant database, nor one not eligible (including
+ * one ruled out since it was matched), even when shortlisted.
+ */
 export function calendarMatches(matches: GrantMatch[], today = todayIso()): Array<{ match: GrantMatch; due: string }> {
   const events: Array<{ match: GrantMatch; due: string }> = [];
   for (const match of matches) {
-    if (match.score_tier === 'not_eligible') continue;
+    if (match.grant_removed || match.score_tier === 'not_eligible') continue;
     if (!match.is_shortlisted && !CALENDAR_TIERS.has(match.score_tier)) continue;
     const due = parseDeadline(match.deadline, today);
     if (due && due >= today) events.push({ match, due });

@@ -9,10 +9,10 @@
 import { HttpError } from '../errors';
 import { fileResponse, requireString } from '../http';
 import { logger } from '../log';
-import { getGrants, getMatchResults } from '../repo';
+import { getMatchResults } from '../repo';
 import type { Router } from '../router';
 import { buildExport, EXPORT_FORMATS, PDF_NOTICE, type ExportFile, type ExportFormat } from '../services/exportResults';
-import { withGrantDetails } from './processing';
+import { currentMatchResults } from './processing';
 
 function exportFormat(value: unknown): ExportFormat {
   if (value === undefined || value === null || value === '') {
@@ -53,8 +53,10 @@ export function registerExportRoutes(router: Router): void {
     const saved = await getMatchResults(user.id, sessionId);
     if (!saved) throw new HttpError(404, 'Match results not found');
     if (saved.user_id !== user.id) throw new HttpError(403, 'Not authorized');
-    // The grants' current details (a refreshed starter database), as the results page shows them.
-    const results = withGrantDetails(saved, await getGrants(user.id));
+    // The results as they stand today, exactly as the results page shows them: the grants' current
+    // details, grants removed since matching flagged (and in no tier), grants their current record or
+    // the current profile now rules out marked not eligible (and left off the calendar).
+    const results = await currentMatchResults(user.id, saved);
 
     const matches = includeAll ? results.matches : results.matches.filter((match) => match.is_shortlisted);
     let file: ExportFile;
