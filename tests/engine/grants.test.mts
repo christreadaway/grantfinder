@@ -797,15 +797,16 @@ check(
   'CSV header row (the Python columns, then the grant facts)',
   csvLines[0] ===
     'Rank,Grant Name,Funder,Amount,Deadline,Score (%),Tier,Category,Geo Qualified,Contact,URL,Explanation,' +
-      'Geography,Religious Eligibility,Deadline Notes,Typical Award,Funder Priorities,Eligibility Notes,Last Verified',
+      'Geography,Religious Eligibility,Deadline Notes,Typical Award,Funder Priorities,Eligibility Notes,Last Verified,' +
+      'Past Award Levels,Catholic School Track Record,Funder Outlook',
   csvLines[0],
 );
 check(
   'CSV row quoting like Python csv',
-  csvLines[1] === '1,Example Catholic Schools Technology Grant,Example Catholic Education Fund,"Up to $10,000",2026-12-01,92,excellent,catholic_school,Yes,grants@example.org,https://example.org/tech-grant,"Strong fit: technology needs, ""STEM"" plan, and eligibility.",,,,,,,',
+  csvLines[1] === '1,Example Catholic Schools Technology Grant,Example Catholic Education Fund,"Up to $10,000",2026-12-01,92,excellent,catholic_school,Yes,grants@example.org,https://example.org/tech-grant,"Strong fit: technology needs, ""STEM"" plan, and eligibility.",,,,,,,,,,',
   csvLines[1],
 );
-check('CSV: formula-looking text is neutralized, multi-line text quoted', csvLines[2].startsWith(`2,"'=SUM(1,2) Example Formula Grant"`) && csvLines[2].endsWith('"Line one\nline two",,,,,,,'), csvLines[2]);
+check('CSV: formula-looking text is neutralized, multi-line text quoted', csvLines[2].startsWith(`2,"'=SUM(1,2) Example Formula Grant"`) && csvLines[2].endsWith('"Line one\nline two",,,,,,,,,,'), csvLines[2]);
 check('CSV: all 3 matches with include_all_matches', csvLines.length === 5 && csvLines[4] === '', csvLines.length);
 
 const csvShort = await api('POST', '/api/export', { token: tokenA, json: { session_id: 'session_export_1', format: 'csv' } });

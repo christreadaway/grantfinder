@@ -88,12 +88,48 @@ export interface GrantBase {
   confidence?: 'verified' | 'partial' | null;
   /** Pages the record was checked against. */
   sources?: string[];
+  /** What the funder has actually funded, at what levels, and what it has announced (grant research). */
+  funder_intel?: FunderIntel | null;
+}
+
+/** One real past award, the recipient described by type and city (never by name). */
+export interface PastAward {
+  year: number | null;
+  amount: string;
+  recipient: string;
+  purpose: string;
+}
+
+/** A funder's track record and outlook, gathered by the grant research from its filings, grant lists and announcements. */
+export interface FunderIntel {
+  /** False for entitlement or formula programs with no discretionary awards (then only `note`). */
+  applicable: boolean;
+  note?: string | null;
+  past_awards: PastAward[];
+  /** Typical award levels with the year they describe. */
+  award_levels?: string | null;
+  /** What it has funded in practice (can differ from its stated priorities). */
+  funded_focus: string[];
+  catholic_school_track_record?: string | null;
+  giving_trend?: string | null;
+  /** Announced changes: final round, new focus, bigger or smaller awards. */
+  outlook?: string | null;
+  as_of?: string | null;
+  sources: string[];
 }
 
 /** The grant details a match carries so the results can show them (all optional: older results lack them). */
 export type GrantDetails = Pick<
   GrantBase,
-  'eligibility_notes' | 'deadline_notes' | 'geography' | 'religious_eligibility' | 'focus_areas' | 'typical_award' | 'last_verified' | 'confidence'
+  | 'eligibility_notes'
+  | 'deadline_notes'
+  | 'geography'
+  | 'religious_eligibility'
+  | 'focus_areas'
+  | 'typical_award'
+  | 'last_verified'
+  | 'confidence'
+  | 'funder_intel'
 >;
 
 export interface Grant extends GrantBase {

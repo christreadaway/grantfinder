@@ -4,7 +4,7 @@
  * last checked), read leniently from the starter database, spreadsheets and Claude's answers.
  */
 import { asStringList } from './json';
-import { RELIGIOUS_ELIGIBILITY_VALUES, type GrantBase, type GrantDetails, type ReligiousEligibility } from './types';
+import { RELIGIOUS_ELIGIBILITY_VALUES, type FunderIntel, type GrantBase, type GrantDetails, type PastAward, type ReligiousEligibility } from './types';
 
 function text(value: unknown): string {
   if (typeof value === 'string') return value.trim();
@@ -72,10 +72,54 @@ export function sourceList(value: unknown, maxItems = 6): string[] {
     .slice(0, maxItems);
 }
 
+/** Text the research uses when it found nothing ("Not found", "None found", "N/A"): treated as empty. */
+function found(value: unknown, max = 600): string | null {
+  const textValue = detailText(value, max);
+  return textValue && !/^(?:not found|none found|n\/?a|unknown|not published)\.?$/i.test(textValue) ? textValue : null;
+}
+
+/** A funder's track record from a loose dict; null when there is nothing usable. */
+export function parseFunderIntel(value: unknown): FunderIntel | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const data = value as Record<string, unknown>;
+  const awards: PastAward[] = [];
+  for (const raw of Array.isArray(data.past_awards) ? data.past_awards : []) {
+    if (!raw || typeof raw !== 'object') continue;
+    const award = raw as Record<string, unknown>;
+    const recipient = found(award.recipient, 160);
+    const amount = found(award.amount, 80);
+    if (!recipient && !amount) continue;
+    const year = Number(award.year);
+    awards.push({
+      year: Number.isInteger(year) && year >= 1990 && year <= 2100 ? year : null,
+      amount: amount ?? '',
+      recipient: recipient ?? '',
+      purpose: found(award.purpose, 200) ?? '',
+    });
+    if (awards.length >= 8) break;
+  }
+  const intel: FunderIntel = {
+    applicable: data.applicable !== false,
+    note: found(data.note, 400),
+    past_awards: awards,
+    award_levels: found(data.award_levels),
+    funded_focus: detailList(data.funded_focus, 6).filter((item) => found(item)),
+    catholic_school_track_record: found(data.catholic_school_track_record),
+    giving_trend: found(data.giving_trend),
+    outlook: found(data.outlook) && !/^no announced changes found\.?$/i.test(String(data.outlook).trim()) ? found(data.outlook) : null,
+    as_of: isoDateOrNull(data.as_of),
+    sources: sourceList(data.sources, 8),
+  };
+  const hasFacts =
+    intel.past_awards.length > 0 || intel.funded_focus.length > 0 ||
+    Boolean(intel.award_levels || intel.catholic_school_track_record || intel.giving_trend || intel.outlook || intel.note);
+  return hasFacts ? intel : null;
+}
+
 /** The optional detail fields of a grant record from a loose dict (seed file, spreadsheet row, Claude's JSON). */
 export function parseGrantDetails(data: Record<string, unknown>): Pick<
   GrantBase,
-  'deadline_notes' | 'geography' | 'religious_eligibility' | 'focus_areas' | 'typical_award' | 'last_verified' | 'confidence' | 'sources'
+  'deadline_notes' | 'geography' | 'religious_eligibility' | 'focus_areas' | 'typical_award' | 'last_verified' | 'confidence' | 'sources' | 'funder_intel'
 > {
   const confidence = text(data.confidence).toLowerCase();
   const typical = detailText(data.typical_award, 300);
@@ -88,6 +132,7 @@ export function parseGrantDetails(data: Record<string, unknown>): Pick<
     last_verified: isoDateOrNull(data.last_verified),
     confidence: confidence === 'verified' || confidence === 'partial' ? confidence : null,
     sources: sourceList(data.sources),
+    funder_intel: parseFunderIntel(data.funder_intel),
   };
 }
 
@@ -102,5 +147,21 @@ export function grantDetails(grant: Partial<GrantBase>): GrantDetails {
     typical_award: grant.typical_award ?? null,
     last_verified: grant.last_verified ?? null,
     confidence: grant.confidence ?? null,
+    funder_intel: grant.funder_intel ?? null,
   };
+}
+
+/** The track record in a few words for prompts: only the fields that inform a decision. */
+export function intelForPrompt(intel: FunderIntel | null | undefined): Record<string, unknown> | null {
+  if (!intel || !intel.applicable) return null;
+  const out: Record<string, unknown> = {};
+  if (intel.award_levels) out.award_levels = intel.award_levels;
+  if (intel.catholic_school_track_record) out.catholic_school_track_record = intel.catholic_school_track_record;
+  if (intel.funded_focus.length) out.funded_in_practice = intel.funded_focus;
+  if (intel.giving_trend) out.giving_trend = intel.giving_trend;
+  if (intel.outlook) out.outlook = intel.outlook;
+  if (intel.past_awards.length) {
+    out.past_awards = intel.past_awards.slice(0, 5).map((a) => [a.year, a.amount, a.recipient, a.purpose].filter(Boolean).join(' | '));
+  }
+  return Object.keys(out).length ? out : null;
 }

@@ -85,6 +85,7 @@ export function generatedLabel(date: Date): string {
 const CSV_HEADER = [
   'Rank', 'Grant Name', 'Funder', 'Amount', 'Deadline', 'Score (%)', 'Tier', 'Category', 'Geo Qualified', 'Contact', 'URL', 'Explanation',
   'Geography', 'Religious Eligibility', 'Deadline Notes', 'Typical Award', 'Funder Priorities', 'Eligibility Notes', 'Last Verified',
+  'Past Award Levels', 'Catholic School Track Record', 'Funder Outlook',
 ];
 
 /** How the religious_eligibility values read to a person. */
@@ -130,6 +131,9 @@ export function matchesCsv(matches: GrantMatch[]): string {
       (match.focus_areas ?? []).join('; '),
       match.eligibility_notes ?? '',
       match.last_verified ?? '',
+      match.funder_intel?.applicable ? match.funder_intel.award_levels ?? '' : '',
+      match.funder_intel?.applicable ? match.funder_intel.catholic_school_track_record ?? '' : '',
+      match.funder_intel?.applicable ? match.funder_intel.outlook ?? '' : '',
     ]);
   });
   return '﻿' + rows.map((row) => row.map(csvField).join(',')).join('\r\n') + '\r\n';
@@ -210,6 +214,12 @@ export function matchesMarkdown(matches: GrantMatch[], results: MatchResults, no
       ...(match.focus_areas?.length ? [`| Funder priorities | ${cell(match.focus_areas.join('; '))} |`] : []),
       ...(match.eligibility_notes ? [`| Who can apply | ${cell(match.eligibility_notes)} |`] : []),
       ...(match.last_verified ? [`| Last verified | ${cell(match.last_verified)} |`] : []),
+      ...(match.funder_intel?.applicable && match.funder_intel.award_levels ? [`| Past award levels | ${cell(match.funder_intel.award_levels)} |`] : []),
+      ...(match.funder_intel?.applicable && match.funder_intel.catholic_school_track_record
+        ? [`| Catholic school track record | ${cell(match.funder_intel.catholic_school_track_record)} |`]
+        : []),
+      ...(match.funder_intel?.applicable && match.funder_intel.giving_trend ? [`| Giving trend | ${cell(match.funder_intel.giving_trend)} |`] : []),
+      ...(match.funder_intel?.applicable && match.funder_intel.outlook ? [`| Funder outlook | ${cell(match.funder_intel.outlook)} |`] : []),
       `| Contact | ${cell(match.contact)} |`,
       `| URL | ${cell(match.url)} |`,
       '',
@@ -223,6 +233,12 @@ export function matchesMarkdown(matches: GrantMatch[], results: MatchResults, no
       `**Why this match:** ${match.explanation}`,
       '',
     );
+    const awards = match.funder_intel?.applicable ? match.funder_intel.past_awards ?? [] : [];
+    if (awards.length) {
+      lines.push('**Past awards (from the funder\'s filings and grant lists):**');
+      for (const award of awards) lines.push(`- ${[award.year, award.amount, award.recipient, award.purpose].filter(Boolean).join(' | ')}`);
+      lines.push('');
+    }
     if (match.evidence?.length) {
       lines.push('**Evidence:**');
       for (const evidence of match.evidence) lines.push(`- ${evidence}`);
@@ -313,6 +329,8 @@ export function matchesIcs(matches: GrantMatch[], now: Date, today = todayIso())
       `Match: ${match.score}% (${titleCase(match.score_tier)})`,
       match.deadline_notes ? `Deadline notes: ${match.deadline_notes}` : '',
       match.focus_areas?.length ? `Funder priorities: ${match.focus_areas.join('; ')}` : '',
+      match.funder_intel?.applicable && match.funder_intel.award_levels ? `Past award levels: ${match.funder_intel.award_levels}` : '',
+      match.funder_intel?.applicable && match.funder_intel.outlook ? `Funder outlook: ${match.funder_intel.outlook}` : '',
       match.eligibility_notes ? `Who can apply: ${match.eligibility_notes}` : '',
       'Check the date on the funder\'s site: deadlines change.',
       match.url || '',

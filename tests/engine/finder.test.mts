@@ -282,12 +282,13 @@ check(
     last_verified: '2026-10-01',
     confidence: 'verified',
     sources: ['https://example.org/a'],
+    funder_intel: null,
   }),
   full,
 );
 check(
   'parseGrantDetails: an empty record -> nulls and empty lists',
-  same(pgd({}), { deadline_notes: null, geography: null, religious_eligibility: null, focus_areas: [], typical_award: null, last_verified: null, confidence: null, sources: [] }),
+  same(pgd({}), { deadline_notes: null, geography: null, religious_eligibility: null, focus_areas: [], typical_award: null, last_verified: null, confidence: null, sources: [], funder_intel: null }),
   pgd({}),
 );
 check(
@@ -298,6 +299,7 @@ check(
   'grantDetails: defaults for a grant without details (older records)',
   same(details.grantDetails({}), {
     eligibility_notes: null, deadline_notes: null, geography: null, religious_eligibility: null, focus_areas: [], typical_award: null, last_verified: null, confidence: null,
+    funder_intel: null,
   }) && same(details.grantDetails({ focus_areas: 'not a list' as unknown as string[] }).focus_areas, []),
   details.grantDetails({}),
 );
@@ -305,10 +307,52 @@ check(
   'grantDetails: copies the detail fields (and not the sources list)',
   same(details.grantDetails({ ...full, eligibility_notes: '501(c)(3)' }), {
     eligibility_notes: '501(c)(3)', deadline_notes: full.deadline_notes, geography: 'Texas', religious_eligibility: 'eligible', focus_areas: ['STEM', 'literacy'],
-    typical_award: '$8,000', last_verified: '2026-10-01', confidence: 'verified',
+    typical_award: '$8,000', last_verified: '2026-10-01', confidence: 'verified', funder_intel: null,
   }),
   details.grantDetails({ ...full, eligibility_notes: '501(c)(3)' }),
 );
+
+// Funder intelligence: the track record the grant research gathers (filings, grant lists, announcements).
+const intel = details.parseFunderIntel({
+  past_awards: [
+    { year: 2024, amount: '$25,000', recipient: 'Catholic elementary school (San Antonio, TX)', purpose: 'tuition assistance' },
+    { year: '2023', amount: '$10,000', recipient: 'Parish school (Corpus Christi, TX)', purpose: 'roof repair' },
+    { year: 1850, amount: '$5,000', recipient: 'Old record', purpose: 'x' },
+    { amount: 'Not found', recipient: 'Not found' },
+    'junk',
+  ],
+  award_levels: 'Most 2024 school grants $10,000-$50,000 (2024 Form 990-PF)',
+  funded_focus: ['tuition assistance', 'Not found', 'facilities'],
+  catholic_school_track_record: '14 grants to Catholic K-12 schools in 2024',
+  giving_trend: 'Not found',
+  outlook: 'No announced changes found',
+  as_of: '2026-10-15',
+  sources: ['https://projects.propublica.org/nonprofits/x', 'ftp://bad'],
+});
+check(
+  'parseFunderIntel: real awards kept (bad years blanked, "Not found" and junk entries dropped), "Not found"/"No announced changes" read as empty',
+  intel !== null && intel.applicable === true && intel.past_awards.length === 3 && intel.past_awards[1].year === 2023 && intel.past_awards[2].year === null &&
+    same(intel.funded_focus, ['tuition assistance', 'facilities']) && intel.giving_trend === null && intel.outlook === null &&
+    intel.as_of === '2026-10-15' && same(intel.sources, ['https://projects.propublica.org/nonprofits/x']),
+  intel,
+);
+check('parseFunderIntel: nothing usable -> null; not an object -> null', details.parseFunderIntel({ giving_trend: 'Not found', past_awards: [] }) === null && details.parseFunderIntel('x') === null && details.parseFunderIntel(null) === null);
+const formula = details.parseFunderIntel({ applicable: false, note: 'Formula program: no discretionary awards.' });
+check('parseFunderIntel: a formula program keeps applicable false and its note', formula?.applicable === false && formula?.note === 'Formula program: no discretionary awards.', formula);
+check(
+  'parseFunderIntel: at most 8 past awards',
+  details.parseFunderIntel({ past_awards: Array.from({ length: 12 }, (_, i) => ({ year: 2020, amount: `$${i}`, recipient: 'School', purpose: 'p' })) })?.past_awards.length === 8,
+);
+const promptIntel = details.intelForPrompt(intel);
+check(
+  'intelForPrompt: the decision-relevant fields only, past awards as one line each',
+  promptIntel !== null && promptIntel.award_levels === intel?.award_levels && same(promptIntel.funded_in_practice, ['tuition assistance', 'facilities']) &&
+    (promptIntel.past_awards as string[])[0] === '2024 | $25,000 | Catholic elementary school (San Antonio, TX) | tuition assistance' && !('sources' in promptIntel),
+  promptIntel,
+);
+check('intelForPrompt: nothing for a formula program or no intel', details.intelForPrompt(formula) === null && details.intelForPrompt(null) === null);
+const withIntel = details.parseGrantDetails({ funder_intel: { award_levels: 'Up to $5,000 (2025 grants list)' } });
+check('parseGrantDetails carries funder_intel; grantDetails copies it', withIntel.funder_intel?.award_levels === 'Up to $5,000 (2025 grants list)' && details.grantDetails({ funder_intel: withIntel.funder_intel }).funder_intel === withIntel.funder_intel);
 const madeGrant = discovery.makeGrant('user_x', 'web_discovery', { grant_name: 'Example Made Grant', religious_eligibility: 'secular programs only', focus_areas: ['STEM'], typical_award: 'Not published' });
 check(
   'makeGrant carries the parsed details',
@@ -545,6 +589,17 @@ await repo.saveGrants(userM.id, [
     last_verified: '2026-09-30',
     confidence: 'verified',
     sources: ['https://example.org/stem'],
+    funder_intel: {
+      applicable: true,
+      past_awards: [{ year: 2025, amount: '$6,000', recipient: 'Catholic K-8 school (Austin, TX)', purpose: 'STEM lab equipment' }],
+      award_levels: 'Most 2025 awards $5,000-$10,000 (2025 grants list)',
+      funded_focus: ['STEM labs'],
+      catholic_school_track_record: '3 Catholic schools funded in 2025',
+      giving_trend: 'Rising: $1.1M (2023), $1.4M (2025)',
+      outlook: 'Announced 2026: awards up to $15,000 from 2027',
+      as_of: '2026-10-15',
+      sources: ['https://example.org/stem/grants-list'],
+    },
   }),
   grantRecord(userM.id, BARE_ID, 'Example Older Record Grant'),
   grantRecord(userM.id, UNCLEAR_ID, 'Example Unclear Grant', { religious_eligibility: 'unclear', focus_areas: [], geography: null, deadline_notes: '', typical_award: null }),
@@ -607,7 +662,7 @@ const promptGrants = (() => {
 const pFull = promptGrants.find((g) => g.id === FULL_ID);
 const pBare = promptGrants.find((g) => g.id === BARE_ID);
 const pUnclear = promptGrants.find((g) => g.id === UNCLEAR_ID);
-const DETAIL_KEYS = ['geography', 'religious_eligibility', 'deadline_notes', 'funder_priorities', 'typical_award'];
+const DETAIL_KEYS = ['geography', 'religious_eligibility', 'deadline_notes', 'funder_priorities', 'typical_award', 'funder_track_record'];
 check(
   'batch prompt: a grant with details carries geography, religious_eligibility, deadline_notes, funder_priorities, typical_award',
   pFull?.geography === 'Central Texas (Travis, Hays)' && pFull?.religious_eligibility === 'secular_purpose_only' && pFull?.deadline_notes === 'Letter of inquiry due 30 days before' &&
@@ -621,11 +676,27 @@ check(
   pUnclear,
 );
 check(
+  'batch prompt: the funder track record (levels, Catholic-school record, trend, outlook, past awards) reaches Claude',
+  pFull?.funder_track_record?.award_levels === 'Most 2025 awards $5,000-$10,000 (2025 grants list)' &&
+    pFull?.funder_track_record?.catholic_school_track_record === '3 Catholic schools funded in 2025' &&
+    pFull?.funder_track_record?.outlook === 'Announced 2026: awards up to $15,000 from 2027' &&
+    same(pFull?.funder_track_record?.past_awards, ['2025 | $6,000 | Catholic K-8 school (Austin, TX) | STEM lab equipment']) &&
+    !('sources' in (pFull?.funder_track_record ?? {})),
+  pFull?.funder_track_record,
+);
+check('batch prompt says how to weigh the track record', matchPrompts.some((p) => p.includes('- funder_track_record:') && p.includes('Real giving outweighs stated priorities')));
+check(
   'batch prompt explains how to read the new fields',
   matchPrompts.some((p) => p.includes('Reading the grant fields:') && p.includes('- religious_eligibility: "eligible"') && p.includes('funder_priorities')),
 );
 const fullMatch = matchOf(matchRun.data, FULL_ID);
 const bareMatch = matchOf(matchRun.data, BARE_ID);
+check(
+  'a scored match carries the funder track record (for the results card and exports)',
+  fullMatch?.funder_intel?.award_levels === 'Most 2025 awards $5,000-$10,000 (2025 grants list)' && fullMatch?.funder_intel?.past_awards.length === 1 &&
+    (bareMatch?.funder_intel ?? null) === null,
+  fullMatch?.funder_intel,
+);
 check(
   'a scored match copies the grant\'s details',
   fullMatch?.score === 88 && fullMatch?.geography === 'Central Texas (Travis, Hays)' && fullMatch?.religious_eligibility === 'secular_purpose_only' &&
@@ -999,8 +1070,11 @@ function parseCsv(text: string): string[][] {
 const csvExport = await api('POST', '/api/export', { token: tokenX, json: { session_id: 'session_finder_csv', format: 'csv', include_all_matches: true } });
 const csvRows = parseCsv(csvExport.text.replace(/^﻿/, ''));
 const header = csvRows[0] ?? [];
-const NEW_COLUMNS = ['Geography', 'Religious Eligibility', 'Deadline Notes', 'Typical Award', 'Funder Priorities', 'Eligibility Notes', 'Last Verified'];
-check('CSV header ends with the new columns', csvExport.status === 200 && same(header.slice(-NEW_COLUMNS.length), NEW_COLUMNS), header);
+const NEW_COLUMNS = [
+  'Geography', 'Religious Eligibility', 'Deadline Notes', 'Typical Award', 'Funder Priorities', 'Eligibility Notes', 'Last Verified',
+  'Past Award Levels', 'Catholic School Track Record', 'Funder Outlook',
+];
+check('CSV header ends with the new columns (grant facts, then the funder track record)', csvExport.status === 200 && same(header.slice(-NEW_COLUMNS.length), NEW_COLUMNS), header);
 const csvCell = (row: string[] | undefined, column: string) => (row ? row[header.indexOf(column)] : undefined);
 const detailedRow = csvRows.find((r) => r[1] === 'Example Detailed Grant');
 check(

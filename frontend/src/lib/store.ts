@@ -52,6 +52,18 @@ interface GrantMatch {
   typical_award?: string | null;
   last_verified?: string | null;
   confidence?: 'verified' | 'partial' | null;
+  funder_intel?: {
+    applicable: boolean;
+    note?: string | null;
+    past_awards: Array<{ year: number | null; amount: string; recipient: string; purpose: string }>;
+    award_levels?: string | null;
+    funded_focus: string[];
+    catholic_school_track_record?: string | null;
+    giving_trend?: string | null;
+    outlook?: string | null;
+    as_of?: string | null;
+    sources: string[];
+  } | null;
 }
 
 interface MatchResults {

@@ -28,6 +28,7 @@ import crypto from 'node:crypto';
 import type { ClaudeCallOptions, ClaudeCallResult } from '../claude';
 import { isUrgent } from '../deadlines';
 import { errorMessage, HttpError, isFatalClaudeError } from '../errors';
+import { intelForPrompt } from '../grantDetails';
 import { asNumber, asRecord, asString, asStringList, clamp, extractJsonArray, extractJsonObject } from '../json';
 import { logger } from '../log';
 import { fetchPage, normalizeUrl } from '../net';
@@ -1041,7 +1042,11 @@ export function funderMaterial(record: FunderRecord, grant: Grant | null, limit:
     };
   });
   const grantText = grant
-    ? [grant.grant_name, grant.funder, grant.description, grant.eligibility_notes ?? '', grant.amount, grant.funder_stats ?? ''].join('\n')
+    ? [
+        grant.grant_name, grant.funder, grant.description, grant.eligibility_notes ?? '', grant.amount, grant.funder_stats ?? '',
+        // Past awards from GrantFinder's research count as funder material (each was read from a filing or grant list).
+        ...(grant.funder_intel?.past_awards ?? []).map((award) => `${award.recipient} ${award.amount} ${award.purpose}`),
+      ].join('\n')
     : '';
   const sources = [
     ...(record.notes_text.trim() ? ['pasted notes'] : []),
@@ -1067,6 +1072,8 @@ function funderGrantRecord(grant: Grant): Record<string, unknown> {
     eligibility_notes: grant.eligibility_notes ?? null,
     funder_stats: grant.funder_stats ?? null,
     url: grant.url,
+    // GrantFinder's own research on this funder (past awards by recipient type and city, levels, outlook).
+    ...(intelForPrompt(grant.funder_intel) ? { grantfinder_funder_research: intelForPrompt(grant.funder_intel) } : {}),
   };
 }
 

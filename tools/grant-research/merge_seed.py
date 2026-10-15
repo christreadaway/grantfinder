@@ -9,6 +9,8 @@ Merge grant research into GrantFinder's starter database, validating every recor
 RESEARCH_DIR holds the agents' JSON files (format: tools/grant-research/BRIEF.md):
   verify*.json  checked versions of grants already in the database ("action": keep/update/remove,
                 "renamed_from" for a renamed program; may also carry "foundations")
+  intel*.json   {"intel": [{"grant_name", "funder", "funder_intel"}]}: a funder track record for
+                grants already listed (replaces the one they had)
   *.json        anything else: new grants
 The current database is the starting point, so a grant no agent re-checked is kept as it was and
 reported as NOT RE-VERIFIED (never silently dropped). Records that are marked remove, closed, or
@@ -39,6 +41,60 @@ CATEGORY_ORDER = {"catholic_school": 0, "mixed": 1, "church_parish": 2, "non_cat
 
 def norm(text):
     return re.sub(r"[^a-z0-9]", "", str(text or "").lower())
+
+
+NOT_FOUND = re.compile(r"^(?:not found|none found|n/?a|unknown|not published)\.?$", re.I)
+
+
+def clean_intel(value, where, merger):
+    """A funder track record (BRIEF.md "Funder intelligence"), or None when there is nothing usable."""
+    if not isinstance(value, dict):
+        return None
+    def text(v, limit=600):
+        t = str(v or "").strip()
+        return None if not t or NOT_FOUND.match(t) else t[:limit]
+    awards = []
+    for a in value.get("past_awards") or []:
+        if not isinstance(a, dict):
+            continue
+        recipient, amount = text(a.get("recipient"), 160), text(a.get("amount"), 80)
+        if not recipient and not amount:
+            continue
+        try:
+            year = int(a.get("year"))
+        except (TypeError, ValueError):
+            year = None
+        awards.append({"year": year if year and 1990 <= year <= 2100 else None, "amount": amount or "",
+                       "recipient": recipient or "", "purpose": text(a.get("purpose"), 200) or ""})
+    outlook = text(value.get("outlook"))
+    if outlook and re.match(r"^no announced changes found\.?$", outlook, re.I):
+        outlook = None
+    intel = {
+        "applicable": value.get("applicable") is not False,
+        "note": text(value.get("note"), 400),
+        "past_awards": awards[:8],
+        "award_levels": text(value.get("award_levels")),
+        "funded_focus": [t for t in (text(x, 160) for x in (value.get("funded_focus") or [])) if t][:6],
+        "catholic_school_track_record": text(value.get("catholic_school_track_record")),
+        "giving_trend": text(value.get("giving_trend")),
+        "outlook": outlook,
+        "as_of": str(value.get("as_of") or "")[:10] if re.match(r"^\d{4}-\d{2}-\d{2}", str(value.get("as_of") or "")) else None,
+        "sources": [s for s in (value.get("sources") or []) if isinstance(s, str) and re.match(r"^https?://\S+$", s)][:8],
+    }
+    intel = {k: v for k, v in intel.items() if v not in (None, "")}
+    intel.setdefault("past_awards", [])
+    intel.setdefault("funded_focus", [])
+    intel.setdefault("sources", [])
+    blob = json.dumps(intel)
+    if EMAIL.search(blob) or PHONE.search(blob):
+        merger.note(f"fix {where}: removed an email address or phone number from the funder track record")
+        intel = json.loads(PHONE.sub("[phone on website]", EMAIL.sub("[email on website]", blob)))
+    if intel["applicable"] and not (awards or intel.get("award_levels") or intel.get("catholic_school_track_record") or intel.get("outlook") or intel.get("giving_trend")):
+        merger.note(f"warn {where}: funder track record has no usable facts (dropped)")
+        return None
+    if intel["applicable"] and not intel["sources"]:
+        merger.note(f"warn {where}: funder track record lists no sources")
+    return intel
 
 
 class Merger:
@@ -147,6 +203,9 @@ class Merger:
         out["sources"] = sources[:6]
         if record.get("renamed_from"):
             out["renamed_from"] = record["renamed_from"]
+        intel = clean_intel(record.get("funder_intel"), where, self)
+        if intel:
+            out["funder_intel"] = intel
         if EMAIL.search(json.dumps(out)) or PHONE.search(json.dumps(out)):
             self.note(f"fix {where}: removed an email address or phone number")
             for key, value in list(out.items()):
@@ -185,6 +244,8 @@ def main():
 
     files = sorted(research.glob("*.json"), key=lambda p: (not p.name.startswith(("verify", "existing")), p.name))
     files = [p for p in files if p.name not in ("excluded_all.json",)]
+    intel_files = [p for p in files if p.name.startswith("intel")]
+    files = [p for p in files if not p.name.startswith("intel")]
     if not files:
         print(f"No research files in {research}", file=sys.stderr)
         sys.exit(1)
@@ -242,6 +303,25 @@ def main():
             current[key] = cleaned
             if not old:
                 added.append(cleaned["grant_name"])
+
+    # Funder track records for grants already listed (a separate research pass).
+    intel_added = 0
+    for path in intel_files:
+        data = load(path, merger)
+        if data is None:
+            continue
+        for entry in data.get("intel", []):
+            name = str(entry.get("grant_name") or "") if isinstance(entry, dict) else ""
+            key = norm(name)
+            if key not in current:
+                merger.note(f"warn {path.name}: track record for {name or '(no name)'} matches no grant in the database (skipped)")
+                continue
+            intel = clean_intel(entry.get("funder_intel"), f"{path.name}: {name}", merger)
+            if intel:
+                current[key] = {**current[key], "funder_intel": intel}
+                intel_added += 1
+    if intel_files:
+        print(f"funder track records attached: {intel_added}")
 
     not_reverified = [g["grant_name"] for k, g in before.items() if k not in reverified and k in current]
     for name in not_reverified:

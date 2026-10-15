@@ -20,7 +20,7 @@ import type { Claude } from '../claude';
 import { MAX_QUESTIONNAIRE_QUESTIONS, testMode } from '../config';
 import { deadlinePassed, todayIso } from '../deadlines';
 import { ClaudeError, errorMessage, isFatalClaudeError } from '../errors';
-import { grantDetails } from '../grantDetails';
+import { grantDetails, intelForPrompt } from '../grantDetails';
 import { asInt, asNumber, asRecord, asString, asStringList, clamp, extractJsonArray, extractJsonObject } from '../json';
 import { logger } from '../log';
 import { getFoundations, getGrants, listMatchSessionIds } from '../repo';
@@ -991,6 +991,7 @@ export function buildMatchPrompt(grants: Grant[], profile: OrganizationProfile, 
     ...(grant.deadline_notes ? { deadline_notes: grant.deadline_notes } : {}),
     ...(grant.focus_areas?.length ? { funder_priorities: grant.focus_areas } : {}),
     ...(grant.typical_award ? { typical_award: grant.typical_award } : {}),
+    ...(intelForPrompt(grant.funder_intel) ? { funder_track_record: intelForPrompt(grant.funder_intel) } : {}),
   }));
   return `Score each grant for this Catholic organization.
 
@@ -1037,6 +1038,7 @@ Reading the grant fields:
 - geography: where applicants must be. If the organization is outside it, score eligibility_fit near 0.
 - religious_eligibility: "eligible" = Catholic schools and parishes may apply; "secular_purpose_only" = they may apply, but only for a non-religious purpose (such as tutoring, food, safety or facilities), so judge need alignment on the org's secular needs; "unclear" = not stated, lower completeness and say "confirm religious eligibility" in the explanation.
 - deadline_notes: letter-of-inquiry steps, cycles, invitation-only rules. An invitation-only program scores low on timing.
+- funder_track_record: what the funder has actually funded and at what levels, its record with Catholic schools, its giving trend, and anything it has announced (outlook). Real giving outweighs stated priorities: no grants to schools like this one, or a program that is ending, lowers the score; a record of funding similar Catholic schools raises it. Mention the track record in the explanation when it matters.
 
 Be conservative - if information is missing, lower the completeness score.
 Return ONLY the JSON array.`;

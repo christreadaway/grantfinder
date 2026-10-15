@@ -72,6 +72,32 @@ literacy, mental_health, ministry, nutrition, operations, playground, programs, 
 security, social_justice, social_services, special_education, stem, teacher_development,
 technology, transportation, tuition_assistance, youth
 
+## Funder intelligence (every grant record carries it)
+What each funder has actually done, so a school can judge its odds and pitch at the right level.
+Attach it to a grant as `"funder_intel"`:
+```
+"funder_intel": {
+  "applicable": true,          // false for entitlement or formula programs with no discretionary awards
+                               // (ESSA/IDEA equitable services, school meals, E-Rate); then only add "note"
+  "past_awards": [             // 3-8 real examples, most relevant to Catholic or private K-12 first
+    { "year": 2024, "amount": "$25,000", "recipient": "Catholic elementary school (San Antonio, TX)",
+      "purpose": "tuition assistance" }
+  ],                           // describe recipients by TYPE and CITY only, never by name
+  "award_levels": "Most 2024 school grants $10,000-$50,000; median about $25,000 (2024 Form 990-PF grants list)",
+  "funded_focus": ["what they actually funded recently, which can differ from their stated priorities"],
+  "catholic_school_track_record": "e.g. 14 grants to Catholic K-12 schools in 2024, about $600,000 in all | None found in the filings checked",
+  "giving_trend": "Total grants paid: $18.2M (2022), $21.5M (2023), $24.0M (2024): rising",
+  "outlook": "Anything announced about the future (final round, new focus, bigger or smaller awards, paused cycle), with the date it was announced | No announced changes found",
+  "as_of": "today's date",
+  "sources": ["every page or filing you used"]
+}
+```
+Good sources: the funder's grants list or annual report, its IRS Form 990 / 990-PF (ProPublica Nonprofit
+Explorer: https://projects.propublica.org/nonprofits/ and its API
+https://projects.propublica.org/nonprofits/api/v2/search.json?q=<name>), press releases, and news.
+Every number must come from a source you read this session; say which year it describes. If you can't
+find something, write "Not found" rather than guessing.
+
 ## Output
 Write ONE file (path given in your task) containing:
 ```

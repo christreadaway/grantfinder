@@ -489,7 +489,77 @@ function GrantFacts({ match, compact = false }: { match: MatchItem; compact?: bo
       {match.eligibility_notes && (
         <p className="break-words"><span className="text-gray-400">Who can apply:</span> {match.eligibility_notes}</p>
       )}
+      <FunderTrackRecord match={match} />
     </div>
+  );
+}
+
+/** Links a reader can open: http(s) only. */
+const safeLinks = (links: string[] | undefined) => (links ?? []).map((link) => webUrl(link)).filter((link): link is string => Boolean(link));
+
+/**
+ * What the funder has actually funded and at what levels, its record with Catholic schools, its
+ * giving trend and anything it has announced, from GrantFinder's grant research. Collapsed by
+ * default; the outlook shows outside when it signals a change worth knowing before applying.
+ */
+function FunderTrackRecord({ match }: { match: MatchItem }) {
+  const intel = match.funder_intel;
+  if (!intel) return null;
+  if (!intel.applicable) {
+    return intel.note ? <p className="break-words"><span className="text-gray-400">Funder track record:</span> {intel.note}</p> : null;
+  }
+  const links = safeLinks(intel.sources).slice(0, 4);
+  return (
+    <details className="rounded border border-[var(--card-border)] px-3 py-2" data-track-record>
+      <summary className="cursor-pointer font-medium">
+        Funder track record
+        {intel.award_levels ? <span className="font-normal text-gray-400"> · {intel.award_levels}</span> : null}
+      </summary>
+      <div className="mt-2 space-y-2">
+        {intel.catholic_school_track_record && (
+          <p className="break-words"><span className="text-gray-400">Catholic schools:</span> {intel.catholic_school_track_record}</p>
+        )}
+        {intel.funded_focus.length > 0 && (
+          <p className="break-words"><span className="text-gray-400">Funded in practice:</span> {intel.funded_focus.join('; ')}</p>
+        )}
+        {intel.past_awards.length > 0 && (
+          <div>
+            <p className="text-gray-400">Past awards:</p>
+            <ul className="list-disc pl-5 space-y-1">
+              {intel.past_awards.slice(0, 6).map((award, i) => (
+                <li key={i} className="break-words">
+                  {[award.year, award.amount, award.recipient, award.purpose].filter(Boolean).join(' · ')}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {intel.giving_trend && (
+          <p className="break-words"><span className="text-gray-400">Giving trend:</span> {intel.giving_trend}</p>
+        )}
+        {intel.outlook && (
+          <p className="break-words"><span className="text-gray-400">What&apos;s ahead:</span> {intel.outlook}</p>
+        )}
+        {(intel.as_of || links.length > 0) && (
+          <p className="text-xs text-gray-500 break-words">
+            {intel.as_of ? `Researched ${formatDate(intel.as_of)}` : ''}
+            {links.length > 0 && (
+              <>
+                {intel.as_of ? ' from ' : 'Sources: '}
+                {links.map((link, i) => (
+                  <span key={link}>
+                    {i > 0 ? ', ' : ''}
+                    <a href={link} target="_blank" rel="noopener noreferrer" className="underline">
+                      {(() => { try { return new URL(link).hostname.replace(/^www\./, ''); } catch { return 'source'; } })()}
+                    </a>
+                  </span>
+                ))}
+              </>
+            )}
+          </p>
+        )}
+      </div>
+    </details>
   );
 }
 

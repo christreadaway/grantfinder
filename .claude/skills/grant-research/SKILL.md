@@ -30,8 +30,12 @@ Split the work so each agent has a manageable load (about 20 grants each):
   the path to BRIEF.md, its exact list of grant names, and its output file
   `$RESEARCH/verify-<n>.json`. Task: re-check every listed grant on the funder's site and return
   the full record with `action` keep/update/remove (+ `action_reason`), rolling past deadlines
-  forward to the next cycle, and `renamed_from` when the funder renamed the program. The first
-  verify agent also re-checks the `foundations` list and returns it as `"foundations"`.
+  forward to the next cycle, and `renamed_from` when the funder renamed the program. Each record
+  keeps a `funder_intel` track record (BRIEF.md "Funder intelligence"): refresh it when its `as_of`
+  is more than six months old, when the funder has published a new annual report, grants list or
+  Form 990 since, or when it announced a change (new focus, bigger or smaller awards, a program
+  ending); otherwise copy it unchanged. The first verify agent also re-checks the `foundations`
+  list and returns it as `"foundations"`.
 - **Discovery agents** (four): Catholic funders (national and Texas Catholic foundations, religious
   orders, fraternal societies, diocesan foundations), Texas funders (statewide, Austin / Central
   Texas, state programs open to private schools), national (corporate, foundation and federal
@@ -39,8 +43,8 @@ Split the work so each agent has a manageable load (about 20 grants each):
   programs), and AI in education (funders of AI literacy, teacher AI training, classroom AI pilots
   and AI / computer science curricula that private religious schools or their teachers can apply
   to; every record gets the `ai` tag). Each gets: today's date, BRIEF.md, the full list of current grant names AND every name
-  in excluded.json (skip all of them), a target of 10-20 NEW verified programs, and its output file
-  `$RESEARCH/new-<area>.json`.
+  in excluded.json (skip all of them), a target of 10-20 NEW verified programs, each with a
+  `funder_intel` track record, and its output file `$RESEARCH/new-<area>.json`.
 
 Tell every agent: today's date, "follow BRIEF.md exactly", "verify on the funder's own site this
 session", "write only your output file", "validate the JSON before you finish".
