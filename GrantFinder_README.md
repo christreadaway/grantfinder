@@ -11,7 +11,7 @@ GrantFinder AI scans your website, reads your bulletins and meeting minutes, ask
 
 ## 🎯 What It Does
 
-1. **Build your grant database** — a starter database of 89 grants a Catholic school or parish in Texas can apply to (each checked on the funder's own site, re-checked monthly), live Grants.gov search, AI web discovery, and/or your own Excel file
+1. **Build your grant database** — a starter database of 97 grants a Catholic school or parish in Texas can apply to (each checked on the funder's own site, re-checked monthly), live Grants.gov search, AI web discovery, and/or your own Excel file
 2. **Scan your website** — AI crawls your church/school site to learn about your organization (or type the basics if your site blocks bots)
 3. **Answer a smart questionnaire** — AI generates questions based on what grants actually require
 4. **Upload parish documents** — Bulletins, meeting minutes, newsletters, strategic plans, prior grant reports

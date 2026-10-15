@@ -248,6 +248,16 @@ def main():
         merger.note(f"NOT RE-VERIFIED this run (kept as it was): {name}")
 
     grants = sorted(current.values(), key=lambda g: (CATEGORY_ORDER.get(g.get("category"), 9), g["grant_name"].lower()))
+    # Two agents can find one program under two names: same funder and same page is worth a look.
+    def page(url):
+        return re.sub(r"^https?://(www\.)?", "", str(url or "")).rstrip("/").lower()
+    seen_pages = {}
+    for g in grants:
+        key = (norm(re.sub(r"\(.*?\)", "", g.get("funder", ""))), page(g.get("url")))
+        if key in seen_pages:
+            merger.note(f"warn possible duplicate: {g['grant_name']} and {seen_pages[key]} (same funder and page); keep both only if they are different programs")
+        else:
+            seen_pages[key] = g["grant_name"]
     stale = [g["grant_name"] for g in grants if g.get("last_verified", "0000") < (today - timedelta(days=62)).isoformat()]
     changes = []
     for g in grants:

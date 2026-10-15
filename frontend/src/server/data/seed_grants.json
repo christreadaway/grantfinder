@@ -456,6 +456,44 @@
       ]
     },
     {
+      "grant_name": "Faith and AI Rapid Response Grants and Impact Grants (DELTA Partner Program)",
+      "funder": "University of Notre Dame Institute for Ethics and the Common Good (DELTA Network, supported by Lilly Endowment Inc.)",
+      "category": "mixed",
+      "deadline": "Check website",
+      "deadline_notes": "The Rapid Response round (up to $100,000 for April - September 2026 projects) is closed. Notre Dame says a second phase of two-year Impact Grants ($500,000 - $1 million) comes next and will be open to new applicants; no date has been posted.",
+      "amount": "Rapid Response: up to $100,000 (closed); Impact Grants: $500,000 - $1,000,000 (next phase)",
+      "typical_award": "2026 Rapid Response round: more than $800,000 across 12 grantees",
+      "description": "Funds organizations, including K-12 schools and parishes, to build practical tools on the ethical and spiritual sides of AI, rooted in the Christian DELTA framework (Dignity, Embodiment, Love, Transcendence, Agency). Examples include a K-8 curriculum, teacher PD, parent formation guides or pastoral training. Grantees join a community of practice and present at Notre Dame's Summit on AI, Faith, and Human Flourishing.",
+      "contact": "Via website",
+      "url": "https://ethics.nd.edu/fellowships-and-grants/faith-and-ai-rapid-response-grant-delta-partner-program/",
+      "status": "Check deadline",
+      "geo_qualified": "Yes",
+      "geography": "National",
+      "religious_eligibility": "eligible",
+      "eligibility_notes": "Open to religious organizations, K-12 and higher-education institutions, and others working where AI, ethics and faith meet; a Principal Investigator must attend the Notre Dame summit and work on a community-of-practice team. Rapid Response grants paid no indirect costs. 2026 grantees included Catholic and Christian schools and a parish.",
+      "focus_areas": [
+        "K-8 curriculum, resources or PD on ethical AI use grounded in the DELTA framework",
+        "High school curriculum on ethical AI use",
+        "Pastoral training on AI for Christian communities",
+        "Public-facing creative projects on DELTA"
+      ],
+      "funds_for": [
+        "ai",
+        "catholic_schools",
+        "faith_formation",
+        "teacher_development",
+        "innovation",
+        "programs"
+      ],
+      "last_verified": "2026-10-15",
+      "confidence": "verified",
+      "sources": [
+        "https://ethics.nd.edu/fellowships-and-grants/faith-and-ai-rapid-response-grant-delta-partner-program/",
+        "https://ethics.nd.edu/fellowships-and-grants/",
+        "https://ethics.nd.edu/news-and-events/news/institute-for-ethics-and-the-common-good-awards-faith-and-ai-rapid-response-grants-2/"
+      ]
+    },
+    {
       "grant_name": "Kenedy Memorial Foundation Grants",
       "funder": "The John G. and Marie Stella Kenedy Memorial Foundation",
       "category": "mixed",
@@ -641,42 +679,6 @@
         "https://scanlanfoundation.org",
         "https://scanlanfoundation.org/grants/",
         "https://scanlanfoundation.org/scanlan-scholars/"
-      ]
-    },
-    {
-      "grant_name": "Strake Foundation Grant Program",
-      "funder": "Strake Foundation",
-      "category": "mixed",
-      "deadline": "Rolling",
-      "deadline_notes": "No application deadlines (the 2026 form says so); requests are reviewed at board meetings held three times a year, in February, July and November. Apply with the 2026 PDF form plus required attachments, emailed as one PDF.",
-      "amount": "Varies",
-      "description": "Houston-based family foundation whose first donor-intent priority is Judeo-Christian religious organizations, with priority to Catholic institutions; private secondary education aligned with that priority is also listed. A Catholic parish or school can request project support with a single-page application.",
-      "contact": "Via website",
-      "url": "https://www.strakefoundation.org/grant-application/",
-      "status": "Rolling",
-      "geo_qualified": "Yes",
-      "geography": "Texas-based; no geographic limit stated for religious organizations (Houston/Harris County priority applies to poverty and civic grants)",
-      "religious_eligibility": "eligible",
-      "eligibility_notes": "501(c)(3) organizations only; no grants to individuals. Application asks for an IRS determination letter and the most recent Form 990 - a parish or school covered by the USCCB group ruling should confirm with the foundation what to send instead. Priorities are applied strictly in the listed order.",
-      "focus_areas": [
-        "Judeo-Christian religious organizations, with priority to Catholic institutions",
-        "Hospitals and medical research (women's health, pro-life causes)",
-        "Private secondary and higher education aligned with Catholic priority",
-        "Poverty and homelessness (Harris County priority)"
-      ],
-      "funds_for": [
-        "catholic_schools",
-        "ministry",
-        "programs",
-        "capital",
-        "faith_formation"
-      ],
-      "last_verified": "2026-10-15",
-      "confidence": "verified",
-      "sources": [
-        "https://www.strakefoundation.org/grant-application/",
-        "https://www.strakefoundation.org/",
-        "https://strakefoundation.org/wp-content/uploads/2026/06/New-Strake-Foundation-Application.pdf"
       ]
     },
     {
@@ -993,6 +995,41 @@
       ]
     },
     {
+      "grant_name": "aiEDU Trailblazers Fellowship",
+      "funder": "aiEDU (The AI Education Project)",
+      "category": "non_catholic",
+      "deadline": "Check website",
+      "deadline_notes": "Cohorts run every fall and spring. Fall 2026 applications are closed; aiEDU asks teachers to sign up for its newsletter to hear when the next cohort opens.",
+      "amount": "$875 stipend",
+      "typical_award": "$875",
+      "description": "A paid virtual fellowship (about 25 hours) for K-12 classroom teachers to test aiEDU's free AI literacy activities in their own classrooms, give feedback that shapes the curriculum, and build their AI readiness. Fellows get a certificate, a digital badge and an alumni network.",
+      "contact": "Via website",
+      "url": "https://www.aiedu.org/trailblazers-fellowship",
+      "status": "Check deadline",
+      "geo_qualified": "Yes",
+      "geography": "National",
+      "religious_eligibility": "eligible",
+      "eligibility_notes": "Current K-12 classroom teacher in the U.S. (no public/private restriction stated). Teachers must run at least 2 aiEDU activities, record themselves teaching (for internal review), collect any needed student release forms, and attend all five virtual sessions. Some recent cohorts focused on rural and Indigenous educators.",
+      "focus_areas": [
+        "AI literacy and AI readiness",
+        "Classroom testing of aiEDU curriculum",
+        "Educator feedback to shape curriculum",
+        "Educator leadership in AI"
+      ],
+      "funds_for": [
+        "ai",
+        "teacher_development",
+        "classroom",
+        "technology"
+      ],
+      "last_verified": "2026-10-15",
+      "confidence": "verified",
+      "sources": [
+        "https://www.aiedu.org/trailblazers-fellowship",
+        "https://www.aiedu.org/aiedu-blog/aiedu-expands-trailblazer-fellowship-targeting-rural-and-indigenous-communities-to-build-ai-readiness-for-americas-teachers"
+      ]
+    },
+    {
       "grant_name": "Arts Respond Performance Support",
       "funder": "Texas Commission on the Arts",
       "category": "non_catholic",
@@ -1156,6 +1193,41 @@
       "confidence": "verified",
       "sources": [
         "https://tpwd.texas.gov/business/grants/recreation-grants/community-outdoor-outreach-program-co-op-grants"
+      ]
+    },
+    {
+      "grant_name": "CSTA Responsible AI Fellowship",
+      "funder": "Computer Science Teachers Association (CSTA)",
+      "category": "non_catholic",
+      "deadline": "Check website",
+      "deadline_notes": "The 2026 cohort applied April 3 - May 1, 2026 and meets May - December 2026 (virtual sessions plus an in-person convening at the July CSTA Annual Conference). No 2027 call has been posted.",
+      "amount": "$1,000 stipend plus travel, lodging and meals for the CSTA Annual Conference",
+      "typical_award": "$1,000 stipend",
+      "description": "A six-month leadership fellowship for about 15 K-12 computer science teachers who want to lead ethical, inclusive AI education. Fellows get up to 50 contact hours of PD, peer mentoring and support for a capstone project shared nationally, and the CSTA conference trip is paid.",
+      "contact": "Via website",
+      "url": "https://csteachers.org/become-a-responsible-ai-fellow/",
+      "status": "Check deadline",
+      "geo_qualified": "Yes",
+      "geography": "National",
+      "religious_eligibility": "eligible",
+      "eligibility_notes": "Must be a CSTA member and a current K-12 computer science teacher (no public/private restriction stated). The application is a 1-2 minute video plus short answers.",
+      "focus_areas": [
+        "Ethical AI frameworks",
+        "Inclusive AI education",
+        "Transformative teaching practices",
+        "Leadership and advocacy for responsible AI education"
+      ],
+      "funds_for": [
+        "ai",
+        "teacher_development",
+        "technology",
+        "stem",
+        "innovation"
+      ],
+      "last_verified": "2026-10-15",
+      "confidence": "verified",
+      "sources": [
+        "https://csteachers.org/become-a-responsible-ai-fellow/"
       ]
     },
     {
@@ -1538,6 +1610,40 @@
       ]
     },
     {
+      "grant_name": "GenerationAI Luminary Award",
+      "funder": "ISTE+ASCD (GenerationAI Coalition)",
+      "category": "non_catholic",
+      "deadline": "Check website",
+      "deadline_notes": "2026 applications were due March 31, 2026, with awards presented at ISTELive (June 28 - July 1, 2026). A 2027 call has not been posted.",
+      "amount": "$500 plus free ISTELive registration, travel and lodging",
+      "typical_award": "$500 cash plus conference costs",
+      "description": "Honors ten educators who are changing learning through creative uses of AI, such as raising student engagement, personalizing learning and building skills for an AI-enhanced world. Winners are celebrated at the ISTELive conference.",
+      "contact": "Via website",
+      "url": "https://iste.org/generationai/events/luminary-award-2026-application",
+      "status": "Check deadline",
+      "geo_qualified": "Yes",
+      "geography": "National",
+      "religious_eligibility": "eligible",
+      "eligibility_notes": "Applicants must work full-time for a U.S. school or district serving grades PK-12 (no public/private restriction stated) and be able to attend the whole conference.",
+      "focus_areas": [
+        "Innovative applications of artificial intelligence in learning",
+        "Student engagement and personalized learning",
+        "Skills for an AI-enhanced world",
+        "Leadership with generative AI"
+      ],
+      "funds_for": [
+        "ai",
+        "teacher_development",
+        "innovation",
+        "technology"
+      ],
+      "last_verified": "2026-10-15",
+      "confidence": "verified",
+      "sources": [
+        "https://iste.org/generationai/events/luminary-award-2026-application"
+      ]
+    },
+    {
       "grant_name": "Girls Giving Grants (g3) Youth Grant",
       "funder": "Impact Austin",
       "category": "non_catholic",
@@ -1870,6 +1976,41 @@
       ]
     },
     {
+      "grant_name": "INVITE AI in K12 Teacher Fellowship Program",
+      "funder": "INVITE AI Institute, University of Illinois (funded by NSF and the Institute of Education Sciences)",
+      "category": "non_catholic",
+      "deadline": "Check website",
+      "deadline_notes": "The 2026 round closed March 17, 2026; fellows attended the CSTA Annual Conference (July 13-15, 2026), a fall webinar and ran a fall classroom pilot. No 2027 call has been posted.",
+      "amount": "Free CSTA Annual Conference registration plus a $1,500 travel stipend",
+      "typical_award": "$1,500 travel stipend plus registration",
+      "description": "Helps K-12 teachers of any subject bring fair, inclusive AI learning into class. Fellows attend AI-in-K12 workshops at the national CSTA conference, join a follow-up webinar, try an AI lesson or activity with at least one class, and write a reflection.",
+      "contact": "Via website",
+      "url": "https://invite.illinois.edu/alliance/teacher-fellows-program/",
+      "status": "Check deadline",
+      "geo_qualified": "Yes",
+      "geography": "National",
+      "religious_eligibility": "secular_purpose_only",
+      "eligibility_notes": "K-12 teachers in any subject (no public/private restriction stated). Fellows commit to at least 3 AI sessions at the conference, a fall webinar, one classroom pilot and a written reflection.",
+      "focus_areas": [
+        "Teaching AI concepts in K-12",
+        "Standards-aligned resources for teaching AI",
+        "Equitable and inclusive AI learning experiences",
+        "Broadening participation in computing"
+      ],
+      "funds_for": [
+        "ai",
+        "teacher_development",
+        "stem",
+        "technology",
+        "classroom"
+      ],
+      "last_verified": "2026-10-15",
+      "confidence": "verified",
+      "sources": [
+        "https://invite.illinois.edu/alliance/teacher-fellows-program/"
+      ]
+    },
+    {
       "grant_name": "Joni Elaine Templeton Foundation Grants",
       "funder": "Joni Elaine Templeton Foundation (Bank of America, trustee)",
       "category": "non_catholic",
@@ -1967,6 +2108,44 @@
       "confidence": "verified",
       "sources": [
         "https://www.bankofamerica.com/philanthropic/foundation/?fnId=151"
+      ]
+    },
+    {
+      "grant_name": "Launch K-8 Computer Science (Launch_K5 CS and Launch Middle School CS) teacher trainings and Train-the-Trainer",
+      "funder": "WeTeach_CS, Texas Advanced Computing Center, The University of Texas at Austin",
+      "category": "non_catholic",
+      "deadline": "Rolling",
+      "deadline_notes": "Free workshops are scheduled through the year by education service center region; fall 2026 sessions include Region 13 at TCEA on October 20-21, 2026. Certified trainers earn $3,000 for training at least 30 educators by the end of August 2027.",
+      "amount": "Free training plus up to $200 in physical computing kits per teacher; $3,000 per certified trainer",
+      "typical_award": "Up to $200 of classroom kits per teacher",
+      "description": "Free 2-3 day hybrid workshops that help K-5 teachers, and since spring 2026 grades 6-8 teachers, build computational thinking, computer science, cybersecurity and AI into core subjects and meet the Technology Applications TEKS. Each teacher keeps a physical computing kit. A teacher or school can also become a certified trainer and earn $3,000 for training 30 or more educators. This is free training and equipment, not a cash grant.",
+      "contact": "Via website",
+      "url": "https://weteachcs.org/catalogue/launch_k5-cs-workshops-and-trainers",
+      "status": "Rolling",
+      "geo_qualified": "Yes - TX Only",
+      "geography": "Texas (workshops held by education service center region, including Region 13)",
+      "religious_eligibility": "secular_purpose_only",
+      "eligibility_notes": "Workshops are free and open to any Texas educator who is interested; the statewide trainings require working at a Texas school that serves K-5 (or grades 6-8 for the middle school version). Trainer pay goes to the individual or the school.",
+      "focus_areas": [
+        "Integrating the Technology Applications TEKS into K-8 core curricula",
+        "Computational thinking, computer science, cybersecurity and AI",
+        "Block-based coding and physical computing",
+        "Train-the-trainer capacity building"
+      ],
+      "funds_for": [
+        "ai",
+        "stem",
+        "technology",
+        "teacher_development",
+        "classroom"
+      ],
+      "last_verified": "2026-10-15",
+      "confidence": "verified",
+      "sources": [
+        "https://weteachcs.org/catalogue/launch_k5-cs-workshops-and-trainers",
+        "https://weteachcs.org/initiatives/launch-k8-computer-science/",
+        "https://weteachcs.org/catalogue/launch_k5-cs",
+        "https://weteachcs.org/training-events/workshops/"
       ]
     },
     {
@@ -2111,6 +2290,41 @@
       ]
     },
     {
+      "grant_name": "Middle School CS Scholarship (Tech and Play: CS Workshops for Middle School Teachers)",
+      "funder": "UTeach Computer Science, The University of Texas at Austin (funded by WeTeach_CS and Lockheed Martin)",
+      "category": "non_catholic",
+      "deadline": "Check website",
+      "deadline_notes": "2026 workshops ran June 1-4 (Arlington), July 20-23 (San Antonio) and July 28-31 (Austin), with applications reviewed on a rolling basis (Austin: apply by July 1, 2026). 2027 dates have not been posted.",
+      "amount": "$800 stipend plus free PD (valued at $1,000) and a STEM kit (valued at $1,100)",
+      "typical_award": "$800 stipend per teacher",
+      "description": "Scholarships for Texas middle school teachers to attend a free four-day workshop: 'vibe coding' in Scratch with AI as a co-pilot, Sphero robotics, and solar-powered engineering, with 28 CPE hours. Teachers keep a full STEM kit with robots, Technology Applications curriculum and platform accounts.",
+      "contact": "Via website",
+      "url": "https://cs.uteach.utexas.edu/middle-school",
+      "status": "Check deadline",
+      "geo_qualified": "Yes - TX Only",
+      "geography": "Texas (2026 workshops in Austin, San Antonio and Arlington)",
+      "religious_eligibility": "secular_purpose_only",
+      "eligibility_notes": "Must teach at a Texas middle school in the coming school year and attend a whole workshop; preference to teachers scheduled to teach CS or Technology Applications. No public-school-only rule is stated; grade 6-8 teachers at a K-8 school should confirm they count. Participants pay their own travel, lodging and dinners.",
+      "focus_areas": [
+        "Scratch coding with AI as a co-pilot",
+        "Robotics and computational thinking",
+        "Technology Applications curriculum",
+        "Integrating STEM tools and AI into daily lessons"
+      ],
+      "funds_for": [
+        "ai",
+        "stem",
+        "technology",
+        "teacher_development",
+        "classroom"
+      ],
+      "last_verified": "2026-10-15",
+      "confidence": "verified",
+      "sources": [
+        "https://cs.uteach.utexas.edu/middle-school"
+      ]
+    },
+    {
       "grant_name": "Moody Foundation General (Regional) Grants",
       "funder": "The Moody Foundation",
       "category": "non_catholic",
@@ -2208,38 +2422,6 @@
       "sources": [
         "https://mbird.org/grants/apply/",
         "https://mockingbirdfoundation.org/grants/"
-      ]
-    },
-    {
-      "grant_name": "National School Lunch and School Breakfast Programs (Texas)",
-      "funder": "Texas Department of Agriculture, Food and Nutrition Division (USDA funds)",
-      "category": "non_catholic",
-      "deadline": "Rolling",
-      "deadline_notes": "New applicants can apply at any time by submitting TDA's new-applicant interest form; TDA then guides the contracting-entity setup in TX-UNPS. Allow time before the school year you want to start.",
-      "amount": "Federal per-meal reimbursements (rates set annually by USDA) plus USDA Foods",
-      "description": "Federal child nutrition programs run in Texas by TDA that reimburse schools for nutritious meals served to students, with free or reduced-price meals for eligible families. Nonprofit private schools are eligible to participate.",
-      "contact": "Via website",
-      "url": "https://squaremeals.org/Programs/National-School-Lunch-Program/New-Applicants",
-      "status": "Rolling",
-      "geo_qualified": "Yes - TX Only",
-      "geography": "Texas",
-      "religious_eligibility": "eligible",
-      "eligibility_notes": "Eligible if your nonprofit organization administers one or more private schools of high school grade or under recognized as part of the Texas educational system. Must not already participate in CACFP or SFSP for the same sites. Program rules (meal patterns, civil rights, procurement) apply. The separate state matching payments go only to public and charter schools.",
-      "focus_areas": [
-        "Free and reduced-price school lunches",
-        "School breakfast",
-        "Special Milk Program"
-      ],
-      "funds_for": [
-        "nutrition",
-        "hunger_relief",
-        "health"
-      ],
-      "last_verified": "2026-10-15",
-      "confidence": "verified",
-      "sources": [
-        "https://squaremeals.org/Programs/National-School-Lunch-Program/New-Applicants",
-        "https://squaremeals.org/Programs/National-School-Lunch-Program"
       ]
     },
     {
@@ -2447,6 +2629,46 @@
         "https://petsintheclassroom.org/do-you-qualify/",
         "https://petsintheclassroom.org/about-our-grants/",
         "https://petsintheclassroom.org/faqs/"
+      ]
+    },
+    {
+      "grant_name": "Presidential SI Challenge (formerly the Presidential AI Challenge)",
+      "funder": "White House Task Force on SI (AI) Education; run by ORISE for the U.S. government",
+      "category": "non_catholic",
+      "deadline": "2026-12-18",
+      "deadline_notes": "Teams must register by December 18, 2026 and submit projects by December 23, 2026 (5:00 pm ET). State champions are named by February 15, 2027, virtual regional rounds run March 4 - April 8, 2027, and the national finals are June 6-9, 2027 in Washington, DC.",
+      "amount": "State champions: $200 gift cards each; regional champions: $1,000 - $1,500 gift cards each plus a DC trip; national champions: $2,500 - $12,500 by category ($10,000 in the educator category)",
+      "description": "A national competition, not a grant, in which K-12 student teams and teams of 1-3 full-time teachers use AI (renamed 'Super Intelligence' or SI on September 29, 2026) to solve community problems. The educator category rewards new ways to teach with or about AI, or AI tools that improve school administrative work. Registered teams get free virtual mentorship and office hours, and every compliant entry gets a certificate.",
+      "contact": "Via website",
+      "url": "https://orise.orau.gov/si-challenge/complete-the-challenge/rules.html",
+      "status": "OPEN",
+      "geo_qualified": "Yes",
+      "geography": "National (Texas gets two state champions per category and track)",
+      "religious_eligibility": "secular_purpose_only",
+      "eligibility_notes": "Full-time K-12 classroom teachers in public, charter or private schools are eligible (age 21+, U.S. citizens, nationals or permanent residents). Student teams need a teacher or approved leader: K-5 teams have 1-5 students and grade 6-8 teams have 1-4. Work must be original and created after August 1, 2026, and consent and media forms are required.",
+      "focus_areas": [
+        "Teaching with or about AI (SI) in K-12 classrooms",
+        "AI tools that transform school administrative workflows or policies",
+        "Student AI solutions to community challenges",
+        "Trailblazer track for national challenges (grades 6-12)"
+      ],
+      "funds_for": [
+        "ai",
+        "stem",
+        "technology",
+        "innovation",
+        "classroom",
+        "teacher_development"
+      ],
+      "last_verified": "2026-10-15",
+      "confidence": "verified",
+      "sources": [
+        "https://orise.orau.gov/si-challenge/complete-the-challenge/rules.html",
+        "https://orise.orau.gov/si-challenge/about/eligibility.html",
+        "https://orise.orau.gov/si-challenge/complete-the-challenge/competition-tiers.html",
+        "https://orise.orau.gov/si-challenge/complete-the-challenge/index.html",
+        "https://orise.orau.gov/si-challenge/",
+        "https://www.ai.gov/initiatives/presidential-challenge"
       ]
     },
     {
@@ -2994,6 +3216,43 @@
       ]
     },
     {
+      "grant_name": "WeTeach_CS Preferred Provider Workshops (free summer CS, AI and cybersecurity PD for Texas teachers)",
+      "funder": "WeTeach_CS, Texas Advanced Computing Center, The University of Texas at Austin",
+      "category": "non_catholic",
+      "deadline": "Check website",
+      "deadline_notes": "2027 workshops must run between June 7 and July 23, 2027; WeTeach_CS picks its providers by December 18, 2026 and then posts each workshop's page and application. In 2026, applications were reviewed on a rolling basis until spots filled (one AI workshop asked for applications by May 29, 2026).",
+      "amount": "Free PD of at least four days, plus stipends, travel help and/or classroom materials (2026 stipends ran from $80 a day up to $700, with travel reimbursement of up to $1,000 at one workshop)",
+      "typical_award": "$400 - $700 stipend (2026 workshops)",
+      "description": "WeTeach_CS pays curriculum providers to run free summer workshops, at least four days long, for Texas teachers in computational thinking, computer science, cybersecurity and AI. Participants get stipends, travel help and/or classroom kits. 2026 examples included ethical generative AI and data science with MIT App Inventor (grades 6-12) and a middle school machine-learning workshop with micro:bit kits. This is paid training with materials, not a school grant.",
+      "contact": "Via website",
+      "url": "https://weteachcs.org/training-events/preferred-curriculum-and-pd-provider-workshops/2027/",
+      "status": "Check deadline",
+      "geo_qualified": "Yes - TX Only",
+      "geography": "Texas (workshop sites vary; providers serving rural or underserved regions get priority)",
+      "religious_eligibility": "secular_purpose_only",
+      "eligibility_notes": "Texas educators. Each workshop sets its own grade band and priorities; for example, the 2026 App Inventor AI workshop was for Texas educators teaching grades 6-12 with priority to Title I schools, and some workshops were limited to one ESC region. No public-school-only rule was found.",
+      "focus_areas": [
+        "Computational thinking",
+        "Computer science",
+        "Cybersecurity",
+        "AI and data science"
+      ],
+      "funds_for": [
+        "ai",
+        "stem",
+        "technology",
+        "teacher_development"
+      ],
+      "last_verified": "2026-10-15",
+      "confidence": "verified",
+      "sources": [
+        "https://weteachcs.org/training-events/preferred-curriculum-and-pd-provider-workshops/2027/",
+        "https://weteachcs.org/training-events/preferred-curriculum-and-pd-provider-workshops/2026/",
+        "https://www.appinventor.org/2026txppw",
+        "https://forwardedu.com/blogs/blog/texas-middle-school-teachers-get-paid-to-learn-ai-this-summer-with-forward-education"
+      ]
+    },
+    {
       "grant_name": "Women's Fund",
       "funder": "Austin Community Foundation",
       "category": "non_catholic",
@@ -3027,6 +3286,42 @@
       "sources": [
         "https://www.austincf.org/grant/womens-fund/",
         "https://www.austincf.org/apply-for-funding/grants/"
+      ]
+    },
+    {
+      "grant_name": "WTCS Mini-Grants (WeTeach_CS)",
+      "funder": "WeTeach_CS, Texas Advanced Computing Center, The University of Texas at Austin",
+      "category": "non_catholic",
+      "deadline": "Check website",
+      "deadline_notes": "The 2026 cycle closed April 17, 2026 (winners notified by May 4; projects run to May 31, 2027; final report due July 1, 2027). WeTeach_CS says to watch for 2027 mini-grants, $750 Change Maker Awards and Summit scholarships ahead of the 2027 WeTeach_CS Summit.",
+      "amount": "Up to $5,000",
+      "description": "Classroom mini-grants for Texas K-12 teachers with ideas to improve computer science teaching and learning, in school, after school or in summer camps. Money can buy CS teaching materials, justified technology, and LEGO Education Computer Science & AI kits and training. Winners must attend the June WeTeach_CS Summit, whose strands include AI and machine learning.",
+      "contact": "Via website",
+      "url": "https://weteachcs.org/catalogue/weteach_cs-summit/2026/",
+      "status": "Check deadline",
+      "geo_qualified": "Yes - TX Only",
+      "geography": "Texas",
+      "religious_eligibility": "secular_purpose_only",
+      "eligibility_notes": "Texas K-12 teachers in public, private or charter schools (private-school eligibility is stated on LEGO Education's page for the grant; the WeTeach_CS page does not mention school type). Past winners cannot win in back-to-back years; winners must attend the Summit, carry out the project as submitted and file a final report. Separately, 2026 Summit scholarships let Texas K-12 educators register for $50 instead of $800, with 2 hotel nights included.",
+      "focus_areas": [
+        "Instructional resources and materials for K-12 Computer Science",
+        "After-school, summer camp or in-school CS projects",
+        "Artificial Intelligence/Machine Learning (Summit strand)",
+        "Broadening participation in CS"
+      ],
+      "funds_for": [
+        "ai",
+        "stem",
+        "technology",
+        "classroom",
+        "teacher_development"
+      ],
+      "last_verified": "2026-10-15",
+      "confidence": "partial",
+      "sources": [
+        "https://weteachcs.org/catalogue/weteach_cs-summit/2026/",
+        "https://education.lego.com/en-us/grants-and-funding/texas/weteach-cs-minigrant/",
+        "https://weteachcs.org/"
       ]
     },
     {

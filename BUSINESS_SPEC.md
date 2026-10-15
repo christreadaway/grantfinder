@@ -30,7 +30,7 @@ An AI-powered grant matching platform that builds a comprehensive profile of a C
 4. **Non-Catholic Qualifying** — Secular grants Catholic orgs can apply for
 5. **Catholic Foundations** — Grants from Catholic philanthropic organizations
 
-**Starter database:** 89 grants a Catholic school or parish in Texas can apply to, plus 8 foundations to monitor. Each was checked on the funder's own site (last on 2026-10-15) and is re-checked every month on a review branch. **Update my grants** refreshes a user's copy in place.
+**Starter database:** 97 grants a Catholic school or parish in Texas can apply to, plus 8 foundations to monitor. Each was checked on the funder's own site (last on 2026-10-15) and is re-checked every month on a review branch. **Update my grants** refreshes a user's copy in place.
 
 ### Grant Data Structure
 - **Required Fields:** Grant Name, Deadline, Amount, Funder, Description, Contact, URL, Status, Geo Qualified
@@ -92,7 +92,7 @@ An AI-powered grant matching platform that builds a comprehensive profile of a C
 - **Built:** Complete engine in TypeScript (ported from the original FastAPI backend) with all routes and services
 - **Built:** Complete frontend (Next.js) with setup wizard, profile builder, matching results with Top picks and deadline countdowns, and the GrantWriter (Application Checklist, Funder History, drafts you can refine or edit by hand, with earlier versions kept)
 - **Built:** AI service integration with Claude API (AI steps as jobs that fit any Netlify plan, cost and token logging)
-- **Built:** 5-category Excel parser, starter database (89 grants checked on the funders' sites, refreshed monthly), Grants.gov search, AI web discovery, calendar export of deadlines
+- **Built:** 5-category Excel parser, starter database (97 grants checked on the funders' sites, refreshed monthly), Grants.gov search, AI web discovery, calendar export of deadlines
 - **Tested:** {{ENGINE_TOTAL}} automated engine checks with a mock Claude (11 suites, {{ENGINE_FIRST_PASS}} checks, then 6 of them again in direct job mode, the way Netlify runs AI steps by default), a browser test of the whole journey ({{E2E_TOTAL}} checks), and a local run on the Netlify runtime
 - **Deploy:** Netlify only (`docs/deployment.md`); a live-key run with real data is the next milestone
 

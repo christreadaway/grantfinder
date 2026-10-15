@@ -605,7 +605,7 @@ Everything is on Netlify; no other hosting service is used.
 8. **Real-time collaboration** — Single user per session
 9. **Payment / premium tiers** — Free for v1.0
 
-> **Implementation note (October 2026):** GrantFinder now ships a starter database (89 grants a
+> **Implementation note (October 2026):** GrantFinder now ships a starter database (97 grants a
 > Catholic school or parish in Texas can apply to, each checked on the funder's own site). A monthly
 > research run re-checks it on a review branch, and users pull each new edition with **Update my
 > grants**. Deadlines are not synced to a calendar, but **Add Deadlines to Calendar** downloads a

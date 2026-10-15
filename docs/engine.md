@@ -136,7 +136,7 @@ What keeps a step from being lost or paid for twice:
 | `net.ts`, `pdf.ts` | Safe web fetching and crawling; PDF text extraction |
 | `deadlines.ts` | Deadline parsing and urgency |
 | `grantDetails.ts` | Lenient parsing of the grant facts (religious eligibility, geography, deadline notes, priorities, typical award, last verified) |
-| `data/seed_grants.json` | The starter database: 89 grants and 8 foundations a Catholic school or parish in Texas can apply to, each checked on the funder's site, refreshed monthly by `/grant-research` (`docs/grant-discovery.md`) |
+| `data/seed_grants.json` | The starter database: 97 grants and 8 foundations a Catholic school or parish in Texas can apply to, each checked on the funder's site, refreshed monthly by `/grant-research` (`docs/grant-discovery.md`) |
 | `routes/*.ts` | API routes by area (auth, system, grants, discovery, processing, profile, export, writer, checklist). The writer's include the guidelines file (`POST /api/writer/applications/{id}/grant-spec/upload`) and the funder history (`POST .../funder-profile`, `POST .../funder-profile/upload`, `DELETE .../funder-profile/files/{name}`); `routes/checklist.ts` serves `GET`/`PUT /api/writer/applications/{id}/checklist`; `POST /api/processing/match-grants/continue` scores grants a matching part didn't reach |
 | `services/*.ts` | Business logic and prompts by area |
 | `handlers/*.ts` | Job handlers by area (every Claude call; they run in all three job modes) |

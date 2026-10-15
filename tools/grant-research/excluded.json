@@ -1,5 +1,26 @@
 [
   {
+    "grant_name": "AI PD Weeks (CS Foundations for Creating with AI)",
+    "funder": "Computer Science Teachers Association (NSF-funded)",
+    "url": "https://csteachers.org/pd-opportunities/ai-pd-weeks/",
+    "reason": "Stipended teacher PD runs only in host states (2026: Indiana, South Carolina, New Jersey, Illinois, Iowa, Minnesota); Texas is not a host. The 2027 RFP (due October 30, 2026) is for state organizations to host, not for schools.",
+    "checked": "2026-10-15"
+  },
+  {
+    "grant_name": "AI4K12 initiative",
+    "funder": "AAAI and CSTA",
+    "url": "https://ai4k12.org/",
+    "reason": "Publishes K-12 AI guidelines and resources; offers no funding.",
+    "checked": "2026-10-15"
+  },
+  {
+    "grant_name": "Amazon Future Engineer (teacher awards and school benefits)",
+    "funder": "Amazon",
+    "url": "https://www.amazonfutureengineer.com/childhood-to-career-computer-science-offerings",
+    "reason": "The current site offers only free curriculum, virtual career tours and PartyRock AI lessons; no school grant or teacher award application is listed (earlier teacher benefits were tied to Title I or high free/reduced-lunch schools).",
+    "checked": "2026-10-15"
+  },
+  {
     "grant_name": "Austin FC + Q2 Q-mmunity Gives",
     "funder": "Austin FC and Q2",
     "url": "https://www.austinfc.com/community/q-mmunity-gives",
@@ -63,6 +84,13 @@
     "checked": "2026-10-15"
   },
   {
+    "grant_name": "Claude for Teachers",
+    "funder": "Anthropic",
+    "url": "https://www.anthropic.com/news/claude-for-teachers",
+    "reason": "Free product access for verified U.S. K-12 educators (sign up by June 30, 2027) and a free offering for schools; it is not a grant, and no dollar value or competitive application is stated.",
+    "checked": "2026-10-15"
+  },
+  {
     "grant_name": "Coca-Cola Foundation grants",
     "funder": "The Coca-Cola Foundation",
     "url": "https://www.coca-colacompany.com/about-us/people-and-communities/the-coca-cola-foundation",
@@ -70,10 +98,24 @@
     "checked": "2026-10-15"
   },
   {
+    "grant_name": "CodeAI (formerly Code.org) Professional Learning",
+    "funder": "CodeAI (formerly Code.org)",
+    "url": "https://code.org/professional-learning",
+    "reason": "Free curriculum, AI 101 course and PD; no grant or stipend with a stated value that a private school can apply for (any workshop scholarships are set by regional partners).",
+    "checked": "2026-10-15"
+  },
+  {
     "grant_name": "Communities Foundation of Texas Grants",
     "funder": "Communities Foundation of Texas",
     "url": "https://www.cftexas.org/nonprofits/grants/",
     "reason": "Nearly all grant opportunities are by invitation only and focused on North Texas; there is no statewide open program.",
+    "checked": "2026-10-15"
+  },
+  {
+    "grant_name": "Community Catalyst Program",
+    "funder": "aiEDU (The AI Education Project)",
+    "url": "https://www.aiedu.org/2026-catalyst",
+    "reason": "Only school districts, educational service agencies, PD nonprofits and charter schools/CMOs may apply (priority to rural and Indigenous communities); private schools are not listed, and the 2026 round is closed.",
     "checked": "2026-10-15"
   },
   {
@@ -91,10 +133,24 @@
     "checked": "2026-10-15"
   },
   {
+    "grant_name": "CS Teaching Excellence Award",
+    "funder": "Computer Science Teachers Association (sponsored by Infosys Foundation USA)",
+    "url": "https://csteachers.org/awards/excellence/",
+    "reason": "Discontinued effective the 2025-2026 academic year.",
+    "checked": "2026-10-15"
+  },
+  {
     "grant_name": "Day 1 Families Fund / Day 1 Academies Fund",
     "funder": "Bezos Day One Fund",
     "url": "https://www.bezosdayonefund.org/",
     "reason": "Families Fund leadership awards go to organizations fighting family homelessness and are chosen by the fund (no application process is described); the Academies Fund builds and operates its own tuition-free Montessori-inspired preschools rather than making grants to schools.",
+    "checked": "2026-10-15"
+  },
+  {
+    "grant_name": "Day of AI (MIT RAISE)",
+    "funder": "Day of AI / MIT RAISE",
+    "url": "https://dayofai.org/",
+    "reason": "Free AI literacy curriculum and PD with no grant or stipend application.",
     "checked": "2026-10-15"
   },
   {
@@ -119,10 +175,24 @@
     "checked": "2026-10-15"
   },
   {
+    "grant_name": "Gates Foundation K-12 / AI education grants",
+    "funder": "Bill & Melinda Gates Foundation",
+    "url": "https://www.gatesfoundation.org/about/how-we-work/grant-opportunities",
+    "reason": "Most grants go to organizations the staff identify; open opportunities are topic-specific RFPs, and none is a K-12 school grant a private school can apply to.",
+    "checked": "2026-10-15"
+  },
+  {
     "grant_name": "GHR Foundation Catholic Schools Grants",
     "funder": "GHR Foundation",
     "url": "https://www.ghrfoundation.org",
     "reason": "No open application: GHR works with a focused set of chosen partners, and its Catholic-school work is in the Twin Cities.",
+    "checked": "2026-10-15"
+  },
+  {
+    "grant_name": "Google AI Educator Series (free Gemini training with ISTE+ASCD)",
+    "funder": "Google for Education / Google.org",
+    "url": "https://blog.google/products-and-platforms/products/education/teacher-ai-literacy-training/",
+    "reason": "Free self-paced AI training and badges for all U.S. educators; not a grant and no monetary benefit. Google.org's related funding goes to nonprofits such as Digital Promise, not to schools.",
     "checked": "2026-10-15"
   },
   {
@@ -144,6 +214,13 @@
     "funder": "H-E-B",
     "url": "https://www.kristv.com/news/local-news/h-e-b-excellence-in-education-awards-1-million-available-for-texas-educators-in-2027",
     "reason": "Limited to state-certified public school educators, public school boards and school districts. Only the early childhood facility category (listed in grants) is open to private early childhood programs.",
+    "checked": "2026-10-15"
+  },
+  {
+    "grant_name": "Higher-Powered Learning AI professional development for Catholic schools",
+    "funder": "Alliance for Catholic Education, University of Notre Dame",
+    "url": "https://ace.nd.edu/programs/higher-powered-learning/ai-catholic-education",
+    "reason": "A PD service that schools and dioceses contract for (free policy templates and webinars are available); it is not a grant.",
     "checked": "2026-10-15"
   },
   {
@@ -179,6 +256,13 @@
     "funder": "KDK-Harman Foundation",
     "url": "https://projects.propublica.org/nonprofits/organizations/611478157",
     "reason": "The foundation moved its endowment into a donor-advised fund at Austin Community Foundation and reported $0 in total assets for 2024; it no longer runs an open grant program.",
+    "checked": "2026-10-15"
+  },
+  {
+    "grant_name": "Learning Engineering Tools Competition (2027)",
+    "funder": "Renaissance Philanthropy (organized by The Learning Agency)",
+    "url": "https://tools-competition.org/",
+    "reason": "Prizes for edtech tool and dataset developers; Phase I abstracts closed October 13, 2026.",
     "checked": "2026-10-15"
   },
   {
@@ -224,6 +308,13 @@
     "checked": "2026-10-15"
   },
   {
+    "grant_name": "Microsoft Elevate for Educators",
+    "funder": "Microsoft (Microsoft Elevate)",
+    "url": "https://www.microsoft.com/en-us/elevate",
+    "reason": "Free AI training, communities and credentials; Microsoft Elevate cash grants found were state-specific (Washington school districts), with no application open to Texas private schools.",
+    "checked": "2026-10-15"
+  },
+  {
     "grant_name": "Moody Foundation Education M-Pact Fund (Cycle 4)",
     "funder": "The Moody Foundation",
     "url": "https://moodyf.org/mpact-application-process/",
@@ -238,6 +329,13 @@
     "checked": "2026-10-15"
   },
   {
+    "grant_name": "NCEA Google Educator Group founding leaders",
+    "funder": "National Catholic Educational Association and Google for Education",
+    "url": "https://www.ncea.org/GoogleEduGroup",
+    "reason": "A one-time call for six founding leaders that closed April 30, 2026; the benefit is free AI training plus travel, with no grant or cash value. The underlying Google AI literacy training stays free to Catholic school teachers.",
+    "checked": "2026-10-15"
+  },
+  {
     "grant_name": "Nourishing Neighbors Innovation Incubation Fund",
     "funder": "Albertsons Companies Foundation",
     "url": "https://www.nourishingneighbors.com/rfps/140-nourishing-neighbors-innovation-incubation-fund-rfp",
@@ -245,10 +343,66 @@
     "checked": "2026-10-15"
   },
   {
+    "grant_name": "NSF STEM K-12 (NSF 25-545)",
+    "funder": "National Science Foundation",
+    "url": "https://www.nsf.gov/funding/opportunities/stem-k-12-nsf-stem-k-12/nsf25-545/solicitation",
+    "reason": "A research program (including AI in STEM learning) that only universities, research nonprofits such as museums and professional societies, for-profits, state/local governments and tribes may submit to; K-12 schools can take part only as partners.",
+    "checked": "2026-10-15"
+  },
+  {
+    "grant_name": "NVIDIA Academic Grant Program",
+    "funder": "NVIDIA",
+    "url": "https://www.nvidia.com/en-us/industries/higher-education-research/academic-grant-program/",
+    "reason": "Only for university researchers, and currently not accepting new applications; NVIDIA has no K-12 school grant program.",
+    "checked": "2026-10-15"
+  },
+  {
+    "grant_name": "Overdeck Family Foundation grants",
+    "funder": "Overdeck Family Foundation",
+    "url": "https://www.overdeck.org/faq/",
+    "reason": "Not accepting unsolicited grant proposals.",
+    "checked": "2026-10-15"
+  },
+  {
+    "grant_name": "Pathfinders Summer Institute scholarships",
+    "funder": "Infosys Foundation USA",
+    "url": "https://makeymakey.com/blogs/blog/announcement-makey-makey-joins-the-2026-pathfinders-summer-institute",
+    "reason": "Full scholarships are for U.S. public school teachers and public librarians only (per course provider Makey Makey; infosys.org blocks automated access).",
+    "checked": "2026-10-15"
+  },
+  {
+    "grant_name": "People-First AI Fund (2026)",
+    "funder": "OpenAI Foundation",
+    "url": "https://openaifoundation.org/news/2026-people-first-ai-fund",
+    "reason": "2026 focus areas are community support services, arts and culture, and local journalism, not K-12 education. It requires a standalone 501(c)(3) public charity with a $500,000-$10 million budget, does not consider programs inside larger institutions, and closed July 15, 2026.",
+    "checked": "2026-10-15"
+  },
+  {
+    "grant_name": "Presidential Awards for Excellence in Mathematics and Science Teaching (PAEMST)",
+    "funder": "National Science Foundation",
+    "url": "https://www.nsf.gov/honorary-awards/paemst",
+    "reason": "Paused by NSF on July 18, 2025 until further notice; no nominations are being taken.",
+    "checked": "2026-10-15"
+  },
+  {
+    "grant_name": "Research Experiences for Teachers in Machine Learning and Smart System Design",
+    "funder": "Texas A&M University (NSF RET site)",
+    "url": "https://people.tamu.edu/~hsieh/ret/index.html",
+    "reason": "For high school career and technology education teachers; the 2026 deadline (March 13, 2026) has passed and K-8 teachers do not fit the target group.",
+    "checked": "2026-10-15"
+  },
+  {
     "grant_name": "School health and wellness grants",
     "funder": "Action for Healthy Kids",
     "url": "https://www.actionforhealthykids.org/grants/",
     "reason": "Paused: the grants page says there are no open grant opportunities at this time.",
+    "checked": "2026-10-15"
+  },
+  {
+    "grant_name": "Siegel Family Endowment grants",
+    "funder": "Siegel Family Endowment",
+    "url": "https://www.siegelendowment.org/contact/",
+    "reason": "Does not currently accept unsolicited proposals.",
     "checked": "2026-10-15"
   },
   {
@@ -343,6 +497,13 @@
     "checked": "2026-10-15"
   },
   {
+    "grant_name": "Verizon Innovative Learning Schools",
+    "funder": "Verizon (with Digital Promise)",
+    "url": "https://digitalpromise.org/verizon-innovative-learning-schools/how-it-works/",
+    "reason": "Digital Promise selects partner schools and districts through a district interest form; the program serves Title I public schools, and there is no route for private schools.",
+    "checked": "2026-10-15"
+  },
+  {
     "grant_name": "Victory Noll Sisters Small Grants (creation care)",
     "funder": "Catholic Climate Covenant",
     "url": "https://catholicclimatecovenant.org/press-releases/catholic-climate-covenant-announces-creation-care-small-grant-winners/",
@@ -350,10 +511,24 @@
     "checked": "2026-10-15"
   },
   {
+    "grant_name": "Walton Family Foundation K-12 education grants",
+    "funder": "Walton Family Foundation",
+    "url": "https://www.waltonfamilyfoundation.org/grants",
+    "reason": "The foundation does not accept unsolicited proposals.",
+    "checked": "2026-10-15"
+  },
+  {
     "grant_name": "Waterwise Garden Grant",
     "funder": "KidsGardening",
     "url": "https://kidsgardening.org/grant-opportunities/",
     "reason": "Limited to public and charter schools (2026 window September 1 - October 2, 2026). KidsGardening's Youth Garden Grant, which is open to any organization, is listed separately.",
+    "checked": "2026-10-15"
+  },
+  {
+    "grant_name": "WeTeach_CS Certification Incentive Program (CS 8-12 $2,000 and EC-12 Tech Apps $750 stipends)",
+    "funder": "WeTeach_CS, Texas Advanced Computing Center, The University of Texas at Austin",
+    "url": "https://docs.google.com/forms/d/e/1FAIpQLSetHN_fnh2gvq0cibt2KMX11ksg0CKp5L_WsvPiZdpgdpS9lQ/viewform",
+    "reason": "Applicants must be a teacher of record in a Texas public or charter school (or enrolled in a Texas educator preparation program); private-school teachers are not eligible.",
     "checked": "2026-10-15"
   }
 ]

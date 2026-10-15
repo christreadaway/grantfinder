@@ -7,7 +7,7 @@ enter the database from four sources, all merged with automatic deduplication
 | Source | Endpoint | Requires Claude API key | What it does |
 |---|---|---|---|
 | Excel upload | `POST /api/grants/upload` | No | User's own spreadsheet (5-category format, `.xlsx`, up to 4 MB). Merges into the database: a row matching a saved grant updates the cells it filled in; nothing is deleted |
-| Starter database | `POST /api/discovery/seed` | No | Built-in list of 89 grants a Catholic school or parish in Texas can apply to (Catholic funders, Texas funders, and national programs open to private religious schools), each checked on the funder's own site on 2026-10-15, plus 8 foundations to monitor. Loading it again refreshes your copy (see "The starter database" below) |
+| Starter database | `POST /api/discovery/seed` | No | Built-in list of 97 grants a Catholic school or parish in Texas can apply to (Catholic funders, Texas funders, and national programs open to private religious schools), each checked on the funder's own site on 2026-10-15, plus 8 foundations to monitor. Loading it again refreshes your copy (see "The starter database" below) |
 | Grants.gov | `POST /api/discovery/grants-gov` | No | Runs as a job. Live search of the free Grants.gov Search2 API for open + forecasted federal opportunities. Keywords derive from the org profile (security concerns, facility needs, food pantry, school programs) or can be passed explicitly. If Grants.gov doesn't answer, the step fails with a clear message instead of reporting 0 grants. In direct mode (the Netlify default, about a minute per step) up to 4 keyword searches run at once, 10 seconds each at most, and a keyword that no longer fits is skipped and noted; with the background worker they run one after another, 30 seconds each at most. Each result has geography "National (federal)" and religious eligibility "unclear" (check the listing) |
 | AI web discovery | `POST /api/discovery/web-search` | Yes | Runs as a job. Claude uses its server-side web search tool to find current grant opportunities tailored to the organization profile (plus an optional focus typed on the dashboard). Instructed to only report grants with real web evidence and to use "Check website" when a deadline can't be verified. It asks for the same facts the starter database has (deadline notes, typical award, funder priorities, geography, religious eligibility) and to skip programs that exclude religious organizations, religious schools or private schools. A result marked excluded anyway is never saved, and the notes say how many were skipped. In direct mode Claude runs at most 3 web searches (8 with the background worker) and one continuation of a paused search, and is asked for 5-8 grants, so the step ends within its minute. Grants already listed when time runs out are kept; if none were, the step says so plainly and suggests a narrower focus |
 
@@ -18,7 +18,7 @@ older edition).
 
 ## The starter database
 
-`frontend/src/server/data/seed_grants.json` holds 89 grants and 8 foundations. It lists only
+`frontend/src/server/data/seed_grants.json` holds 97 grants and 8 foundations. It lists only
 grants a Catholic school or parish in Texas can apply to. Programs that ended, are limited to
 another region, or are closed to parishes or parish schools are left out. Its `"updated"` field
 is the date of the last research run (2026-10-15).

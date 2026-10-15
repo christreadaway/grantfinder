@@ -4,7 +4,19 @@ What each monthly run of the grant-research skill changed in the starter databas
 
 ## 2026-10-15
 
-89 grants (was 24).
+97 grants (was 24): the first verified edition. Four research agents (re-checking the original 24, then Catholic, Texas and national funders) and a fifth for AI in education. Two programs that two agents found under different names were merged (Strake Foundation; the National School Lunch and Breakfast Programs).
+
+**Added (AI in education):**
+- aiEDU Trailblazers Fellowship
+- CSTA Responsible AI Fellowship
+- Faith and AI Rapid Response Grants and Impact Grants (DELTA Partner Program)
+- GenerationAI Luminary Award
+- INVITE AI in K12 Teacher Fellowship Program
+- Launch K-8 Computer Science (Launch_K5 CS and Launch Middle School CS) teacher trainings and Train-the-Trainer
+- Middle School CS Scholarship (Tech and Play: CS Workshops for Middle School Teachers)
+- Presidential SI Challenge (formerly the Presidential AI Challenge)
+- WeTeach_CS Preferred Provider Workshops (free summer CS, AI and cybersecurity PD for Texas teachers)
+- WTCS Mini-Grants (WeTeach_CS)
 
 **Added:**
 - A. M. Pate Jr. Charitable Trust Grants
@@ -53,7 +65,6 @@ What each monthly run of the grant-research skill changed in the starter databas
 - Music Education Grants (competitive grants)
 - NEH Summer Institutes and Landmarks of American History and Culture Workshops for K-12 Educators (participant stipends)
 - National School Lunch Program, School Breakfast Program and Special Milk Program (private nonprofit schools)
-- National School Lunch and School Breakfast Programs (Texas)
 - Nonprofit Security Grant Program (NSGP) - Texas
 - PEC Community Grants
 - Partnership School Program (parish-sponsored tuition support)
@@ -63,7 +74,6 @@ What each monthly run of the grant-research skill changed in the starter databas
 - School Library Book Grant
 - Sid W. Richardson Foundation Grants (Education)
 - Sprouting School Gardens Grant
-- Strake Foundation Grant Program
 - Strake Foundation Grants
 - Summerfield G. Roberts Foundation Grants (Texas History)
 - Systemic Change Grant Program
