@@ -214,7 +214,13 @@ what it actually funds. The card appears once the requirements are analyzed.
   characters, kept across a reload), files ("Add a file": PDF, Word .docx or
   text, up to 4 MB, at most 6 files, the first 60,000 characters of each; a
   file with the same name replaces the earlier one; "Remove" asks first), and
-  web research.
+  web research. A starter grant also brings GrantFinder's own research on the
+  funder (its `funder_intel` track record: past awards by recipient type and
+  city, award levels, record with Catholic schools, giving trend, outlook):
+  `funder_research_v1` and `funder_profile_v1` get it as
+  `grantfinder_funder_research`, and its past awards count as funder material,
+  so a comparable grant taken from them ("Catholic elementary school (Austin,
+  TX)") is not flagged.
 - **"Build Funder Profile"** (`funder_profile_v1`, no web search) builds the
   profile from that material plus the grant record, the extracted
   requirements and your organization profile. A step inside one request sends

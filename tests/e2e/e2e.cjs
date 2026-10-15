@@ -1029,6 +1029,26 @@ async function journey(browser) {
         /Religious organizations may apply/.test(chipTitle) && /other rules/.test(chipTitle), chipTitle);
       check('Kenedy card shows when it was verified', /(Partly verified|Verified) [A-Z][a-z]{2} \d{1,2}, \d{4}/.test(text), text.slice(0, 600));
       check('Kenedy card shows who can apply', /Who can apply:/.test(text), text.slice(0, 900));
+      // The funder track record from the grant research: collapsed, award levels in its heading, the facts inside.
+      const intel = (SEED_GRANTS.find((g) => g.grant_name === KENEDY) || {}).funder_intel || {};
+      const record = kenedyCard.locator('details[data-track-record]');
+      check('Kenedy card has a "Funder track record", collapsed until opened',
+        (await record.count()) === 1 && !(await record.evaluate((el) => el.open).catch(() => true)), await record.count());
+      const summary = (await record.locator('summary').innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
+      check('...its heading gives the award levels from the research', summary.startsWith('Funder track record') &&
+        Boolean(intel.award_levels) && summary.includes(intel.award_levels.slice(0, 40)), summary.slice(0, 200));
+      await record.locator('summary').click().catch(() => {});
+      const recordText = (await record.innerText().catch(() => '')).replace(/\s+/g, ' ');
+      const firstAward = (intel.past_awards || [])[0] || {};
+      check('...opened, it shows the Catholic school record, past awards, giving trend, what is ahead and when it was researched',
+        /Catholic schools:/.test(recordText) && /Past awards:/.test(recordText) && /Researched [A-Z][a-z]{2} \d{1,2}, \d{4}/.test(recordText) &&
+        (!intel.giving_trend || /Giving trend:/.test(recordText)) && (!intel.outlook || /What.s ahead:/.test(recordText)), recordText.slice(0, 600));
+      check('...each past award reads year, amount, recipient type and city, purpose',
+        recordText.includes([firstAward.year, firstAward.amount, firstAward.recipient, firstAward.purpose].filter(Boolean).join(' · ')), recordText.slice(0, 600));
+      check('...at most 6 past awards are listed', (await record.locator('li').count()) <= 6 && (await record.locator('li').count()) >= 1, await record.locator('li').count());
+      const sourceLinks = await record.locator('a').evaluateAll((links) => links.map((l) => ({ href: l.href, target: l.target, rel: l.rel })));
+      check('...its sources are web links that open in a new tab, safely', sourceLinks.length > 0 &&
+        sourceLinks.every((l) => /^https?:/.test(l.href) && l.target === '_blank' && /noopener/.test(l.rel)), sourceLinks.slice(0, 3));
       check('Kenedy (Texas-only) was not ruled out for a Texas parish', !/^0%$/m.test(text));
       check('Kenedy card names its category in plain words ("Catholic (parish and school)")',
         (await kenedyCard.locator('[data-category]').innerText().catch(() => '')).trim() === 'Catholic (parish and school)',
@@ -1057,6 +1077,17 @@ async function journey(browser) {
     check('Texas-only starter grants are not ruled out for a Texas parish', regional.length > 0 && regional.every((m) => m.score_tier !== 'not_eligible' || !/Geographic restriction/.test(m.explanation || '')), regional.map((m) => `${m.grant_name}: ${m.score_tier}`).slice(0, 5));
     check('saved results carry the grant facts (religious eligibility on every starter match)',
       (L.matches || []).filter((m) => SEED_GRANTS.some((g) => g.grant_name === m.grant_name)).every((m) => m.religious_eligibility), (L.matches || []).filter((m) => !m.religious_eligibility).map((m) => m.grant_name).slice(0, 5));
+    // An entitlement program (formula money, no competitive awards) shows its one-line note, not a track record.
+    const entitlement = SEED_GRANTS.find((g) => g.funder_intel && g.funder_intel.applicable === false && g.funder_intel.note);
+    const entitlementCard = entitlement ? matchCard(page, entitlement.grant_name) : null;
+    if (entitlementCard && (await entitlementCard.count()) > 0) {
+      const entText = (await entitlementCard.innerText()).replace(/\s+/g, ' ');
+      check(`an entitlement program (${entitlement.grant_name}) shows its note instead of a track record`,
+        entText.includes(`Funder track record: ${entitlement.funder_intel.note.slice(0, 60)}`) && (await entitlementCard.locator('details[data-track-record]').count()) === 0,
+        entText.slice(0, 400));
+    } else {
+      info('no entitlement program in the match list to check its track-record note');
+    }
     const fallbacks = (L.matches || []).filter((m) => /review manually|not ai-scored|unable to/i.test(m.explanation || ''));
     info(`${fallbacks.length} match(es) carry a "not AI-scored" fallback explanation (expected for foundations the mock did not score)`);
 
@@ -1071,9 +1102,16 @@ async function journey(browser) {
     const mdText = md.buf.toString('utf8');
     check('Markdown export downloads (grant_matches.md)', md.name === 'grant_matches.md', md.name);
     check('Markdown report has a title, summary and Kenedy', /^# /m.test(mdText) && /Excellent/i.test(mdText) && mdText.includes(KENEDY), mdText.slice(0, 200));
-    // The report's wording is the engine's (services/exportResults.ts): either label means "eligible" was exported.
-    check('Markdown report includes the grant facts (religious eligibility, last verified)', /\| Religious eligibility \| (Religious orgs eligible|Religious organizations eligible|Catholic schools eligible) \|/.test(mdText) && /\| Last verified \| \d{4}-\d{2}-\d{2} \|/.test(mdText), mdText.slice(0, 300));
-    check('CSV has the grant-facts columns', ['Geography', 'Religious Eligibility', 'Deadline Notes', 'Typical Award', 'Funder Priorities', 'Eligibility Notes', 'Last Verified'].every((c) => (rows[0] || []).includes(c)), rows[0]);
+    // The report's wording is the engine's (services/exportResults.ts RELIGIOUS_ELIGIBILITY_LABELS).
+    check('Markdown report includes the grant facts (religious eligibility, last verified)', /\| Religious eligibility \| Religious organizations eligible \|/.test(mdText) && /\| Last verified \| \d{4}-\d{2}-\d{2} \|/.test(mdText), mdText.slice(0, 300));
+    check('Markdown report never uses the old "Catholic schools eligible" label', !mdText.includes('Catholic schools eligible'));
+    check('Markdown report includes the funder track record rows', /\| Past award levels \| /.test(mdText) && /\| Catholic school track record \| /.test(mdText) && /\| Giving trend \| /.test(mdText), mdText.slice(0, 300));
+    check('CSV has the grant-facts columns', ['Status', 'Geography', 'Religious Eligibility', 'Deadline Notes', 'Typical Award', 'Funder Priorities', 'Eligibility Notes', 'Last Verified', 'Confidence'].every((c) => (rows[0] || []).includes(c)), rows[0]);
+    check('CSV has the funder track record columns', ['Past Award Levels', 'Catholic School Track Record', 'Funder Outlook'].every((c) => (rows[0] || []).includes(c)), rows[0]);
+    const kenedyRow = rows.find((r) => r.includes(KENEDY)) || [];
+    const kenedyIntel = (SEED_GRANTS.find((g) => g.grant_name === KENEDY) || {}).funder_intel || {};
+    check("...and Kenedy's row carries its award levels from the research", Boolean(kenedyIntel.award_levels) &&
+      kenedyRow[(rows[0] || []).indexOf('Past Award Levels')] === kenedyIntel.award_levels, kenedyRow[(rows[0] || []).indexOf('Past Award Levels')]);
 
     const picks = card(page, /Top picks/);
     const picksText = await picks.innerText();

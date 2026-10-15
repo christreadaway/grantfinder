@@ -59,6 +59,13 @@ responsible agent with SendMessage, or check the funder's site yourself) and run
 `NOT RE-VERIFIED` grants were kept unchanged: verify them yourself or leave them for next month and
 say so. Then run it once more without `--dry-run`.
 
+`possible duplicate` warnings for these pairs are expected: they are separate programs that share a
+funder page (checked 2026-10-15), so keep both. The four ESSA equitable-services titles (I, II, III,
+IV) are separate federal programs. The Black and Indian Mission Office's Diocesan Grants (the diocese
+applies) and its CNAMB and BCIM School and Religious Education Program Grants (schools and religious
+education programs apply) are separate programs on one grants page. Any other duplicate warning needs
+a decision.
+
 Sanity checks before going on:
 - The Kenedy Memorial Foundation grant is still present (its deadline is the funder's stated date).
 - The database did not shrink by more than 15% unless every removal has a clear reason.

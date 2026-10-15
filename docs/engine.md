@@ -135,8 +135,8 @@ What keeps a step from being lost or paid for twice:
 | `json.ts` | Lenient JSON extraction from model output and coercion helpers |
 | `net.ts`, `pdf.ts` | Safe web fetching and crawling; PDF text extraction |
 | `deadlines.ts` | Deadline parsing and urgency |
-| `grantDetails.ts` | Lenient parsing of the grant facts (religious eligibility, geography, deadline notes, priorities, typical award, last verified) |
-| `data/seed_grants.json` | The starter database: 97 grants and 8 foundations a Catholic school or parish in Texas can apply to, each checked on the funder's site, refreshed monthly by `/grant-research` (`docs/grant-discovery.md`) |
+| `grantDetails.ts` | Lenient parsing of the grant facts (religious eligibility read clause by clause and the funder's own words, who applies, geography, deadline notes and times, priorities, typical award, last verified, the funder track record) |
+| `data/seed_grants.json` | The starter database: 97 grants and 7 foundations a Catholic school or parish in Texas can apply to, each with the funder's track record, each checked on the funder's site, refreshed monthly by `/grant-research` (`docs/grant-discovery.md`) |
 | `routes/*.ts` | API routes by area (auth, system, grants, discovery, processing, profile, export, writer, checklist). The writer's include the guidelines file (`POST /api/writer/applications/{id}/grant-spec/upload`) and the funder history (`POST .../funder-profile`, `POST .../funder-profile/upload`, `DELETE .../funder-profile/files/{name}`); `routes/checklist.ts` serves `GET`/`PUT /api/writer/applications/{id}/checklist`; `POST /api/processing/match-grants/continue` scores grants a matching part didn't reach |
 | `services/*.ts` | Business logic and prompts by area |
 | `handlers/*.ts` | Job handlers by area (every Claude call; they run in all three job modes) |
@@ -163,8 +163,8 @@ ratelimit/{bucket}/{ipHash}       sign-in rate-limit window
 
 ```bash
 cd ~/grantfinder
-bash tests/engine/run_all.sh      # 11 suites: foundation, deadlines, grants, processing, writer, regressions, direct, direct-processing, checklist, security, finder ({{ENGINE_FIRST_PASS}} checks); then processing, grants, writer, regressions, checklist, finder again in direct mode ({{ENGINE_TOTAL}} checks in all)
-bash tests/e2e/run_e2e.sh         # real browser through the whole journey on a production build ({{E2E_TOTAL}} checks)
+bash tests/engine/run_all.sh      # 13 suites: foundation, deadlines, grants, processing, writer, regressions, direct, direct-processing, checklist, security, finder, finder-parsing, finder-results (1,005 checks); then processing, grants, writer, regressions, checklist, finder, finder-results again in direct mode (1,802 checks in all)
+bash tests/e2e/run_e2e.sh         # real browser through the whole journey on a production build (529 checks)
 ```
 
 The suites compute deadlines from today, never from fixed dates. To check they pass on another

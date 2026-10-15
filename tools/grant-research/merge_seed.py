@@ -38,7 +38,8 @@ EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 PHONE = re.compile(r"\(?\b\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b")
 CATEGORY_ORDER = {"catholic_school": 0, "mixed": 1, "church_parish": 2, "non_catholic": 3}
 APPLICANTS = {"school", "parish", "diocese", "teacher", "family", "nonprofit"}
-RELATIVE_TIME = re.compile(r"\b(today|tomorrow|yesterday|just (?:passed|closed|opened)|recently|this (?:fall|spring|summer|winter|month|week|year)|next (?:week|month)|upcoming|soon|currently|now (?:closed|open))\b", re.I)
+RELATIVE_TIME = re.compile(r"\b(today|tomorrow|yesterday|just (?:passed|closed|opened)|recently|this (?:fall|spring|summer|winter|month|week|year)|next (?:week|month)|upcoming|soon|currently|now (?:closed|open)|(?:is |are )?open now|right now)\b", re.I)
+FIRST_PERSON = re.compile(r"\b(?:by my count|my count|I (?:counted|found|checked|could|did|was|think|believe)|we (?:found|counted|checked|could))\b", re.I)
 TEXAS_PLACE = re.compile(r"^(?:Texas|Central Texas|South Texas|North Texas)\b|\b(?:Diocese of (?:Austin|Dallas|Fort Worth|San Antonio|Houston|Galveston-Houston|El Paso|Lubbock|Amarillo|Beaumont|Brownsville|Corpus Christi|Laredo|San Angelo|Tyler|Victoria)|City of Austin|Travis|Williamson|Hays) (?:only|count(?:y|ies))", re.I)
 
 
@@ -97,6 +98,12 @@ def clean_intel(value, where, merger):
         return None
     if intel["applicable"] and not intel["sources"]:
         merger.note(f"warn {where}: funder track record lists no sources")
+    intel_text = " ".join(str(intel.get(k) or "") for k in ("note", "award_levels", "catholic_school_track_record", "giving_trend", "outlook"))
+    if FIRST_PERSON.search(intel_text):
+        merger.note(f"warn {where}: funder track record is written in the first person ({FIRST_PERSON.search(intel_text).group(0)!r}): state the fact and its source instead")
+    stale_words = RELATIVE_TIME.findall(intel_text)
+    if stale_words:
+        merger.note(f"warn {where}: funder track record uses relative time words that go stale ({', '.join(sorted(set(w.lower() for w in stale_words)))}): write explicit dates")
     return intel
 
 
@@ -222,7 +229,10 @@ class Merger:
             out["applicants"] = list(dict.fromkeys(applicants))
         else:
             self.note(f"warn {where}: no applicants (who submits: school, parish, diocese, teacher, family, nonprofit)")
-        stale_words = RELATIVE_TIME.findall(" ".join(str(out.get(k) or "") for k in ("deadline_notes", "description", "eligibility_notes", "amount")))
+        record_text = " ".join(str(out.get(k) or "") for k in ("deadline_notes", "description", "eligibility_notes", "amount"))
+        if FIRST_PERSON.search(record_text):
+            self.note(f"warn {where}: written in the first person ({FIRST_PERSON.search(record_text).group(0)!r}): state the fact and its source instead")
+        stale_words = RELATIVE_TIME.findall(record_text)
         if stale_words:
             self.note(f"warn {where}: relative time words go stale ({', '.join(sorted(set(w.lower() for w in stale_words)))}): write explicit dates")
         if out["geo_qualified"] == "Yes" and TEXAS_PLACE.search(out.get("geography") or ""):

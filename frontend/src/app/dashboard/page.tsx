@@ -600,8 +600,9 @@ const safeLinks = (links: string[] | undefined) => (links ?? []).map((link) => w
 
 /**
  * What the funder has actually funded and at what levels, its record with Catholic schools, its
- * giving trend and anything it has announced, from GrantFinder's grant research. Collapsed by
- * default; the outlook shows outside when it signals a change worth knowing before applying.
+ * giving trend and anything it has announced ("What's ahead"), from GrantFinder's grant research.
+ * Collapsed by default, with the award levels in its heading. Entitlement programs (applicable
+ * false) show their one-line note instead.
  */
 function FunderTrackRecord({ match }: { match: MatchItem }) {
   const intel = match.funder_intel;

@@ -9,6 +9,51 @@ This file contains a complete history of Claude Code sessions for this repositor
 
 ---
 
+## 2026-10-15 (evening) — Grant Finder Shored Up: 97 Verified Grants, Funder Track Records, Monthly Research
+
+### What We Built
+Chris asked to "really shore up the grant finder part of the app": expand the grants, get amounts and eligibility, ignore anything Catholic schools can't apply for, research due dates and what each funder funds now; then research monthly from here, add funders of AI in education, and gather intelligence on what each grantor actually funded, at what levels, and what it has announced about the future. Test comprehensively, fix every bug low to critical, update the docs line by line.
+
+1. **Starter database: 24 → 97 verified grants, plus 7 foundations** (`frontend/src/server/data/seed_grants.json`, `"updated": "2026-10-15"`). Every record was checked on the funder's own site this session by research agents: deadline (date, "Annual: Month D", Rolling or Check website) and deadline notes, amount and typical award, current priorities, geography, who applies, religious eligibility, eligibility notes, last verified, confidence, sources. Programs closed to Catholic schools, private schools or Texas are listed in `tools/grant-research/excluded.json` with the reason and never added. 10 grants are tagged `ai` (AI in education).
+2. **Funder intelligence on every grant** (`funder_intel`): 3-8 real past awards (year, amount, recipient by TYPE and CITY only, purpose), award levels, what it funded in practice, its Catholic-school track record, giving trend, and its announced outlook, from grants lists, annual reports and Form 990 / 990-PF. Entitlement programs (ESSA, IDEA, E-Rate, school meals) carry a one-line note instead. Shown as a collapsed **Funder track record** on every match; fed to matching ("real giving outweighs stated priorities") and to the writer's funder research and funder profile; exported (CSV: Past Award Levels, Catholic School Track Record, Funder Outlook; Markdown rows).
+3. **Grant facts everywhere:** results chips ("Religious orgs eligible", "Non-religious uses only", "Religious eligibility not stated", "Doesn't fund religious orgs"; "Teachers apply" / "Applies: diocese" when the school can't apply itself), the funder's own words, typical award, deadline details, what they fund now. Spreadsheet upload reads Religious Eligibility (clause by clause), Applicants, Deadline Notes, Typical Award, Funding Priorities, Region, Last Verified; a date cell's time goes into the deadline notes.
+4. **Matching rules in code (no AI cost):** funders that exclude religious organizations, Texas-only grants (including a Texas county, diocese or other city) for organizations outside Texas, closed grants and past deadlines are Not Eligible before any Claude call. Foundations the grant list already covers aren't scored twice; foundations that take no applications aren't scored.
+5. **Results always current:** saved results are recomputed against today's grants on every read (never rewritten): a retired grant is marked "No longer in your grant database." and moved last; a grant now ruled out shows Not Eligible with its earlier score; tier counts, Top picks, exports and the calendar follow. A not-eligible card offers "Write anyway" (asks first).
+6. **Update my grants:** loading the starter database again refreshes each user's copy in place (same ids, so applications and results keep working), retires programs that ended (kept as CLOSED when an application uses them), and keeps any cells the user corrected with their own spreadsheet (`user_edited_fields`). The dashboard and Results say when a newer edition is out.
+7. **Add Deadlines to Calendar:** an .ics file (RFC 5545) with an all-day event per upcoming due date of excellent, good, possible and shortlisted matches, reminders 2 weeks and 3 days before, stable ids so re-importing updates instead of duplicating.
+8. **Monthly grant research, run here:** `/grant-research` skill (`.claude/skills/grant-research/SKILL.md`), agent rules in `tools/grant-research/BRIEF.md`, validation and merge in `tools/grant-research/merge_seed.py` (warns on relative time words, first-person wording, Texas places marked open to all, missing applicants, likely duplicates; writes `docs/grant-research-log.md`). A scheduled task runs it on the 1st of each month at 5:54 AM Central (first run Nov 1, 2026) and pushes a `grant-research/YYYY-MM` review branch; it never merges.
+9. **Comprehensive QA with multiple agents:** 17 findings fixed, including the critical one (saved results kept offering retired grants), foundation duplicates scored twice, Texas-place grants not ruled out, a refresh overwriting the user's own corrections, label accuracy, calendar and export gaps, plurals, accessibility names and parsing edge cases. Final pass fixed two stale "now"/"currently" outlooks, one "recently", one school-specific note and two "By my count" phrasings in the data, and a dashboard comment that described behavior the code didn't have.
+
+### Technical Details
+- Types: `GrantBase` optional facts, `ReligiousEligibility`, `ApplicantType`, `FunderIntel`, `PastAward`, `GrantDetails` (`frontend/src/server/types.ts`); lenient parsing in `frontend/src/server/grantDetails.ts`; `texasOnlyGeography` and `deterministicPrefilter` in `services/ai.ts`; `withGrantDetails` / `currentMatchResults` in `routes/processing.ts`; `refreshSeedGrants` in `services/discovery.ts`; `matchesIcs` / `calendarMatches` in `services/exportResults.ts`; UI in `frontend/src/app/dashboard/page.tsx` (`GrantFacts`, `FunderTrackRecord`, `StarterUpdateNotice`).
+- `GRANTFINDER_TODAY=YYYY-MM-DD` (test mode only) runs every suite as if on another date; tests no longer hard-code dates that expire.
+- New suites: `finder` (144), `finder-parsing` (82), `finder-results` (84).
+
+### Current Status
+- ✅ Engine: 1,802 checks (13 suites, 1,005 checks, then 7 again in direct job mode, 797)
+- ✅ Browser (`E2E_JOB_MODE=direct`): 529 checks, 0 failures (11 new: funder track record, entitlement note, export columns)
+- ✅ Docs updated line by line: CLAUDE.md, BUSINESS_SPEC, PRODUCT_SPEC, docs/grant-discovery.md, docs/grant-template-format.md, docs/grant-writer.md, docs/engine.md, READMEs, CONTRIBUTING, tests/e2e/README.md, the skill and BRIEF
+- 🚧 Light-mode styles for the new chips exist, but the app has no light-mode toggle yet
+
+### Branch Info
+- Branch `claude/relaxed-curie-sj0zvu`, pushed and fast-forwarded to `main` (Chris allowed pushing to `main` for this work). Netlify deploys from `main`.
+
+### Decisions Made
+- Recipients in funder intelligence are described by type and city only, never by name (PII rule), and every number names its source year.
+- "Religious orgs eligible" replaces "Catholic schools eligible": the funder allowing religious organizations does not mean every other rule fits a Catholic school.
+- Saved results are never rewritten; today's view is computed on read, so nothing is lost if a grant comes back.
+- The monthly research pushes a review branch only; Chris merges on GitHub.
+
+### Next Steps
+1. Redeploy, sign in, click **Update my grants** (or Load Starter Database), run matching, and read the Funder track record on the top picks.
+2. Calendar the near-term deadlines from **Add Deadlines to Calendar**; the biggest-fit funders by track record are Kenedy (Austin-area Catholic schools got $7,000-$20,000 in 2024, most $15,000), Koch (Jan 1 - May 1 letters), Raskob (Jan 1-15 and Jun 1-15 windows) and the state's Nonprofit Security Grant program.
+3. Review the first monthly research branch after Nov 1 and merge it on GitHub.
+
+### Questions/Blockers
+- None.
+
+---
+
 ## 2026-10-15 (afternoon) — First Netlify Deploy: AI Gateway Key Fix, Sonnet 5.5, Paste Text as a Document
 
 ### What We Built

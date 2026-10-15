@@ -30,12 +30,12 @@ An AI-powered grant matching platform that builds a comprehensive profile of a C
 4. **Non-Catholic Qualifying** — Secular grants Catholic orgs can apply for
 5. **Catholic Foundations** — Grants from Catholic philanthropic organizations
 
-**Starter database:** 97 grants a Catholic school or parish in Texas can apply to, plus 8 foundations to monitor. Each was checked on the funder's own site (last on 2026-10-15) and is re-checked every month on a review branch. **Update my grants** refreshes a user's copy in place.
+**Starter database:** 97 grants a Catholic school or parish in Texas can apply to (10 of them for AI in education), plus 7 foundations to monitor. Each was checked on the funder's own site (last on 2026-10-15) and is re-checked every month on a review branch. Every grant carries the funder's track record: real past awards (described by recipient type and city, never by name) and award levels, its record with Catholic schools, its giving trend, and anything it has announced about the future, read from its grants list, annual report and IRS Form 990. **Update my grants** refreshes a user's copy in place and keeps any corrections the user made with their own spreadsheet.
 
 ### Grant Data Structure
 - **Required Fields:** Grant Name, Deadline, Amount, Funder, Description, Contact, URL, Status, Geo Qualified
-- **Optional:** Funder Stats (historical giving data); deadline notes, typical award, the funder's current priorities, geography, religious eligibility (Catholic schools eligible, non-religious uses only, excluded, or not stated), eligibility notes, last verified date and sources
-- **Upload:** Excel (.xlsx) with flexible column mapping, including Religious Eligibility, Deadline Notes, Typical Award, Funding Priorities, Region and Last Verified columns
+- **Optional:** Funder Stats (historical giving data); deadline notes, typical award, the funder's current priorities, geography, who submits the application (school, parish, diocese, teacher, family, nonprofit), religious eligibility (religious organizations eligible, non-religious uses only, excluded, or not stated) with the funder's own words, eligibility notes, last verified date, confidence, sources and the funder's track record
+- **Upload:** Excel (.xlsx) with flexible column mapping, including Religious Eligibility, Applicants, Deadline Notes, Typical Award, Funding Priorities, Region and Last Verified columns
 
 ### AI Matching Engine
 - **Probability Scoring (0-100%)** with weighted factors:
@@ -44,7 +44,8 @@ An AI-powered grant matching platform that builds a comprehensive profile of a C
   - Capacity (15%) — Can the org handle the application and reporting?
   - Timing (10%) — Is the deadline realistic?
   - Completeness (5%) — How much profile data is available for matching?
-- **Hard filters before any AI call:** a funder that doesn't fund religious organizations, a Texas-only grant for an organization outside Texas, a closed grant or a past deadline is Not Eligible
+- **Hard filters before any AI call:** a funder that doesn't fund religious organizations, a Texas-only grant (or one limited to a Texas county, diocese or city) for an organization outside Texas, a closed grant or a past deadline is Not Eligible
+- **What the AI weighs beyond the description:** who submits the application, the funder's own words on religious organizations, and the funder's track record (real giving outweighs stated priorities)
 
 ### Terminal-Style Processing UI
 - Real-time progress from each AI step (the website checks each running step every 1-3 seconds, and keeps checking through a Wi-Fi drop)
@@ -53,7 +54,9 @@ An AI-powered grant matching platform that builds a comprehensive profile of a C
 
 ### Results Page
 - **Top picks:** up to 5 strong matches whose deadline is still open, soonest deadline first, each with its amount, eligibility chips, "Start application" (and "Investigate" when the funder has a web address)
-- **Grant facts on every match:** whether Catholic schools may apply, where applicants must be, when it was last verified, the typical award, deadline details, what the funder funds now and who can apply
+- **Grant facts on every match:** whether religious organizations may apply (with the funder's own words), who applies when the school or parish can't apply itself, where applicants must be, when it was last verified, the typical award, deadline details, what the funder funds now and who can apply
+- **Funder track record on every match:** past awards and levels, its record with Catholic schools, what it actually funds, its giving trend and what's ahead
+- **Always current:** saved results show each grant as it stands today; a grant that was retired or is now ruled out is marked as such, and the exports and calendar leave it off
 - **Deadline countdown:** every match shows its next due date and, when the date is known, a days-left badge (red within 14 days, amber within 45, "Past deadline")
 - **Sort and filter:** "Best match" or "Deadline soonest", and "Hide not eligible", remembered in the browser
 
@@ -93,7 +96,7 @@ An AI-powered grant matching platform that builds a comprehensive profile of a C
 - **Built:** Complete frontend (Next.js) with setup wizard, profile builder, matching results with Top picks and deadline countdowns, and the GrantWriter (Application Checklist, Funder History, drafts you can refine or edit by hand, with earlier versions kept)
 - **Built:** AI service integration with Claude API (AI steps as jobs that fit any Netlify plan, cost and token logging)
 - **Built:** 5-category Excel parser, starter database (97 grants checked on the funders' sites, refreshed monthly), Grants.gov search, AI web discovery, calendar export of deadlines
-- **Tested:** {{ENGINE_TOTAL}} automated engine checks with a mock Claude (11 suites, {{ENGINE_FIRST_PASS}} checks, then 6 of them again in direct job mode, the way Netlify runs AI steps by default), a browser test of the whole journey ({{E2E_TOTAL}} checks), and a local run on the Netlify runtime
+- **Tested:** 1,802 automated engine checks with a mock Claude (13 suites, 1,005 checks, then 7 of them again in direct job mode, the way Netlify runs AI steps by default), a browser test of the whole journey (529 checks), and a local run on the Netlify runtime
 - **Deploy:** Netlify only (`docs/deployment.md`); a live-key run with real data is the next milestone
 
 ## 8. Business Model

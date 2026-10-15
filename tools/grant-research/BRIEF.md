@@ -26,7 +26,9 @@ link wastes a school's time; a fabricated grant is worse than none.
 6. Never use relative time words in any field ("today", "tomorrow", "just passed", "recently", "this fall",
    "upcoming", "soon", "now closed", "currently"): write explicit dates ("the 2026 window closed March 12, 2026;
    the 2027 window is not posted yet"). Records are read for months after you write them.
-7. A window that has closed with no next date posted is NOT open: deadline "Check website", status
+7. Write in the third person, as facts with their source ("the 2024 Form 990-PF lists about 13 grants"),
+   never "I", "we" or "by my count". Users read these records as GrantFinder's own words.
+8. A window that has closed with no next date posted is NOT open: deadline "Check website", status
    "Check deadline", and deadline_notes saying when it closed and that the next window isn't posted.
 
 ## Record format (one JSON object per program)
