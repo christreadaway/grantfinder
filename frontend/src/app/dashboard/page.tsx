@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import {
   Search, Upload, Globe, FileText, MessageSquare, Play,
   CheckCircle, AlertCircle, Loader2, ChevronRight, Settings,
-  LogOut, Database, BarChart3, Download, Bug, PenLine, XCircle,
+  LogOut, Database, BarChart3, Download, Bug, PenLine, XCircle, Star,
 } from 'lucide-react';
 import api, { blobErrorDetail, errorDetail, isSessionEnded, onJobProgress } from '@/lib/api';
 import { copyText, saveFile } from '@/lib/download';
@@ -80,6 +80,7 @@ interface GrantStats {
 
 interface ApplicationSummary {
   id: string;
+  grant_id?: string;
   grant_name: string;
   funder: string;
   status: string;
@@ -325,6 +326,112 @@ function webUrl(url: unknown): string | null {
 
 const statusLabel = (status: unknown): string => APPLICATION_STATUS_LABELS[String(status)] ?? String(status ?? '');
 
+// -----------------------------------------------------------------------------
+// Match results: deadlines, top picks, sorting
+// -----------------------------------------------------------------------------
+
+/**
+ * A match as the engine sends it when results are read: with its next due
+ * date, days left and whether it has passed, worked out for today. (A
+ * matching run's own result doesn't have them until the results are read back.)
+ */
+type MatchItem = MatchResultsData['matches'][number] & {
+  next_deadline?: string | null;
+  days_left?: number | null;
+  deadline_passed?: boolean;
+};
+
+type ResultsSort = 'best' | 'deadline';
+
+interface ResultsView {
+  sort: ResultsSort;
+  hideNotEligible: boolean;
+}
+
+/** How the person last chose to see the results (this browser only). */
+const RESULTS_VIEW_KEY = 'grantfinder_results_view';
+const DEFAULT_RESULTS_VIEW: ResultsView = { sort: 'best', hideNotEligible: false };
+const TOP_PICKS = 5;
+
+function readResultsView(): ResultsView {
+  if (typeof window === 'undefined') return DEFAULT_RESULTS_VIEW;
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(RESULTS_VIEW_KEY) || 'null') as Partial<ResultsView> | null;
+    return { sort: saved?.sort === 'deadline' ? 'deadline' : 'best', hideNotEligible: saved?.hideNotEligible === true };
+  } catch {
+    return DEFAULT_RESULTS_VIEW;
+  }
+}
+
+function saveResultsView(view: ResultsView) {
+  try {
+    window.localStorage.setItem(RESULTS_VIEW_KEY, JSON.stringify(view));
+  } catch (error) {
+    console.warn('[GrantFinder] Could not remember how to show the results in this browser:', error);
+  }
+}
+
+const daysLeftOf = (match: MatchItem): number | null => (typeof match.days_left === 'number' ? match.days_left : null);
+const isRolling = (match: MatchItem): boolean => /rolling/i.test(String(match.deadline ?? ''));
+
+/** "Oct 15, 2026" for a YYYY-MM-DD date (a calendar date, so no time zone can shift it a day). */
+function formatDate(iso: string): string {
+  const date = new Date(`${iso}T00:00:00Z`);
+  if (Number.isNaN(date.getTime())) return iso;
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+}
+
+function daysLeftText(days: number): string {
+  if (days <= 0) return 'Last day';
+  return days === 1 ? '1 day left' : `${days} days left`;
+}
+
+/** Red within two weeks, amber within about six weeks, gray after that. */
+function deadlineTone(days: number): 'soon' | 'near' | 'later' {
+  return days <= 14 ? 'soon' : days <= 45 ? 'near' : 'later';
+}
+
+/** When a top pick is due, in words. */
+function dueText(match: MatchItem): string {
+  const days = daysLeftOf(match);
+  if (match.next_deadline && days !== null && days >= 0) return `Due ${formatDate(match.next_deadline)} · ${daysLeftText(days)}`;
+  if (isRolling(match)) return 'Rolling';
+  return "Check the funder's site";
+}
+
+const byScore = (a: MatchItem, b: MatchItem): number => (b.score ?? 0) - (a.score ?? 0);
+
+/** Soonest open deadline first, then rolling or unknown ones, then passed ones; ties by score. */
+function byDeadline(a: MatchItem, b: MatchItem): number {
+  const rank = (m: MatchItem) => (m.deadline_passed ? 2 : daysLeftOf(m) !== null ? 0 : 1);
+  const [ra, rb] = [rank(a), rank(b)];
+  if (ra !== rb) return ra - rb;
+  if (ra === 0) return (daysLeftOf(a) ?? 0) - (daysLeftOf(b) ?? 0) || byScore(a, b);
+  if (ra === 2) return (daysLeftOf(b) ?? 0) - (daysLeftOf(a) ?? 0) || byScore(a, b);
+  return byScore(a, b);
+}
+
+/**
+ * Grants worth applying to first: excellent or good matches whose deadline
+ * hasn't passed (possible ones fill in when there are fewer than five),
+ * soonest deadline first, then best score.
+ */
+function topPicksOf(matches: MatchItem[]): MatchItem[] {
+  const open = matches.filter((m) => !m.deadline_passed);
+  const strong = open.filter((m) => m.score_tier === 'excellent' || m.score_tier === 'good');
+  const possible = open.filter((m) => m.score_tier === 'possible').sort(byDeadline);
+  const pool = strong.length >= TOP_PICKS ? strong : [...strong, ...possible.slice(0, TOP_PICKS - strong.length)];
+  return [...pool].sort(byDeadline).slice(0, TOP_PICKS);
+}
+
+/** "N days left" on a match card: nothing for rolling or unknown deadlines. */
+function DeadlineBadge({ match }: { match: MatchItem }) {
+  if (match.deadline_passed) return <span className="deadline-badge past">Past deadline</span>;
+  const days = daysLeftOf(match);
+  if (days === null) return null;
+  return <span className={`deadline-badge ${deadlineTone(days)}`}>{daysLeftText(days)}</span>;
+}
+
 /** The user id inside a session token. Not verified: only used to decide whether to warn or what to keep. */
 function tokenSubject(token: string | null | undefined): string | null {
   const payload = token?.split('.')[1];
@@ -450,6 +557,8 @@ export default function Dashboard() {
   const [stepError, setStepError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [exporting, setExporting] = useState<ExportFormat | null>(null);
+  // Sort order and "Hide not eligible" for the results (remembered in this browser; shown only after restoring).
+  const [resultsView, setResultsView] = useState<ResultsView>(readResultsView);
   const [applications, setApplications] = useState<ApplicationSummary[]>([]);
   const [profileExists, setProfileExists] = useState(false);
   const [showBasics, setShowBasics] = useState(false);
@@ -636,9 +745,13 @@ export default function Dashboard() {
       setRestoring(false);
       if (!runningMatch) return;
       try {
-        const finished = await api.waitForJob(runningMatch.id, runningMatch.kind);
+        const finished = (await api.waitForJob(runningMatch.id, runningMatch.kind)) as MatchResultsData;
         if (!active) return;
-        setMatchResults(finished as MatchResultsData);
+        setMatchResults(finished);
+        // Read back, the saved results carry each grant's next deadline and days left.
+        const saved: MatchResultsData | null = await api.getLatestMatchResults().catch(() => null);
+        if (!active) return;
+        if (saved?.session_id === finished.session_id) setMatchResults(saved);
         setIsProcessing(false);
         setCurrentStep('results');
       } catch (error) {
@@ -991,6 +1104,13 @@ export default function Dashboard() {
 
       addLog('success', '=== MATCHING COMPLETE ===');
       addLog('success', `${results.total_grants_evaluated} grants evaluated: ${results.excellent_matches} excellent, ${results.good_matches} good, ${results.possible_matches} possible`);
+      // Read back, the saved results carry each grant's next deadline and days left (worked out when read).
+      try {
+        const saved: MatchResultsData | null = await api.getLatestMatchResults();
+        if (saved?.session_id === results.session_id) setMatchResults(saved);
+      } catch (error) {
+        if (!isSessionEnded(error)) console.warn('[GrantFinder] Could not read the deadlines for the new results; they show after a reload:', error);
+      }
 
       setIsProcessing(false);
       await new Promise((r) => setTimeout(r, 800));
@@ -1001,6 +1121,15 @@ export default function Dashboard() {
       setIsProcessing(false);
     }
   };
+
+  const updateResultsView = (change: Partial<ResultsView>) => {
+    const next = { ...resultsView, ...change };
+    setResultsView(next);
+    saveResultsView(next);
+  };
+
+  /** The application already started for this grant, if any. */
+  const applicationFor = (grantId: string) => applications.find((app) => app.grant_id === grantId);
 
   const downloadResults = async (format: ExportFormat) => {
     if (!matchResults?.session_id || exporting) return;
@@ -1858,8 +1987,111 @@ export default function Dashboard() {
                 {busyBanner}
               </div>
 
+              {/* Top picks: what to apply to first, with when it is due and where to look */}
+              {(() => {
+                const picks = topPicksOf(matchResults.matches as MatchItem[]);
+                return (
+                  <div className="card">
+                    <h2 className="text-lg font-bold mb-1 flex items-center gap-2">
+                      <Star className="w-5 h-5 shrink-0 text-[var(--score-good)]" aria-hidden="true" /> Top picks
+                    </h2>
+                    <p className="text-sm text-gray-400 mb-4">
+                      Your strongest matches whose deadline is still open, soonest deadline first.
+                    </p>
+                    {picks.length === 0 ? (
+                      <p className="text-sm text-gray-400">
+                        No strong match with an open deadline right now. Look through the full list below.
+                      </p>
+                    ) : (
+                      <ol className="space-y-4">
+                        {picks.map((match) => {
+                          const pickUrl = webUrl(match.url);
+                          const days = daysLeftOf(match);
+                          const started = Boolean(applicationFor(match.grant_id));
+                          const action = started ? 'Open application' : 'Start application';
+                          return (
+                            <li key={match.grant_id} className="border-t border-[var(--card-border)] pt-4 first:border-t-0 first:pt-0">
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0 break-words">
+                                  <p className="font-semibold">{match.grant_name}</p>
+                                  <p className="text-sm text-gray-400">{match.funder}</p>
+                                </div>
+                                <span className={`score-badge shrink-0 ${match.score_tier}`}>{match.score}%</span>
+                              </div>
+                              <p className={`mt-1 text-sm ${days !== null && days >= 0 ? `due-text ${deadlineTone(days)}` : 'text-gray-400'}`}>
+                                {dueText(match)}
+                              </p>
+                              <div className="mt-3 flex flex-wrap gap-2">
+                                {pickUrl && (
+                                  <a
+                                    href={pickUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="btn btn-secondary text-sm"
+                                    aria-label={`Investigate ${match.grant_name} (opens the funder's site in a new tab)`}
+                                  >
+                                    Investigate
+                                  </a>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => handleWriteApplication(match.grant_id)}
+                                  disabled={Boolean(busy)}
+                                  className="btn btn-primary text-sm"
+                                  aria-label={`${action}: ${match.grant_name}`}
+                                >
+                                  {action}
+                                </button>
+                              </div>
+                            </li>
+                          );
+                        })}
+                      </ol>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {/* How to list the matches (remembered in this browser) */}
+              {(() => {
+                const all = matchResults.matches as MatchItem[];
+                const hidden = resultsView.hideNotEligible ? all.filter((m) => m.score_tier === 'not_eligible').length : 0;
+                return (
+                  <div className="rounded-xl border border-[var(--card-border)] bg-[var(--card-bg)] px-4 py-3 text-sm flex flex-wrap items-center justify-between gap-x-6 gap-y-2">
+                    <div className="flex items-center gap-2">
+                      <label htmlFor="results-sort" className="text-gray-400">Sort by</label>
+                      <select
+                        id="results-sort"
+                        value={resultsView.sort}
+                        onChange={(e) => updateResultsView({ sort: e.target.value === 'deadline' ? 'deadline' : 'best' })}
+                        className="results-select"
+                      >
+                        <option value="best">Best match</option>
+                        <option value="deadline">Deadline soonest</option>
+                      </select>
+                    </div>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={resultsView.hideNotEligible}
+                        onChange={(e) => updateResultsView({ hideNotEligible: e.target.checked })}
+                      />
+                      Hide not eligible
+                    </label>
+                    {hidden > 0 && (
+                      <p className="w-full text-gray-400" aria-live="polite">
+                        {hidden === 1 ? '1 grant you are not eligible for is hidden.' : `${hidden} grants you are not eligible for are hidden.`}
+                      </p>
+                    )}
+                  </div>
+                );
+              })()}
+
               {/* Match List */}
-              {matchResults.matches.map((match) => {
+              {(matchResults.matches as MatchItem[])
+                .filter((match) => !(resultsView.hideNotEligible && match.score_tier === 'not_eligible'))
+                .sort(resultsView.sort === 'deadline' ? byDeadline : byScore)
+                .map((match) => {
                 const grantUrl = webUrl(match.url);
                 return (
                   <div key={match.grant_id} className="card">
@@ -1880,6 +2112,14 @@ export default function Dashboard() {
                       <div className="min-w-0 break-words">
                         <span className="text-gray-400">Deadline:</span>
                         <span className="ml-2 font-medium">{match.deadline}</span>
+                        {(match.deadline_passed || daysLeftOf(match) !== null) && (
+                          <div className="mt-1 flex flex-wrap items-center gap-2">
+                            {match.next_deadline && !match.deadline_passed && (
+                              <span className="text-xs text-gray-400">Next due {formatDate(match.next_deadline)}</span>
+                            )}
+                            <DeadlineBadge match={match} />
+                          </div>
+                        )}
                       </div>
                       <div className="min-w-0 break-words">
                         <span className="text-gray-400">Category:</span>

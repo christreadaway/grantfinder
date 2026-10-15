@@ -11,6 +11,7 @@ import crypto from 'node:crypto';
 
 import { requireApiKey } from '../auth';
 import { maxUploadBytes } from '../config';
+import { daysUntil, parseDeadline, todayIso } from '../deadlines';
 import { HttpError } from '../errors';
 import {
   MATCH_CONTINUE_PATH,
@@ -42,7 +43,7 @@ import {
 } from '../services/ai';
 import { documentExtension, extractDocumentText, INVALID_DOCUMENT_TYPE, isAllowedDocument } from '../services/documents';
 import { kv } from '../store';
-import type { Questionnaire, QuestionnaireAnswer, QuestionnaireQuestion } from '../types';
+import type { GrantMatch, MatchResults, Questionnaire, QuestionnaireAnswer, QuestionnaireQuestion } from '../types';
 import { applyProfileUpdate, parseProfileBody } from './profile';
 
 export const NO_MATCH_RESULTS = 'No match results yet. Run matching first.';
@@ -319,6 +320,32 @@ async function toggleShortlist(ctx: RequestContext) {
   return { grant_id: grantId, shortlisted: shortlist };
 }
 
+/** A match as the website reads it: its deadline worked out for today. */
+export interface MatchWithDeadline extends GrantMatch {
+  /** The next due date (YYYY-MM-DD; "Annual: October 15" resolves to the coming October 15), or null when there is none (Rolling, "Check website"). */
+  next_deadline: string | null;
+  /** Whole days from today until next_deadline (negative once it has passed), or null. */
+  days_left: number | null;
+  deadline_passed: boolean;
+}
+
+/**
+ * Saved match results with each match's next deadline, days left and whether
+ * it has passed, for today in GRANTFINDER_TIMEZONE. Computed on every read and
+ * never stored, so the countdown is right whenever the results are opened.
+ */
+export function withDeadlines(results: MatchResults, today = todayIso()): Omit<MatchResults, 'matches'> & { matches: MatchWithDeadline[] } {
+  if (!Array.isArray(results.matches)) return results as Omit<MatchResults, 'matches'> & { matches: MatchWithDeadline[] };
+  return {
+    ...results,
+    matches: results.matches.map((match) => {
+      const next = parseDeadline(match.deadline, today);
+      const days = next === null ? null : daysUntil(next, today);
+      return { ...match, next_deadline: next, days_left: days, deadline_passed: days !== null && days < 0 };
+    }),
+  };
+}
+
 export function registerProcessingRoutes(router: Router): void {
   router.post('/api/processing/scan-website', scanWebsite);
   router.post('/api/processing/generate-questionnaire', generateQuestionnaire);
@@ -351,7 +378,7 @@ export function registerProcessingRoutes(router: Router): void {
     const sessionId = await latestMatchSessionId(user.id);
     const results = sessionId ? await getMatchResults(user.id, sessionId) : null;
     if (!results) throw new HttpError(404, NO_MATCH_RESULTS);
-    return results;
+    return withDeadlines(results);
   });
 
   router.get('/api/processing/match-results/:sessionId', async (ctx) => {
@@ -360,7 +387,7 @@ export function registerProcessingRoutes(router: Router): void {
     const results = await getMatchResults(user.id, ctx.params.sessionId);
     if (!results) throw new HttpError(404, 'Session not found');
     if (results.user_id !== user.id) throw new HttpError(403, 'Not authorized');
-    return results;
+    return withDeadlines(results);
   });
 
   router.post('/api/processing/shortlist/:grantId', toggleShortlist);

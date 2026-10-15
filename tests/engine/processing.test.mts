@@ -25,6 +25,7 @@ const jobs = await import('../../frontend/src/server/jobs.ts');
 const ai = await import('../../frontend/src/server/services/ai.ts');
 const processingRoutes = await import('../../frontend/src/server/routes/processing.ts');
 const writer = await import('../../frontend/src/server/services/writer.ts');
+const deadlines = await import('../../frontend/src/server/deadlines.ts');
 
 // The docx package lives in frontend/node_modules.
 const frontendRequire = createRequire(path.join(repoRoot, 'frontend', 'package.json'));
@@ -1071,6 +1072,49 @@ const fetched = await api('GET', `/api/processing/match-results/${results.sessio
 check('GET match-results/{session_id} returns the saved results', fetched.status === 200 && fetched.data.session_id === results.session_id && fetched.data.matches.length === 15, fetched.data?.session_id);
 const latest = await api('GET', '/api/processing/match-results/latest', { token: tokenA });
 check('GET match-results/latest returns the newest results', latest.status === 200 && latest.data.session_id === results.session_id, latest.data?.session_id);
+
+// Each match read back carries its deadline worked out for today (computed on read, never stored).
+{
+  const today = deadlines.todayIso();
+  const dayCount = (iso: string) => {
+    const [y1, m1, d1] = today.split('-').map(Number);
+    const [y2, m2, d2] = iso.split('-').map(Number);
+    return Math.round((Date.UTC(y2, m2 - 1, d2) - Date.UTC(y1, m1 - 1, d1)) / 86400000);
+  };
+  const year = Number(today.slice(0, 4));
+  const nextOct15 = `${year}-10-15` >= today ? `${year}-10-15` : `${year + 1}-10-15`;
+  const fields = (m: Json) => (m ? [m.next_deadline, m.days_left, m.deadline_passed] : null);
+  for (const [label, read] of [['latest', latest.data], ['by session', fetched.data]] as const) {
+    const annual = byId(read, 'grant_pt_07');
+    const pastFixed = byId(read, 'grant_pt_05');
+    const futureFixed = byId(read, 'grant_pt_01');
+    const rolling = byId(read, 'grant_pt_02');
+    check(
+      `match results (${label}): "Annual: October 15" -> the next October 15, days left, not passed`,
+      annual?.deadline === 'Annual: October 15' && annual.next_deadline === nextOct15 && annual.days_left === dayCount(nextOct15) &&
+        annual.days_left >= 0 && annual.deadline_passed === false,
+      fields(annual),
+    );
+    check(
+      `match results (${label}): a fixed date in the past -> that date, negative days, passed; a future date -> not passed`,
+      pastFixed?.next_deadline === '2020-01-15' && pastFixed.days_left === dayCount('2020-01-15') && pastFixed.days_left < 0 && pastFixed.deadline_passed === true &&
+        futureFixed?.next_deadline === '2099-06-30' && futureFixed.days_left === dayCount('2099-06-30') && futureFixed.deadline_passed === false,
+      [fields(pastFixed), fields(futureFixed)],
+    );
+    check(
+      `match results (${label}): "Rolling" -> no date, no days left, not passed; every match has the three fields`,
+      rolling?.next_deadline === null && rolling.days_left === null && rolling.deadline_passed === false &&
+        read.matches.every((m: Json) => 'next_deadline' in m && 'days_left' in m && typeof m.deadline_passed === 'boolean'),
+      fields(rolling),
+    );
+  }
+  const stored: Json = await repo.getMatchResults(userA, results.session_id);
+  check(
+    'deadline fields are computed when read, never stored',
+    stored && stored.matches.length === 15 && stored.matches.every((m: Json) => !('next_deadline' in m) && !('days_left' in m) && !('deadline_passed' in m)),
+    stored?.matches?.[0],
+  );
+}
 const unknownSession = await api('GET', '/api/processing/match-results/match_nope', { token: tokenA });
 check('unknown session -> 404 Session not found', unknownSession.status === 404 && unknownSession.data.detail === 'Session not found', unknownSession.data);
 const otherUser = await api('GET', `/api/processing/match-results/${results.session_id}`, { token: tokenD });

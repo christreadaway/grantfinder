@@ -225,6 +225,60 @@ body {
   outline-offset: 2px;
 }
 
+/* Match results: days-left badges and due dates (red within 2 weeks, amber within ~6, gray later) */
+.deadline-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 9999px;
+  border: 1px solid transparent;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.deadline-badge.soon {
+  background: rgba(239, 68, 68, 0.15);
+  border-color: rgba(239, 68, 68, 0.45);
+  color: #fca5a5;
+}
+
+.deadline-badge.near {
+  background: rgba(245, 158, 11, 0.15);
+  border-color: rgba(245, 158, 11, 0.45);
+  color: #fcd34d;
+}
+
+.deadline-badge.later {
+  background: rgba(107, 114, 128, 0.2);
+  border-color: rgba(107, 114, 128, 0.45);
+  color: #d1d5db;
+}
+
+.deadline-badge.past {
+  border-color: #4b5563;
+  color: #9ca3af;
+  font-weight: 500;
+}
+
+.due-text.soon { color: #fca5a5; }
+.due-text.near { color: #fcd34d; }
+.due-text.later { color: #d1d5db; }
+
+.results-select {
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  color: var(--foreground);
+  padding: 6px 10px;
+  font-size: 14px;
+}
+
+.results-select:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
 /* Inputs */
 .input {
   width: 100%;
