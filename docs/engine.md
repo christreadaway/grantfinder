@@ -28,6 +28,25 @@ whole application takes minutes. So every Claude call runs as a **job**:
    what to do). `frontend/src/lib/api.ts` does this polling for every call automatically,
    so screens see the same response shapes as before.
 
+What keeps a step from being lost or paid for twice:
+
+- **One run at a time.** Each job has an exclusive key (by default its kind plus the
+  application id; drafting and refining share `writer.sections:{appId}`, the website
+  scan includes its URLs, document uploads have none). A second request while one runs
+  gets `409 {"running": true, "job_id": ...}`, and the website waits for the first run
+  instead of starting (and paying for) another.
+- **Heartbeat.** A running job touches its record every 45 seconds, even during one long
+  Claude call. A job silent for 3 minutes, or running past 16 minutes, reads as failed
+  with a plain message, so a crashed worker never blocks a retry for long.
+- **Hard stop.** Claude calls are cut about 75 seconds before Netlify's 15-minute limit,
+  so the job can still save what finished and say what didn't.
+- **Polling survives the network.** The website keeps checking through a Wi-Fi drop or a
+  sleeping laptop (it waits for the connection to come back) and through brief Netlify
+  errors; it gives up only after 3 minutes online without one good answer, and then
+  says the step may still finish and that reloading picks it back up.
+- **Reloads pick steps back up.** The dashboard (matching) and the writer (every writer
+  step) look for a running job of theirs on load and show its progress.
+
 ## Conventions for engine code (`frontend/src/server/`)
 
 - **Relative imports only** inside `src/server` (no `@/`), because the Netlify background
@@ -58,8 +77,16 @@ whole application takes minutes. So every Claude call runs as a **job**:
   correlation id, and stored on its job.
 - **Deadlines**: `deadlines.ts` (`parseDeadline`, `deadlinePassed`, `isUrgent`) handles
   dates and recurring "Annual: October 15" deadlines in Central time.
-- **Fetching websites**: `net.ts` (`fetchPage`, `crawlSite`, `isSafeUrl`) with SSRF
-  protection on every redirect.
+- **Fetching websites**: `net.ts` (`fetchPage`, `crawlSite`, `checkUrl`) with SSRF
+  protection on every redirect and again when the connection is made (a DNS answer that
+  changes to a private address between the check and the connect is refused).
+- **Heavy file libraries load on first use**: `exceljs` (`services/excel.ts`), `mammoth`
+  (`services/documents.ts`), `unpdf` (`pdf.ts`) and `docx` (`services/writerExport.ts`)
+  are imported inside the function that needs them (`await import(...)`), so ordinary
+  API calls start faster on a cold Netlify function. Keep new heavy imports the same way.
+- **Uploads**: `.docx` and `.xlsx` files are zip archives; `zipguard.ts` refuses ones
+  that would expand past 120 MB before the parser unzips them. Netlify accepts uploads
+  up to about 4 MB.
 
 ## Files
 
@@ -101,14 +128,17 @@ ratelimit/{bucket}/{ipHash}       sign-in rate-limit window
 
 ```bash
 cd ~/grantfinder
-bash tests/engine/run_all.sh      # 406 checks: foundation, deadlines, grants, processing, writer
+bash tests/engine/run_all.sh      # engine suites: foundation, deadlines, grants, processing, writer, regressions, security
 bash tests/e2e/run_e2e.sh         # real browser through the whole journey on a production build
 ```
 
 The engine suites call `handleRequest()` in-process with a mock Claude
 (`tests/mock-claude/server.mjs`, answers in `tests/mock-claude/fixtures/*.json`, keyed by
-prompt id) and a throwaway data folder. Mock keys `sk-ant-invalid…`, `sk-ant-nocredit…`, and
-`sk-ant-overload…` simulate Anthropic failures; `/__fail` forces errors per prompt.
+prompt id) and a throwaway data folder. Mock keys `sk-ant-invalid…`, `sk-ant-nocredit…`,
+`sk-ant-overload…`, `sk-ant-spendcap…` and `sk-ant-userlimit…` simulate Anthropic failures
+(bad key, no credits, overloaded, monthly spend cap, a spend limit you set). `/__fail`
+forces errors per prompt, `/__delay` slows one prompt down, and `/__fixtures` swaps answers
+at runtime.
 
 To exercise the real Netlify runtime (background function + Blobs) on a Mac, install the
 Netlify CLI and run `netlify build` then `netlify serve` against a copy of `frontend/` with
