@@ -113,7 +113,7 @@ function confidenceText(match: GrantMatch): string {
 
 /** How the religious_eligibility values read to a person. */
 export const RELIGIOUS_ELIGIBILITY_LABELS: Record<string, string> = {
-  eligible: 'Catholic schools eligible',
+  eligible: 'Religious organizations eligible',
   secular_purpose_only: 'Eligible for non-religious uses only',
   excluded: 'Does not fund religious organizations',
   unclear: 'Not stated: confirm with the funder',
@@ -366,6 +366,7 @@ export function matchesIcs(matches: GrantMatch[], now: Date, today = todayIso())
       match.funder_intel?.applicable && match.funder_intel.award_levels ? `Past award levels: ${match.funder_intel.award_levels}` : '',
       match.funder_intel?.applicable && match.funder_intel.outlook ? `Funder outlook: ${match.funder_intel.outlook}` : '',
       match.eligibility_notes ? `Who can apply: ${match.eligibility_notes}` : '',
+      match.religious_eligibility ? `Religious eligibility: ${RELIGIOUS_ELIGIBILITY_LABELS[match.religious_eligibility] ?? match.religious_eligibility}` : '',
       'Check the date on the funder\'s site: deadlines change.',
       match.url || '',
     ].filter(Boolean);

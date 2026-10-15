@@ -14,7 +14,7 @@ import crypto from 'node:crypto';
 import type { Cell, CellValue, Row, Worksheet } from 'exceljs';
 
 import { HttpError } from '../errors';
-import { parseGrantDetails } from '../grantDetails';
+import { dateAndTime, deadlineValue, moneyText as moneyValue, parseGrantDetails, withDueAt } from '../grantDetails';
 import { assertZipWithinLimits } from '../zipguard';
 import { logger } from '../log';
 import {
@@ -153,6 +153,12 @@ const COLUMN_MAP: Record<string, string> = {
   religious_eligibility: 'religious_eligibility',
   'faith-based eligibility': 'religious_eligibility',
   'religious orgs eligible': 'religious_eligibility',
+  applicants: 'applicants',
+  applicant: 'applicants',
+  'applicant type': 'applicants',
+  'applicant types': 'applicants',
+  applicant_type: 'applicants',
+  'who applies': 'applicants',
   'deadline notes': 'deadline_notes',
   deadline_notes: 'deadline_notes',
   'cycle notes': 'deadline_notes',
@@ -242,11 +248,13 @@ function cellData(cell: Cell): CellData {
   return { value: primitiveOf(value), hyperlink };
 }
 
-/** YYYY-MM-DD for a date cell (the Python wrote "2026-05-01 00:00:00", which no deadline check could read). */
+/**
+ * YYYY-MM-DD for a date cell, always (the Python wrote "2026-05-01 00:00:00", and a date with a
+ * time read "2026-05-01 17:00", which no deadline check could read). A deadline's time of day goes
+ * into its deadline notes instead ("Due at 17:00").
+ */
 function formatDate(date: Date): string {
-  if (Number.isNaN(date.getTime())) return '';
-  const iso = date.toISOString();
-  return iso.slice(11, 19) === '00:00:00' ? iso.slice(0, 10) : `${iso.slice(0, 10)} ${iso.slice(11, 16)}`;
+  return dateAndTime(date)?.date ?? '';
 }
 
 function textOfPrimitive(value: Primitive): string {
@@ -262,16 +270,23 @@ function isBlank(value: Primitive): boolean {
   return value === null || value === '' || value === 0 || value === false;
 }
 
-const MONEY_TEXT = /^\$?\s*\d{1,3}(,\d{3})*(\.\d+)?$|^\$?\s*\d+(\.\d+)?$/;
-
 /** 15000 or "15000" -> "$15,000"; other text stays as typed. */
 function moneyText(value: Primitive): string {
-  const text = textOfPrimitive(value);
-  if (!text) return '';
-  const numeric = typeof value === 'number' ? value : MONEY_TEXT.test(text) ? Number(text.replace(/[$,\s]/g, '')) : Number.NaN;
-  if (!Number.isFinite(numeric)) return text;
-  const digits = Number.isInteger(numeric) ? 0 : 2;
-  return `$${numeric.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
+  return typeof value === 'number' || typeof value === 'string' ? moneyValue(value) : textOfPrimitive(value);
+}
+
+/**
+ * The deadline cell as stored (YYYY-MM-DD for a date cell or an Excel serial number; text as typed)
+ * and its time of day when it has one.
+ */
+function deadlineCell(row: RowData): { deadline: string; time: string | null } {
+  const value = row.get('deadline')?.value ?? null;
+  if (value instanceof Date) {
+    const parts = dateAndTime(value);
+    return parts ? { deadline: parts.date, time: parts.time } : { deadline: '', time: null };
+  }
+  if (typeof value === 'number') return deadlineValue(value);
+  return { deadline: textOfPrimitive(value), time: null };
 }
 
 // =============================================================================
@@ -360,18 +375,30 @@ function parseGrantRow(row: RowData, userId: string, category: GrantCategory): U
 
   // A descriptive geography ("Central Texas (Travis, Hays)") is kept as written, beside the yes/no-style geo_qualified.
   const regionText = field(row, 'region') || [geoText, restriction].find((text) => text && !/^(yes|no|y|n|true|false|check eligibility|yes - tx only)$/i.test(text.trim())) || '';
-  const details = parseGrantDetails({
+  const due = deadlineCell(row);
+  const religiousText = field(row, 'religious_eligibility');
+  const parsedDetails = parseGrantDetails({
     deadline_notes: field(row, 'deadline_notes'),
     geography: regionText,
-    religious_eligibility: field(row, 'religious_eligibility'),
+    religious_eligibility: religiousText,
     focus_areas: field(row, 'focus_areas'),
     typical_award: field(row, 'typical_award'),
     last_verified: field(row, 'last_verified'),
+    applicants: field(row, 'applicants'),
   });
-  for (const key of ['deadline_notes', 'geography', 'religious_eligibility', 'typical_award', 'last_verified'] as const) {
+  // A deadline with a time of day (a date cell at 5 pm): the date is the deadline, the time a note.
+  const details = { ...parsedDetails, deadline_notes: withDueAt(due.time, parsedDetails.deadline_notes) };
+  for (const key of ['deadline_notes', 'geography', 'typical_award', 'last_verified'] as const) {
     if (details[key]) provided.add(key);
   }
+  // Words in the column replace what was there, even when they can't be read as a value (then the
+  // value is empty) or are a bare code ("eligible", then no words are kept).
+  if (religiousText) {
+    provided.add('religious_eligibility');
+    provided.add('religious_eligibility_text');
+  }
   if (details.focus_areas?.length) provided.add('focus_areas');
+  if (details.applicants?.length) provided.add('applicants');
 
   if (statusText) provided.add('status');
   if (geoText || restriction) provided.add('geo_qualified');
@@ -381,7 +408,7 @@ function parseGrantRow(row: RowData, userId: string, category: GrantCategory): U
 
   const grant: Grant = {
     grant_name: grantName,
-    deadline: take('deadline', field(row, 'deadline'), 'Check website'),
+    deadline: take('deadline', due.deadline, 'Check website'),
     amount: take('amount', amount, 'Varies'),
     funder: take('funder', field(row, 'funder'), 'Unknown'),
     description: take('description', field(row, 'description'), ''),
@@ -395,6 +422,7 @@ function parseGrantRow(row: RowData, userId: string, category: GrantCategory): U
     eligibility_notes: eligibilityNotes || null,
     funds_for: fundsFor,
     ...details,
+    ...(religiousText && !details.religious_eligibility_text ? { religious_eligibility_text: null } : {}),
     id: newGrantId(),
     user_id: userId,
     created_at: new Date().toISOString(),
@@ -606,11 +634,19 @@ export async function parseGrantWorkbook(content: Uint8Array, userId: string): P
 // Merging an upload into the saved database
 // =============================================================================
 
+/** Fields that name the grant (matched loosely, so only their spelling can differ): never recorded as the person's own changes. */
+const IDENTITY_FIELDS = new Set<string>(['grant_name', 'funder']);
+const sameValue = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+
 /**
  * Upsert uploaded grants: a row whose name+funder matches a saved grant
  * updates the fields the row filled in (the grant keeps its id, so writer
  * applications that point at it keep working); other rows are added.
  * Nothing already in the database is removed.
+ *
+ * A starter grant (source "seed") the row changes remembers which fields the person changed
+ * (`user_edited_fields`, added to any already there), so loading the starter database again
+ * keeps the person's values instead of overwriting them.
  */
 export function upsertGrants(current: Grant[], uploaded: UploadedGrant[]): { merged: Grant[]; added: number; updated: number } {
   const merged = [...current];
@@ -630,9 +666,18 @@ export function upsertGrants(current: Grant[], uploaded: UploadedGrant[]): { mer
       added += 1;
       continue;
     }
+    const existing = merged[position];
     const patch: Partial<Grant> = {};
     for (const name of item.provided) (patch as Record<string, unknown>)[name] = item.grant[name];
-    merged[position] = { ...merged[position], ...patch };
+    const next: Grant = { ...existing, ...patch };
+    if (existing.source === 'seed') {
+      const changed = item.provided.filter(
+        (name) => !IDENTITY_FIELDS.has(name) && !sameValue((existing as unknown as Record<string, unknown>)[name], item.grant[name]),
+      );
+      const edited = Array.from(new Set([...(existing.user_edited_fields ?? []), ...changed]));
+      if (edited.length) next.user_edited_fields = edited;
+    }
+    merged[position] = next;
     if (position < current.length) updated.add(position);
   }
   return { merged, added, updated: updated.size };

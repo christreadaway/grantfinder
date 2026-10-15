@@ -35,6 +35,35 @@ interface SeedLoaded {
   loaded_at: string;
 }
 
+/** "1 starter grant", "2 starter grants". */
+function count(n: number, noun: string): string {
+  return `${n} ${noun}${n === 1 ? '' : 's'}`;
+}
+
+/** The names of retired grants for the note: at most five, then how many more. */
+function retiredList(names: string[]): string {
+  const shown = names.slice(0, 5).join('; ');
+  return names.length > 5 ? `${shown}; and ${names.length - 5} more` : shown;
+}
+
+/**
+ * What loading the starter database did, as full sentences (the website shows them after its own
+ * "Starter database loaded: ..." line, so they never repeat "Starter database").
+ */
+export function seedNotes(
+  refresh: { updated: number; retired: number; retired_names: string[]; kept_user_changes: number },
+  foundationsAdded: number,
+): string[] {
+  const notes: string[] = [];
+  if (refresh.updated) notes.push(`Updated ${count(refresh.updated, 'starter grant')} with the latest deadlines and details.`);
+  if (refresh.kept_user_changes) notes.push(`Kept your own changes to ${count(refresh.kept_user_changes, 'starter grant')}.`);
+  if (refresh.retired) {
+    notes.push(`Retired ${count(refresh.retired, 'grant')} no longer offered or not open to Catholic schools: ${retiredList(refresh.retired_names)}.`);
+  }
+  if (foundationsAdded) notes.push(`Also added ${count(foundationsAdded, 'foundation')} to monitor.`);
+  return notes;
+}
+
 /** More keywords than this would keep the job running for many minutes. */
 const MAX_KEYWORDS = 10;
 const MAX_RESULTS_CAP = 500;
@@ -113,17 +142,11 @@ export function registerDiscoveryRoutes(router: Router): void {
       retired: refresh.retired,
       retired_names: refresh.retired_names,
       duplicates: refresh.duplicates,
+      kept_user_changes: refresh.kept_user_changes,
       total: refresh.total,
       foundations_added: foundations.added,
     });
-    const notes: string[] = [];
-    if (refresh.updated) notes.push(`Updated ${refresh.updated} starter grant${refresh.updated === 1 ? '' : 's'} with the latest deadlines and details.`);
-    if (refresh.retired) {
-      notes.push(
-        `Retired ${refresh.retired} grant${refresh.retired === 1 ? '' : 's'} no longer offered or not open to Catholic schools: ${refresh.retired_names.slice(0, 5).join('; ')}${refresh.retired > 5 ? '; ...' : ''}.`,
-      );
-    }
-    notes.push(`Starter database also added ${foundations.added} foundations to monitor`);
+    const notes = seedNotes(refresh, foundations.added);
     return {
       ...discoveryResult('seed', seed.grants.length, { added: refresh.added, duplicates: refresh.duplicates, total: refresh.total }, notes),
       updated: refresh.updated,

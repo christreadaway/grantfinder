@@ -16,7 +16,7 @@ import crypto from 'node:crypto';
 
 import { GRANTS_GOV_API_URL, GRANTS_GOV_MAX_RESULTS } from '../config';
 import seed from '../data/seed_grants.json';
-import { parseGrantDetails } from '../grantDetails';
+import { deadlineValue, moneyText, parseGrantDetails, withDueAt } from '../grantDetails';
 import { asRecord, asStringList, extractJsonArray } from '../json';
 import { logger } from '../log';
 import { updateFoundations, updateGrants } from '../repo';
@@ -146,9 +146,16 @@ export interface SeedRefreshOutcome {
   duplicates: number;
   total: number;
   retired_names: string[];
+  /**
+   * Starter grants whose own changes (from the person's spreadsheet) were kept: refreshed with the
+   * person's values where the starter database says something else, or kept although retired.
+   */
+  kept_user_changes: number;
 }
 
 const DATA_FIELDS_SKIPPED = new Set(['id', 'user_id', 'created_at']);
+/** Never taken from the person's edits: the record's identity and bookkeeping. */
+const NEVER_USER_FIELDS = new Set(['id', 'user_id', 'created_at', 'source', 'grant_name', 'funder', 'user_edited_fields']);
 /** How a retired starter grant's note begins (it is kept, closed, only while an application uses it). */
 const RETIRED_NOTE_START = "No longer in GrantFinder's starter database";
 const normalName = (name: string) => name.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -157,6 +164,27 @@ const sameData = (a: Grant, b: Grant) => {
     JSON.stringify(Object.keys(grant).filter((key) => !DATA_FIELDS_SKIPPED.has(key)).sort().map((key) => [key, grant[key as keyof Grant]]));
   return pick(a) === pick(b);
 };
+const sameValue = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+
+/**
+ * The refreshed starter record with the person's own values put back (the fields they changed with
+ * their spreadsheet, listed in `user_edited_fields`, which the record keeps). `kept` is true when a
+ * value the person set differs from the starter database's (so the refresh would have overwritten it).
+ */
+function withUserEdits(existing: Grant, refreshed: Grant): { grant: Grant; kept: boolean } {
+  const fields = (existing.user_edited_fields ?? []).filter((field) => !NEVER_USER_FIELDS.has(field));
+  if (!fields.length) return { grant: refreshed, kept: false };
+  const own = existing as unknown as Record<string, unknown>;
+  const out = { ...refreshed } as unknown as Record<string, unknown>;
+  let kept = false;
+  for (const field of fields) {
+    if (!sameValue(own[field], out[field])) kept = true;
+    if (own[field] === undefined) delete out[field];
+    else out[field] = own[field];
+  }
+  out.user_edited_fields = [...(existing.user_edited_fields ?? [])];
+  return { grant: out as unknown as Grant, kept };
+}
 
 /**
  * Bring a user's starter grants up to date with the starter database (pure; inputs unchanged):
@@ -165,8 +193,10 @@ const sameData = (a: Grant, b: Grant) => {
  * - a new starter grant is added, unless the person already added a grant with the same name and
  *   funder themselves (theirs is kept);
  * - a starter grant the database no longer lists (the program ended, or Catholic schools turned
- *   out not to be eligible) is removed, or, when an application uses it (`keepIds`), kept and
- *   marked CLOSED with a note saying why.
+ *   out not to be eligible) is removed, or, when an application uses it (`keepIds`) or the person
+ *   changed it with their own spreadsheet, kept and marked CLOSED with a note saying why;
+ * - the fields the person changed with their own spreadsheet (`user_edited_fields`) keep the
+ *   person's values: a refresh never overwrites their corrections.
  * Grants from uploads, Grants.gov or web discovery are never changed.
  */
 export function refreshSeedGrants(
@@ -183,12 +213,15 @@ export function refreshSeedGrants(
   const added: Grant[] = [];
   let updated = 0;
   let duplicates = 0;
+  let keptUserChanges = 0;
 
   for (const grant of incoming) {
     const names = [grant.grant_name, ...(previousNames.get(grant.grant_name) ?? [])].map(normalName);
     const existing = names.map((name) => seedByName.get(name)).find((found) => found && !replaced.has(found.id));
     if (existing) {
-      const next: Grant = { ...grant, id: existing.id, user_id: existing.user_id, created_at: existing.created_at };
+      const refreshed: Grant = { ...grant, id: existing.id, user_id: existing.user_id, created_at: existing.created_at };
+      const { grant: next, kept } = withUserEdits(existing, refreshed);
+      if (kept) keptUserChanges += 1;
       replaced.set(existing.id, next);
       if (sameData(existing, next)) duplicates += 1;
       else updated += 1;
@@ -215,22 +248,35 @@ export function refreshSeedGrants(
       merged.push(grant);
       continue;
     }
-    const alreadyRetired = grant.status === 'CLOSED' && Boolean(grant.eligibility_notes?.startsWith(RETIRED_NOTE_START));
-    if (keepIds.has(grant.id)) {
-      // Kept for its application. A record an earlier load already closed stays as it is (not retired again).
+    const edited = (grant.user_edited_fields ?? []).length > 0;
+    const hasNote = Boolean(grant.eligibility_notes?.startsWith(RETIRED_NOTE_START));
+    // Closed by an earlier load, or closed then reopened by the person's own spreadsheet: left as it is.
+    const alreadyRetired = hasNote && (grant.status === 'CLOSED' || Boolean(grant.user_edited_fields?.includes('status')));
+    if (keepIds.has(grant.id) || edited) {
+      // Kept for its application or for the person's own changes. A record an earlier load already
+      // closed stays as it is (not retired again).
       if (alreadyRetired) {
         merged.push(grant);
         continue;
       }
       const note = `${RETIRED_NOTE_START} as of ${today}: the program ended or Catholic schools aren't eligible. Check the funder's site before applying.`;
-      merged.push({ ...grant, status: 'CLOSED', eligibility_notes: [note, grant.eligibility_notes].filter(Boolean).join(' ') });
+      merged.push({ ...grant, status: 'CLOSED', eligibility_notes: hasNote ? grant.eligibility_notes : [note, grant.eligibility_notes].filter(Boolean).join(' ') });
+      if (edited) keptUserChanges += 1;
     }
     retiredNames.push(grant.grant_name);
   }
   merged.push(...added);
   return {
     merged,
-    outcome: { added: added.length, updated, retired: retiredNames.length, duplicates, total: merged.length, retired_names: retiredNames },
+    outcome: {
+      added: added.length,
+      updated,
+      retired: retiredNames.length,
+      duplicates,
+      total: merged.length,
+      retired_names: retiredNames,
+      kept_user_changes: keptUserChanges,
+    },
   };
 }
 
@@ -242,7 +288,7 @@ export async function refreshSeedIntoDatabase(
   keepIds: ReadonlySet<string>,
   today: string,
 ): Promise<SeedRefreshOutcome> {
-  let outcome: SeedRefreshOutcome = { added: 0, updated: 0, retired: 0, duplicates: 0, total: 0, retired_names: [] };
+  let outcome: SeedRefreshOutcome = { added: 0, updated: 0, retired: 0, duplicates: 0, total: 0, retired_names: [], kept_user_changes: 0 };
   const saved = await updateGrants(userId, (current) => {
     const result = refreshSeedGrants(current, incoming, previousNames, keepIds, today);
     outcome = result.outcome;
@@ -349,7 +395,11 @@ function grantNameOf(data: Record<string, unknown>): string {
   return textOf(data.grant_name) || textOf(data.name) || textOf(data.title);
 }
 
-/** Build a Grant from a loose dict, tolerating missing fields. Null when it has no name. */
+/**
+ * Build a Grant from a loose dict, tolerating missing fields. Null when it has no name.
+ * A numeric amount becomes money (5000 -> "$5,000"); a deadline given as an Excel serial number
+ * (46387) becomes its YYYY-MM-DD (a time of day in it goes into the deadline notes).
+ */
 export function makeGrant(
   userId: string,
   source: string,
@@ -358,10 +408,12 @@ export function makeGrant(
 ): Grant | null {
   const name = grantNameOf(data);
   if (!name) return null;
+  const due = deadlineValue(data.deadline);
+  const details = parseGrantDetails(data);
   return {
     grant_name: name,
-    deadline: textOf(data.deadline) || 'Check website',
-    amount: textOf(data.amount) || 'Varies',
+    deadline: due.deadline || 'Check website',
+    amount: moneyText(data.amount) || 'Varies',
     funder: textOf(data.funder) || 'Unknown',
     description: textOf(data.description),
     contact: textOf(data.contact) || 'See website',
@@ -373,7 +425,8 @@ export function makeGrant(
     source,
     eligibility_notes: notesText(data.eligibility_notes),
     funds_for: tagList(data.funds_for),
-    ...parseGrantDetails(data),
+    ...details,
+    deadline_notes: withDueAt(due.time, details.deadline_notes),
     id: newGrantId(),
     user_id: userId,
     created_at: new Date().toISOString(),
@@ -667,6 +720,8 @@ export const WEB_DISCOVERY_SCHEMA_HINT = `[
     "focus_areas": ["the funder's current priorities, in its words"],
     "eligibility_notes": "Key requirements/restrictions",
     "religious_eligibility": "eligible | secular_purpose_only | excluded | unclear",
+    "religious_eligibility_text": "What the funder says about religious organizations or religious schools, in its own words ('' if it says nothing)",
+    "applicants": ["who submits the application: school | parish | diocese | teacher | family | nonprofit"],
     "geography": "National | a state | a region, county list or diocese list",
     "url": "Direct link to the grant page",
     "geo_qualified": "Yes | No | Check eligibility",

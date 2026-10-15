@@ -11,6 +11,7 @@
  */
 import type { Claude, ClaudeCallResult } from '../claude';
 import { WEB_DISCOVERY_MAX_SEARCHES } from '../config';
+import { deadlinePassed, todayIso } from '../deadlines';
 import { ClaudeError, HttpError } from '../errors';
 import type { JobContext, JobHandler } from '../jobs';
 import { logger } from '../log';
@@ -26,7 +27,7 @@ import {
   WEB_DISCOVERY_PROMPT_ID,
   type GrantsGovTiming,
 } from '../services/discovery';
-import type { DiscoveryResult } from '../types';
+import type { DiscoveryResult, Grant } from '../types';
 
 /** A Claude call stopped by this step's own time limit (direct mode: about a minute per step). */
 function stoppedByTimeLimit(ctx: JobContext, error: unknown): boolean {
@@ -115,6 +116,23 @@ export const WEB_DISCOVERY_OUT_OF_TIME =
   'AI web discovery needs more time than this site allows for one step (about a minute), so it stopped before Claude listed any grants. ' +
   'Try again, perhaps with a narrower focus (for example, "security cameras"); the starter database and Grants.gov search are quicker ways to add grants.';
 
+/**
+ * The web grants worth saving. The prompt asks Claude to leave these out; any that slip through are
+ * never saved: grants that don't fund religious organizations (`excluded`), and grants already
+ * closed or whose deadline has passed (`closed`; a yearly "Annual: ..." deadline never has).
+ */
+export function keepOpenEligible(found: Grant[], today: string): { grants: Grant[]; excluded: number; closed: number } {
+  const grants: Grant[] = [];
+  let excluded = 0;
+  let closed = 0;
+  for (const grant of found) {
+    if (grant.religious_eligibility === 'excluded') excluded += 1;
+    else if (grant.status === 'CLOSED' || deadlinePassed(grant.deadline, today)) closed += 1;
+    else grants.push(grant);
+  }
+  return { grants, excluded, closed };
+}
+
 async function runWebSearch(ctx: JobContext): Promise<DiscoveryResult> {
   const input = (ctx.input ?? {}) as Partial<WebSearchJobInput>;
   const focus = typeof input.focus === 'string' && input.focus.trim() ? input.focus.trim() : null;
@@ -175,7 +193,7 @@ async function runWebSearch(ctx: JobContext): Promise<DiscoveryResult> {
   }
 
   const searches = countSearches(response);
-  notes.push(`Ran ${searches} web searches`);
+  notes.push(`Ran ${searches} web search${searches === 1 ? '' : 'es'}`);
 
   const parsed = parseWebDiscoveryAnswer(response.text);
   // Direct mode allows one continuation of a paused search: a turn still
@@ -220,13 +238,10 @@ async function runWebSearch(ctx: JobContext): Promise<DiscoveryResult> {
   }
 
   const found = grantsFromWebEntries(ctx.userId, parsed.entries);
-  // The prompt asks Claude to leave these out; any that slip through are never saved.
-  const grants = found.filter((grant) => grant.religious_eligibility !== 'excluded');
-  if (grants.length < found.length) {
-    const skipped = found.length - grants.length;
-    notes.push(`Skipped ${skipped} grant${skipped === 1 ? '' : 's'} that ${skipped === 1 ? "doesn't" : "don't"} fund religious organizations`);
-  }
-  notes.push(`AI verified ${grants.length} opportunities`);
+  const { grants, excluded, closed } = keepOpenEligible(found, todayIso());
+  if (excluded) notes.push(`Skipped ${excluded} grant${excluded === 1 ? '' : 's'} that ${excluded === 1 ? "doesn't" : "don't"} fund religious organizations`);
+  if (closed) notes.push(`Skipped ${closed} closed or past-deadline grant${closed === 1 ? '' : 's'}`);
+  notes.push(`AI verified ${grants.length} ${grants.length === 1 ? 'opportunity' : 'opportunities'}`);
 
   await ctx.progress(`Saving ${grants.length} grants...`);
   const merge = await mergeIntoDatabase(ctx.userId, grants);
