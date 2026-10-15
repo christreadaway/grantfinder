@@ -61,6 +61,26 @@ function apiError(res, status, type, message) {
   send(res, status, { type: 'error', error: { type, message } }, { 'request-id': 'req_mock' });
 }
 
+// Request settings Claude Sonnet 5.5 (and the other current models) answer with a 400, with
+// Anthropic's wording, so the engine can never start sending them unnoticed.
+function sonnet55Problem(res, body) {
+  const thinking = body.thinking || {};
+  if (thinking.type === 'disabled') {
+    return apiError(res, 400, 'invalid_request_error', '"thinking.type.disabled" is not supported for this model. Use "thinking.type.between_tools" for the lowest thinking setting, or "thinking.type.adaptive" and "output_config.effort" to control thinking behavior.'), true;
+  }
+  if (thinking.type === 'enabled' || thinking.budget_tokens !== undefined) {
+    return apiError(res, 400, 'invalid_request_error', 'thinking.type.enabled and budget_tokens are not supported for this model.'), true;
+  }
+  const choice = body.tool_choice && body.tool_choice.type;
+  if (choice === 'any' || choice === 'tool') {
+    return apiError(res, 400, 'invalid_request_error', 'tool_choice: type "tool" and "any" are not supported for this model.'), true;
+  }
+  for (const name of ['temperature', 'top_p', 'top_k']) {
+    if (body[name] !== undefined) return apiError(res, 400, 'invalid_request_error', `${name} is not supported for this model.`), true;
+  }
+  return false;
+}
+
 function readBody(req) {
   return new Promise((resolve) => {
     const chunks = [];
@@ -174,8 +194,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/v1/models') {
       if (keyProblem(res, req.headers['x-api-key'], false, req.headers.authorization)) return;
       return send(res, 200, {
-        data: [{ id: 'claude-sonnet-5', type: 'model', display_name: 'Claude Sonnet 5', created_at: '2026-01-01T00:00:00Z' }],
-        has_more: false, first_id: 'claude-sonnet-5', last_id: 'claude-sonnet-5',
+        data: [{ id: 'claude-sonnet-5-5', type: 'model', display_name: 'Claude Sonnet 5.5', created_at: '2026-01-01T00:00:00Z' }],
+        has_more: false, first_id: 'claude-sonnet-5-5', last_id: 'claude-sonnet-5-5',
       });
     }
     if (req.method === 'POST' && url.pathname === '/v1/messages') {
@@ -195,6 +215,7 @@ const server = http.createServer(async (req, res) => {
         prompt: promptText(body),
       });
       if (keyProblem(res, apiKey, true, req.headers.authorization)) return;
+      if (sonnet55Problem(res, body)) return;
       const forced = failures[promptId];
       if (forced && forced.times !== 0) {
         forced.times -= 1;

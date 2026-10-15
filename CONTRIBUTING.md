@@ -26,7 +26,7 @@ Run the tests before opening a pull request:
 
 ```bash
 cd ~/grantfinder
-bash tests/engine/run_all.sh   # 10 engine suites (688 checks), then 5 again in direct job mode: 1,255 checks; mock Claude, no API key needed
+bash tests/engine/run_all.sh   # 10 engine suites (693 checks), then 5 again in direct job mode: 1,260 checks; mock Claude, no API key needed
 bash tests/e2e/run_e2e.sh      # browser test of the whole journey, 443 checks (setup at the top of the script)
 ```
 

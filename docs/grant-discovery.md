@@ -131,7 +131,7 @@ unreadable answer, or not finished within the step's minute), the standard
 
 Environment variables (Netlify: Site configuration > Environment variables):
 
-- `CLAUDE_MODEL` (default `claude-sonnet-5`) — used for all AI processing
+- `CLAUDE_MODEL` (default `claude-sonnet-5-5`, Claude Sonnet 5.5) — used for all AI processing
 - `GRANTS_GOV_API_URL` — optional override of the Grants.gov Search2 address
 - `GRANTFINDER_BACKGROUND_JOBS=true` — optional, only for Netlify plans that
   include background functions: each step (matching, discovery, the website

@@ -137,9 +137,13 @@ export const ACCESS_TOKEN_DAYS = 30;
 // AI
 // =============================================================================
 
-/** Never hardcode the model: CLAUDE_MODEL picks it (default claude-sonnet-5). */
+/**
+ * Never hardcode the model: CLAUDE_MODEL picks it (default claude-sonnet-5-5, Claude Sonnet 5.5:
+ * $2 / $10 per million tokens). Sonnet 5.5 rejects thinking {type:'disabled'} and forced
+ * tool_choice; the engine sends neither (the mock Claude refuses both in tests).
+ */
 export function claudeModel(): string {
-  return raw('CLAUDE_MODEL') || 'claude-sonnet-5';
+  return raw('CLAUDE_MODEL') || 'claude-sonnet-5-5';
 }
 
 /** Anthropic's own API: where every Claude call goes outside the tests. */

@@ -1,7 +1,7 @@
 /**
  * The one way the engine talks to Claude.
  *
- * - Model from CLAUDE_MODEL (default claude-sonnet-5). Never hardcoded.
+ * - Model from CLAUDE_MODEL (default claude-sonnet-5-5). Never hardcoded.
  * - Streams each request (long drafts never hit HTTP timeouts) and returns the
  *   finished message. Text is joined from text blocks only: newer models put
  *   a thinking block first, which broke the old Python `content[0].text`.
@@ -144,7 +144,7 @@ function translateClaudeErrorRaw(error: unknown, model: string): ClaudeError {
     return new ClaudeError(
       'model',
       400,
-      `Claude model "${model}" is not available to your API key. Set CLAUDE_MODEL in Netlify to a model your account can use (for example claude-sonnet-5), then redeploy.`,
+      `Claude model "${model}" is not available to your API key. Set CLAUDE_MODEL in Netlify to a model your account can use (for example claude-sonnet-5-5), then redeploy.`,
       true,
     );
   }

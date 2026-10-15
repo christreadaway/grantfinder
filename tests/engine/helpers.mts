@@ -31,7 +31,7 @@ export function setupEnv(name: string, extra: Record<string, string> = {}): stri
     GRANTFINDER_TEST_MODE: '1',
     ALLOW_GUEST_LOGIN: 'true',
     SECRET_KEY: 'test-secret-key-0123456789-abcdefghijklmnopqrstuvwxyz',
-    CLAUDE_MODEL: 'claude-sonnet-5',
+    CLAUDE_MODEL: 'claude-sonnet-5-5',
     ...extra,
   });
   return dir;

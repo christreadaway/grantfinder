@@ -56,13 +56,13 @@ everyone out and makes saved API keys unreadable, so people would re-enter them)
    Optional:
 
    ```
-   CLAUDE_MODEL=claude-sonnet-5
+   CLAUDE_MODEL=claude-sonnet-5-5
    LOG_LEVEL=info
    ```
 
-   `CLAUDE_MODEL` picks the Claude model for every AI step. `claude-sonnet-5` is the default and the
-   right choice on most Netlify plans: each AI step has about a minute, and Sonnet finishes well
-   inside it. `claude-opus-5-5` writes a little better but is slower and costs more; use it only
+   `CLAUDE_MODEL` picks the Claude model for every AI step. `claude-sonnet-5-5` (Claude Sonnet 5.5,
+   $2 / $10 per million tokens in / out) is the default and the right choice on most Netlify plans:
+   each AI step has about a minute, and Sonnet finishes well inside it. You don't need to set it. `claude-opus-5-5` writes a little better but is slower and costs more; use it only
    with the background option below.
 4. Click **Deploy**. The build takes 2 to 4 minutes. If `SECRET_KEY` is missing or too short, the
    build stops and the log tells you exactly what to fix.
@@ -156,7 +156,7 @@ be opened again from the screens; GrantFinder asks before either one.
 | Sign-in page says **Your session ended** | The sign-in expired (sessions last 30 days) or was refused, for example after `SECRET_KEY` changed | Sign in with Google again and your work is there. A guest session can't be reopened |
 | Deploy fails: **Background Functions not allowed by team plan** | `GRANTFINDER_BACKGROUND_JOBS=true` is set, but the Netlify plan has no background functions | Delete that variable and deploy again. GrantFinder works without it |
 | **Couldn't start the background worker** | `GRANTFINDER_BACKGROUND_JOBS=true` is set, but the worker isn't deployed or allowed | Delete that variable and redeploy (AI steps then run inside normal requests), or **Trigger deploy** if your plan has background functions |
-| **This step was stopped by Netlify**, **This step ran out of time**, **Claude was still working when this step reached its time limit**, or **The background worker stopped unexpectedly** | An AI step reached Netlify's time limit (about a minute per step; 15 minutes with background functions), or its worker stopped | Try it again; anything that finished was saved. In the writer, **Draft missing sections** drafts only the sections with no draft yet. If one step keeps stopping, set `CLAUDE_MODEL=claude-sonnet-5` (faster) |
+| **This step was stopped by Netlify**, **This step ran out of time**, **Claude was still working when this step reached its time limit**, or **The background worker stopped unexpectedly** | An AI step reached Netlify's time limit (about a minute per step; 15 minutes with background functions), or its worker stopped | Try it again; anything that finished was saved. In the writer, **Draft missing sections** drafts only the sections with no draft yet. If one step keeps stopping, set `CLAUDE_MODEL=claude-sonnet-5-5` (faster than Opus) |
 | Website scan says the site **blocks automated reading** | Many parish sites block bots | Use **Enter the basics by hand** or **Skip to questions**; upload documents for detail |
 | Writer says **requirements were inferred** | The funder's page couldn't be read | Paste the guidelines under **Paste guidelines and re-analyze** |
 | An upload says it is **larger than 4 MB** (or over the **limit 4 MB**) | Netlify's request size limit | Save a smaller copy (fewer images or pages) and upload again. For a big report, add a plain-text (.txt) copy instead; the Documents step explains how |

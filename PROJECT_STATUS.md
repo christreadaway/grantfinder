@@ -17,13 +17,13 @@
 - **Logging and debugging:** JSON-line logs (Netlify function logs; `~/logs/grantfinder/` locally), every AI call logged with tokens, cost, and correlation ID; "Copy debug report" and "Copy debug bundle" give paste-ready markdown.
 
 ## Tests (all passing)
-- Engine: `cd ~/grantfinder && bash tests/engine/run_all.sh` runs 10 suites (688 checks), then processing, grants, writer, regressions and checklist again in direct job mode (567 checks): 1,255 checks.
+- Engine: `cd ~/grantfinder && bash tests/engine/run_all.sh` runs 10 suites (693 checks), then processing, grants, writer, regressions and checklist again in direct job mode (567 checks): 1,260 checks.
 - Browser: `bash tests/e2e/run_e2e.sh` runs 7 phases on a production build: 443 checks with `E2E_JOB_MODE=direct` (how Netlify runs it), including Funder History. The checklist, Top picks and the file uploads are covered by engine tests, not yet by the browser test.
 - Netlify runtime (local `netlify build` + `netlify serve`, no background function): 57 API checks including document parsing, Excel upload, hand edits, Word export, drafting continued across 4 requests, Funder History, the guidelines PDF upload and the checklist.
 
 ## Known Limits
 - Guest work lives in one browser; use Google sign-in to reach the same work from another computer.
-- Each AI step gets about a minute on Netlify. `claude-sonnet-5` (the default) fits comfortably; slower models may need the background option.
+- Each AI step gets about a minute on Netlify. Claude Sonnet 5.5 (`claude-sonnet-5-5`, the default) fits comfortably; slower models may need the background option.
 - AI prompts are verified against a mock Claude in tests; real-key quality depends on the model.
 
 ## Next Steps

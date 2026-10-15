@@ -51,6 +51,31 @@ check('health names the Claude host in use (the mock here)', healthHost.data?.cl
   const deployed = config.anthropicBaseUrl();
   process.env.GRANTFINDER_CLAUDE_BASE_URL = testUrl;
   check('deployed: Claude calls go to api.anthropic.com even when ANTHROPIC_BASE_URL is set', deployed === 'https://api.anthropic.com', deployed);
+
+  const testModel = process.env.CLAUDE_MODEL;
+  delete process.env.CLAUDE_MODEL;
+  const defaultModel = config.claudeModel();
+  process.env.CLAUDE_MODEL = testModel;
+  check('default model is Claude Sonnet 5.5 (claude-sonnet-5-5)', defaultModel === 'claude-sonnet-5-5', defaultModel);
+  const claude = await import('../../frontend/src/server/claude.ts');
+  const tool = claude.webSearchTool('claude-sonnet-5-5', 3) as { type: string };
+  check('Sonnet 5.5 gets the current web search tool (web_search_20260209)', tool.type === 'web_search_20260209', tool);
+  const [inPrice, outPrice] = claude.priceFor('claude-sonnet-5-5');
+  check('Sonnet 5.5 costs are estimated at $2 / $10 per million tokens', inPrice === 2 && outPrice === 10, { inPrice, outPrice });
+}
+check('health shows the model in use (Sonnet 5.5)', healthHost.data?.model === 'claude-sonnet-5-5', healthHost.data);
+{
+  // The mock refuses what Sonnet 5.5 refuses, so every suite fails if the engine starts sending it.
+  const refused: string[] = [];
+  for (const extra of [{ thinking: { type: 'disabled' } }, { tool_choice: { type: 'any' } }, { temperature: 0.2 }]) {
+    const response = await fetch(`${mock.url}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': 'sk-ant-test-good-1234' },
+      body: JSON.stringify({ model: 'claude-sonnet-5-5', max_tokens: 100, messages: [{ role: 'user', content: 'hi' }], ...extra }),
+    });
+    if (response.status === 400) refused.push(Object.keys(extra)[0]);
+  }
+  check('mock Claude refuses settings Sonnet 5.5 rejects (thinking disabled, forced tool, sampling)', refused.length === 3, refused);
 }
 
 const status = await api('GET', '/api/auth/api-key/status', { token });
