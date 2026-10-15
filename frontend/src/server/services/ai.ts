@@ -820,15 +820,72 @@ function matchBase(grant: Grant): Omit<GrantMatch, 'score' | 'score_tier' | 'sco
 export const RELIGIOUS_EXCLUDED_REASON =
   'Not eligible: this funder does not fund religious organizations or religious schools (per the grant database). No need to apply.';
 
+// -----------------------------------------------------------------------------
+// Texas-only geography (the starter database is Texas-heavy)
+// -----------------------------------------------------------------------------
+
+/** Catholic dioceses in Texas (each name is unique among U.S. dioceses). */
+const TEXAS_DIOCESES =
+  'austin|amarillo|beaumont|brownsville|corpus christi|dallas|el paso|fort worth|galveston[- ]houston|laredo|lubbock|san angelo|san antonio|tyler|victoria';
+/** Texas cities a geography names as "City of X" or "Greater X". */
+const TEXAS_CITIES =
+  'austin|houston|dallas|san antonio|fort worth|el paso|corpus christi|laredo|lubbock|amarillo|round rock|cedar park|pflugerville|san marcos|waco|killeen|mcallen|brownsville|college station|leander';
+/** County names found only in Texas (Williamson, Caldwell, Harris... exist in other states too, so they don't count alone). */
+const TEXAS_ONLY_COUNTIES = 'travis|hays|bastrop|burnet|blanco|llano|bexar|tarrant|comal|nueces|fort bend|mclennan';
+
+/** Words that say a geography is not limited to Texas (or only leans toward it): never ruled out on these. */
+const NOT_ONLY_TEXAS =
+  /\bnational|\bnationwide\b|\bnation\b|united states|\bu\.s\.|\busa\b|\bstates\b|\banywhere\b|outside (?:of )?texas|\balso\b|\bfocus|\bpriorit|\bprimarily\b|\bmostly\b|\bmainly\b|\bpreferen|\bprefer|\bemphasis\b|\bespecially\b|\btypically\b|\busually\b|\bgenerally\b|\bmajority\b|\boccasional|\bbeyond\b|\binternational\b|\bglobal\b|\bworldwide\b/;
+const OTHER_STATE_NAMES = new RegExp(
+  `\\b(?:${[...new Set(US_STATES.map(([, name]) => name).filter((name) => name !== 'texas'))].join('|')})\\b`,
+);
+/** Two-letter codes of other states, in capitals and standing alone ("Austin, MN", "(AL, CA, TX)"). */
+const OTHER_STATE_CODES = new RegExp(`(?<![A-Za-z])(?:${[...STATE_CODES].filter((code) => code !== 'TX').join('|')})(?![A-Za-z])`);
+
+const TEXAS_ONLY_PATTERNS: RegExp[] = [
+  // "Texas", "Texas only", "TX", "Central Texas: Travis, ...", "the Texas Hill Country"
+  /^(?:the\s+)?(?:(?:central|north|south|east|west|northeast|northwest|southeast|southwest|north central|south central|far west|deep south|coastal|rural|greater)\s+)?(?:texas|tx)\b/,
+  // "Statewide (Texas)"
+  /^state-?wide\b[^;]*\b(?:texas|tx)\b/,
+  /\btexas only\b|\bonly (?:in|within|for) texas\b|\blimited to texas\b|\bmust be (?:located |based )?in texas\b/,
+  // "Diocese of Austin only", "Catholic schools of the Diocese of Austin only", "Archdiocese of San Antonio and Diocese of El Paso only"
+  new RegExp(`\\b(?:arch)?diocese of (?:${TEXAS_DIOCESES})\\b[^;()]*?\\bonly\\b`),
+  // A geography that IS a Texas diocese: "Diocese of Austin (chapters in ...)"
+  new RegExp(`^(?:the\\s+)?(?:arch)?diocese of (?:${TEXAS_DIOCESES})\\b`),
+  // "Travis, Williamson, Hays counties", "73 Texas counties"
+  new RegExp(`\\b(?:${TEXAS_ONLY_COUNTIES})\\b[^;]*\\bcount(?:y|ies)\\b|\\bcount(?:y|ies)\\b[^;]*\\b(?:${TEXAS_ONLY_COUNTIES})\\b|\\btexas count(?:y|ies)\\b`),
+];
+/** "City of Austin", "Greater Houston": a place name other states share, so it doesn't count when the organization's own city has that name. */
+const TEXAS_CITY_PATTERN = new RegExp(`\\bcity of (${TEXAS_CITIES})\\b|^(?:the\\s+)?greater (${TEXAS_CITIES})\\b`);
+
+/**
+ * True when a grant's geography clearly limits it to Texas or a Texas place: "Texas", "Central
+ * Texas", "Diocese of Austin only", "City of Austin", "Travis, Williamson, Hays counties".
+ * Conservative: anything that also names another state, the nation, or only a focus or priority
+ * ("Texas focus with national grants", "Hays County priority") is not. `orgCity` keeps "City of
+ * Austin" from ruling out a school in Austin, Minnesota.
+ */
+export function texasOnlyGeography(geography: string | null | undefined, orgCity = ''): boolean {
+  const original = asString(geography).replace(/\s+/g, ' ').trim();
+  if (!original) return false;
+  const text = original.toLowerCase().replace(/[–—]/g, '-');
+  if (NOT_ONLY_TEXAS.test(text) || OTHER_STATE_NAMES.test(text) || OTHER_STATE_CODES.test(original)) return false;
+  if (TEXAS_ONLY_PATTERNS.some((pattern) => pattern.test(text))) return true;
+  const city = TEXAS_CITY_PATTERN.exec(text);
+  return Boolean(city) && (city?.[1] ?? city?.[2]) !== orgCity.trim().toLowerCase();
+}
+
 /**
  * Hard disqualifiers in code, before any (billed) AI call: funders that exclude
- * religious organizations, Texas-only grants for organizations outside Texas,
- * "No" geography, CLOSED, deadline passed.
+ * religious organizations, Texas-only grants for organizations outside Texas
+ * (geo_qualified "Yes - TX Only", or a geography that names only Texas or a
+ * Texas place), "No" geography, CLOSED, deadline passed.
  * Returns the not-eligible match, or null to send the grant to Claude.
  */
 export function deterministicPrefilter(grant: Grant, profile: OrganizationProfile, today = todayIso()): GrantMatch | null {
   // Letters only, so "Tx." and "Texas " still count as Texas.
   const state = (profile.state || '').trim().toUpperCase().replace(/[^A-Z]/g, '');
+  const stateCode = usStateCode(profile.state || '');
   const geo = asString(grant.geo_qualified).trim().toLowerCase();
   const disqualified = (reason: string, timing = 0): GrantMatch => ({
     ...matchBase(grant),
@@ -844,6 +901,13 @@ export function deterministicPrefilter(grant: Grant, profile: OrganizationProfil
   if (geo === 'yes - tx only' && state && !TX_STATE_VALUES.has(state)) {
     return disqualified(
       `Geographic restriction: this grant is limited to Texas organizations, and your organization is in ${profile.state}.`,
+    );
+  }
+  // Only for a real state other than Texas: an unknown or unreadable state is left to Claude.
+  if (stateCode && stateCode !== 'TX' && texasOnlyGeography(grant.geography, profile.city || '')) {
+    const where = cutText(asString(grant.geography).replace(/\s+/g, ' ').trim(), 160);
+    return disqualified(
+      `Geographic restriction: this grant is limited to Texas (where applicants must be: "${where}"), and your organization is in ${profile.state}.`,
     );
   }
   if (geo === 'no') {
@@ -905,19 +969,100 @@ export function foundationGrantId(foundation: Foundation): string {
   return `grant_${crypto.createHash('sha1').update(`foundation:${basis}`).digest('hex').slice(0, 12)}`;
 }
 
+/** A funder or foundation name as compared for duplicates: case, punctuation, "&" and a leading "The" ignored. */
+function orgKey(value: string): string {
+  return ` ${value.toLowerCase().replace(/&/g, ' and ').replace(/['’]/g, '').replace(/[^a-z0-9]+/g, ' ').trim().replace(/^the /, '')} `;
+}
+
+/** A funder or grant name without its "supported by X" credit, which names another funder ("DELTA Network, supported by Lilly Endowment"). */
+function withoutCredits(value: string): string {
+  return value.replace(
+    /\b(?:(?:supported|funded|sponsored|underwritten|made possible|administered|managed)\s+(?:in part\s+)?by|with (?:support|funding) from|in partnership with|in collaboration with|on behalf of)\b.*$/i,
+    '',
+  );
+}
+
+/** Words that make up generic names ("Catholic Foundation", "Community Fund"): such a name alone never marks a duplicate. */
+const GENERIC_NAME_WORDS = new Set([
+  'the', 'a', 'of', 'for', 'and', 'in', 'foundation', 'foundations', 'fund', 'funds', 'trust', 'inc', 'catholic', 'community', 'charitable',
+  'family', 'church', 'diocese', 'archdiocese', 'society', 'grant', 'grants', 'program', 'endowment',
+]);
+
+/** The ways a foundation's name can appear in a grant record: the whole name, and the name without its "(...)" part. */
+function foundationKeys(name: string): string[] {
+  const keys = [orgKey(name), orgKey(name.replace(/\([^)]*\)/g, ' '))];
+  return [...new Set(keys)].filter((key) => key.trim().length >= 4 && key.trim().split(' ').some((word) => !GENERIC_NAME_WORDS.has(word)));
+}
+
 /**
- * Category 5 foundations join matching as monitorable opportunities, as in
- * the Python router (skipped when a grant with that name already exists).
+ * Text that says a foundation takes no applications at all: no route in, whatever the wording
+ * around it ("N/A - peer network, not a grantmaker", "No application process; works with a
+ * focused set of partners").
  */
-export function withFoundations(grants: Grant[], foundations: Foundation[], userId: string): Grant[] {
+const NO_APPLICATIONS_ALWAYS = /\bnot a grant ?-?maker\b|\bpeer network\b|\bno (?:public |formal |open )?application process\b/;
+/** Text that says it takes no applications... */
+const NO_APPLICATIONS = [
+  /\b(?:by|through|upon) invitation\b|\binvitation[- ]only\b/,
+  /\bno (?:new |unsolicited |outside )?(?:grant )?(?:applications|requests|proposals)\b/,
+  /\b(?:does not|doesn't|do not|don't|cannot|can't|will not|won't|is not|isn't) (?:currently )?(?:take|taking|accept|accepting|consider|review|invite)(?: any)?(?: new)?(?: unsolicited| outside)?(?: grant)? (?:applications|requests|proposals|inquiries)\b/,
+  /\bunsolicited (?:applications|requests|proposals|inquiries)(?: for grants)? (?:are )?not (?:accepted|considered|reviewed)\b/,
+];
+/** ...unless it also describes a way in ("other requests start with a mailed preliminary letter"). */
+const OPEN_ROUTE =
+  /\bother (?:requests|applicants|organizations) (?:may|can|should|start|begin)\b|\bpreliminary (?:letter|proposal|inquiry)\b|\bletters? of (?:inquiry|intent|interest|request)\b|\bloi\b|\bapplication (?:window|period)\b|\b(?:may|can) (?:apply|submit)\b|\bapply (?:online|through|via|at)\b|\bnext (?:cycle|round|window)\b|\breopens?\b/;
+
+/**
+ * The text (application cycle or notes) in which a foundation says it takes no grant applications:
+ * "not a grantmaker", "peer network", "no application process", "by invitation", "does not accept
+ * unsolicited requests". Null when it can be applied to (or doesn't say).
+ */
+export function noApplicationsText(foundation: Pick<Foundation, 'application_cycle' | 'notes'>): string | null {
+  const cycle = asString(foundation.application_cycle).replace(/\s+/g, ' ').trim();
+  const notes = asString(foundation.notes).replace(/\s+/g, ' ').trim();
+  const all = `${cycle} ${notes}`.toLowerCase();
+  for (const text of [cycle, notes]) {
+    const lower = text.toLowerCase();
+    if (NO_APPLICATIONS_ALWAYS.test(lower)) return text;
+    if (NO_APPLICATIONS.some((pattern) => pattern.test(lower)) && !OPEN_ROUTE.test(all)) return text;
+  }
+  return null;
+}
+
+/** Why a foundation that takes no applications is not a grant to apply to (results read after it was matched). */
+export function noApplicationsReason(foundation: Foundation): string {
+  const said = cutText(noApplicationsText(foundation) ?? '', 200);
+  return `Not eligible: ${foundation.foundation_name} does not take grant applications${said ? ` ("${said}")` : ''}. It stays on your foundations list to monitor; there is nothing to apply to.`;
+}
+
+/** Why a foundation is not matched as its own "(Foundation)" grant. */
+export type FoundationSkip = 'duplicate' | 'no_applications';
+
+export interface FoundationGrant {
+  foundation: Foundation;
+  grant: Grant;
+  /** Null when it is matched; otherwise why not (it stays in the foundations list either way). */
+  skip: FoundationSkip | null;
+  /** duplicate: the grant record that already covers this funder. */
+  duplicate_of?: string;
+}
+
+/**
+ * Every foundation as a "(Foundation)" pseudo-grant, with whether matching skips it: a funder the
+ * grant database already covers (its name, or its name without "(...)", appears in a grant's
+ * funder or name, "supported by X" credits aside), a funder that takes no applications, or a
+ * second foundation with the same name.
+ */
+export function foundationGrants(grants: Grant[], foundations: Foundation[], userId: string): FoundationGrant[] {
+  const grantTexts = grants.map((grant) => ({
+    name: asString(grant.grant_name),
+    texts: [orgKey(withoutCredits(asString(grant.funder))), orgKey(withoutCredits(asString(grant.grant_name)))],
+  }));
   const names = new Set(grants.map((grant) => asString(grant.grant_name).toLowerCase()));
-  const all = [...grants];
   const now = new Date().toISOString();
+  const out: FoundationGrant[] = [];
   for (const foundation of foundations) {
     const pseudoName = `${foundation.foundation_name} (Foundation)`;
-    if (names.has(pseudoName.toLowerCase())) continue;
-    names.add(pseudoName.toLowerCase());
-    all.push({
+    const grant: Grant = {
       id: foundationGrantId(foundation),
       user_id: userId,
       grant_name: pseudoName,
@@ -935,15 +1080,43 @@ export function withFoundations(grants: Grant[], foundations: Foundation[], user
       eligibility_notes: null,
       funds_for: [],
       created_at: now,
-    });
+    };
+    const keys = foundationKeys(asString(foundation.foundation_name));
+    const covering = grantTexts.find((entry) => keys.some((key) => entry.texts.some((text) => text.includes(key))));
+    if (names.has(pseudoName.toLowerCase()) || covering) {
+      out.push({ foundation, grant, skip: 'duplicate', duplicate_of: covering?.name ?? pseudoName });
+      continue;
+    }
+    names.add(pseudoName.toLowerCase());
+    out.push({ foundation, grant, skip: noApplicationsText(foundation) ? 'no_applications' : null });
   }
-  return all;
+  return out;
+}
+
+/**
+ * Category 5 foundations join matching as monitorable opportunities, as in the Python router,
+ * except a foundation the grant database already covers (Koch Foundation next to "Koch
+ * Foundation Grants") and one that takes no applications (a peer network, invitation only): they
+ * stay in the foundations list but aren't scored. `includeSkipped` keeps them all (for looking a
+ * foundation up by id, e.g. an application opened before it was skipped).
+ */
+export function withFoundations(grants: Grant[], foundations: Foundation[], userId: string, options: { includeSkipped?: boolean } = {}): Grant[] {
+  const seen = new Set<string>();
+  const extra: Grant[] = [];
+  for (const entry of foundationGrants(grants, foundations, userId)) {
+    if (entry.skip && !options.includeSkipped) continue;
+    if (seen.has(entry.grant.id)) continue;
+    seen.add(entry.grant.id);
+    extra.push(entry.grant);
+  }
+  return [...grants, ...extra];
 }
 
 /**
  * A grant by id, including a foundation that matching showed as a
  * "(Foundation)" grant (stable id, not stored in the grant list). Lets the
- * writer open an application from any match.
+ * writer open an application from any match, and keeps working for a
+ * foundation matching now skips.
  */
 export async function getGrantOrFoundation(userId: string, grantId: string): Promise<Grant | null> {
   const grants = await getGrants(userId);
@@ -951,7 +1124,7 @@ export async function getGrantOrFoundation(userId: string, grantId: string): Pro
   if (direct) return direct;
   if (!/^grant_[0-9a-f]{12}$/.test(grantId)) return null;
   const foundations = await getFoundations(userId);
-  return withFoundations(grants, foundations, userId).find((grant) => grant.id === grantId) ?? null;
+  return withFoundations(grants, foundations, userId, { includeSkipped: true }).find((grant) => grant.id === grantId) ?? null;
 }
 
 export function buildMatchPrompt(grants: Grant[], profile: OrganizationProfile, today: string): string {
@@ -960,6 +1133,8 @@ export function buildMatchPrompt(grants: Grant[], profile: OrganizationProfile, 
     type: profile.organization_type,
     city: profile.city,
     state: profile.state,
+    // Diocesan programs are applied for through the diocese: Claude needs to know which one.
+    ...(profile.diocese ? { diocese: profile.diocese } : {}),
     has_school: profile.has_school,
     is_501c3: profile.is_501c3,
     facility_needs: profile.facility_needs,
@@ -988,6 +1163,8 @@ export function buildMatchPrompt(grants: Grant[], profile: OrganizationProfile, 
     // Only what the record has, so older grants don't fill the prompt with nulls.
     ...(grant.geography ? { geography: grant.geography } : {}),
     ...(grant.religious_eligibility ? { religious_eligibility: grant.religious_eligibility } : {}),
+    ...(asString(grant.religious_eligibility_text).trim() ? { religious_eligibility_text: cutText(asString(grant.religious_eligibility_text).trim(), 600) } : {}),
+    ...(Array.isArray(grant.applicants) && grant.applicants.length ? { applicants: grant.applicants } : {}),
     ...(grant.deadline_notes ? { deadline_notes: grant.deadline_notes } : {}),
     ...(grant.focus_areas?.length ? { funder_priorities: grant.focus_areas } : {}),
     ...(grant.typical_award ? { typical_award: grant.typical_award } : {}),
@@ -1037,7 +1214,9 @@ Return a JSON array with one object per grant:
 Reading the grant fields:
 - geography: where applicants must be. If the organization is outside it, score eligibility_fit near 0.
 - religious_eligibility: "eligible" = Catholic schools and parishes may apply; "secular_purpose_only" = they may apply, but only for a non-religious purpose (such as tutoring, food, safety or facilities), so judge need alignment on the org's secular needs; "unclear" = not stated, lower completeness and say "confirm religious eligibility" in the explanation.
-- deadline_notes: letter-of-inquiry steps, cycles, invitation-only rules. An invitation-only program scores low on timing.
+- religious_eligibility_text: the funder's own words about religious organizations, exactly as the source wrote them. Read them yourself (they can be more specific than religious_eligibility, or explain an "unclear"); if they rule out religious schools, score eligibility_fit near 0 and quote the words briefly in the explanation.
+- applicants: who submits the application ("school", "parish", "diocese", "teacher", "family", "nonprofit"). If the organization can't apply itself (only a diocese, teachers or families apply), say so in the explanation (for example "the diocese applies for this" or "teachers apply individually") and lower eligibility_fit, unless the profile shows the organization would go through that channel (its diocese runs the program for its schools, its teachers would apply).
+- deadline_notes: letter-of-inquiry steps, cycles, invitation-only rules. An invitation-only program scores low on timing. An application window that has closed with no next date posted lowers timing: say the next window has not been announced.
 - funder_track_record: what the funder has actually funded and at what levels, its record with Catholic schools, its giving trend, and anything it has announced (outlook). Real giving outweighs stated priorities: no grants to schools like this one, or a program that is ending, lowers the score; a record of funding similar Catholic schools raises it. Mention the track record in the explanation when it matters.
 
 Be conservative - if information is missing, lower the completeness score.

@@ -159,9 +159,24 @@ body {
   color: var(--score-weak);
 }
 
-.score-badge.not-eligible {
+/* The tier arrives as "not_eligible" (the engine's name); "not-eligible" is kept for older markup. */
+.score-badge.not-eligible,
+.score-badge.not_eligible {
   background: rgba(107, 114, 128, 0.2);
   color: var(--score-not-eligible);
+}
+
+/* A match whose grant is no longer in the database: no score, just a muted label. */
+.score-badge.removed {
+  background: transparent;
+  border: 1px dashed var(--card-border);
+  color: #9ca3af;
+  font-weight: 500;
+}
+
+.card.match-removed {
+  background: transparent;
+  border-style: dashed;
 }
 
 /* Cards */
@@ -261,17 +276,27 @@ body {
   font-weight: 500;
 }
 
-/* Grant facts on results: religious eligibility, geography, last verified */
+/* Grant facts on results: religious eligibility, who applies, geography, last verified.
+   The radius is half a one-line chip's height (16px line + 2px padding + 2px border), so a
+   one-line chip is a pill and a long one that wraps (a phone, a long region) is a rounded
+   rectangle instead of an oval. */
 .info-chip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   max-width: 100%;
   padding: 1px 8px;
-  border-radius: 9999px;
+  border-radius: 10px;
   border: 1px solid transparent;
   font-size: 12px;
+  line-height: 16px;
   font-weight: 500;
+}
+
+/* A wrapped chip keeps its icon on the first line. */
+.info-chip > svg {
+  align-self: flex-start;
+  margin-top: 2px;
 }
 
 .info-chip.good {
@@ -304,6 +329,28 @@ body {
 .light .info-chip.bad, .light .deadline-badge.soon, .light .due-text.soon { color: #991b1b; }
 .light .info-chip.muted, .light .deadline-badge.later, .light .due-text.later { color: #374151; }
 .light .deadline-badge.past { color: #4b5563; }
+
+/* Light mode: score colors and badges at 4.5:1 or more on white and on their tinted backgrounds
+   (the dark-mode greens, yellows and oranges are about 2:1 on white). */
+.light {
+  --score-excellent: #15803d;
+  --score-good: #a16207;
+  --score-possible: #c2410c;
+  --score-weak: #b91c1c;
+  --score-not-eligible: #4b5563;
+}
+.light .score-badge.excellent { color: #166534; }
+.light .score-badge.good { color: #854d0e; }
+.light .score-badge.possible { color: #9a3412; }
+.light .score-badge.weak { color: #991b1b; }
+.light .score-badge.not-eligible,
+.light .score-badge.not_eligible,
+.light .score-badge.removed { color: #374151; }
+
+/* Light mode: the gray labels on the results ("Amount:", "Deadline:", funder names, explanations)
+   are about 2.6:1 on white as gray-400; gray-600 is 7.5:1. */
+.light .text-gray-400,
+.light .text-gray-500 { color: #4b5563; }
 
 .due-text.soon { color: #fca5a5; }
 .due-text.near { color: #fcd34d; }

@@ -831,6 +831,8 @@ export default function Dashboard() {
     organization_name: '', organization_type: 'both', city: '', state: '', diocese: '', student_count: '',
   });
   const terminalRef = useRef<HTMLDivElement>(null);
+  /** The step bar's scrolling strip (it scrolls sideways when the seven steps don't fit). */
+  const stepBarRef = useRef<HTMLDivElement>(null);
   const resumedFor = useRef<string | null>(null);
   /** Set by "Try again": if the saved work still can't all be read, open with what did load. */
   const retried = useRef(false);
@@ -1046,6 +1048,25 @@ export default function Dashboard() {
     }
   }, [processingLogs]);
 
+  // Keep the current step in view in the step bar (on screens too narrow for all seven steps),
+  // when the step changes and when the window is resized. Only the bar scrolls, never the page.
+  useEffect(() => {
+    if (restoring) return;
+    const reveal = () => {
+      const bar = stepBarRef.current;
+      const active = bar?.querySelector<HTMLElement>('[aria-current="step"]');
+      if (!bar || !active || bar.scrollWidth <= bar.clientWidth) return;
+      const barBox = bar.getBoundingClientRect();
+      const box = active.getBoundingClientRect();
+      const gutter = 16;
+      if (box.left < barBox.left + gutter) bar.scrollLeft -= barBox.left + gutter - box.left;
+      else if (box.right > barBox.right - gutter) bar.scrollLeft += box.right - (barBox.right - gutter);
+    };
+    reveal();
+    window.addEventListener('resize', reveal);
+    return () => window.removeEventListener('resize', reveal);
+  }, [currentStep, restoring]);
+
   const addLog = (status: ProcessingLog['status'], message: string) => {
     setProcessingLogs((prev) => [...prev, logLine(status, message)]);
   };
@@ -1138,7 +1159,7 @@ export default function Dashboard() {
       let summary: string;
       if (source === 'seed') {
         result = await api.loadStarterDatabase();
-        summary = `Starter database loaded: ${result.added} grants added (${result.total_grants} total).`;
+        summary = `Starter database loaded: ${countOf(result.added, 'grant')} added (${result.total_grants} total).`;
         setStarterUpdate(null);
         // Results read each grant's current details, so they show the refreshed deadlines right away.
         if (matchResults) {
@@ -1147,15 +1168,20 @@ export default function Dashboard() {
         }
       } else if (source === 'grants_gov') {
         result = await api.searchGrantsGov();
-        summary = `Grants.gov: found ${result.found}, added ${result.added} new (${result.total_grants} total).`;
+        summary = `Grants.gov: found ${countOf(result.found ?? result.added, 'grant')}, added ${result.added} new (${result.total_grants} total).`;
       } else {
         result = await api.webDiscovery(discoveryFocus.trim() || undefined);
-        summary = `AI web discovery: found ${result.found}, added ${result.added} new (${result.total_grants} total).`;
+        summary = `AI web discovery: found ${countOf(result.found ?? result.added, 'grant')}, added ${result.added} new (${result.total_grants} total).`;
       }
       const notes = Array.isArray(result.notes) ? result.notes.join(' ') : '';
       setDiscoveryStatus(notes ? `${summary} ${notes}` : summary);
       if (currentStep === 'results') setResultsNotice(notes ? `${summary} ${notes}` : summary);
-      setDiscoveredTotal(result.total_grants);
+      // Every place that shows the database's size (the Continue button, the Website step) shows the new total.
+      const total = result.total_grants;
+      if (typeof total === 'number' && Number.isFinite(total)) {
+        setDiscoveredTotal(total);
+        setGrantStats((prev) => ({ ...(prev || {}), total_grants: total }));
+      }
     } catch (error) {
       console.error(`[GrantFinder] Discovery (${source}) failed:`, error);
       setDiscoveryStatus(`Discovery failed: ${errorDetail(error, 'request failed')}`);
@@ -1273,11 +1299,25 @@ export default function Dashboard() {
       goTo('documents');
     });
 
-  const handleWriteApplication = (grantId: string) =>
-    runBusy('Opening the application writer', async () => {
-      const app = await api.createApplication(grantId);
+  /** The application already started for this grant, if any. */
+  const applicationFor = (grantId: string) => applications.find((app) => app.grant_id === grantId);
+
+  /**
+   * Open the writer for a match. A grant no longer in the database can't be applied to; for one
+   * the person is not eligible for, say why and ask first (unless an application is already started).
+   */
+  const handleWriteApplication = (match: MatchItem) => {
+    if (isRemoved(match)) return;
+    if (match.score_tier === 'not_eligible' && !applicationFor(match.grant_id)) {
+      const reason = String(match.explanation || '').trim();
+      const question = `GrantFinder marked ${match.grant_name} as not eligible${reason ? `:\n\n${reason}` : '.'}\n\nWrite an application anyway?`;
+      if (!window.confirm(question)) return;
+    }
+    return runBusy('Opening the application writer', async () => {
+      const app = await api.createApplication(match.grant_id);
       router.push(`/writer?id=${app.id}`);
     });
+  };
 
   const handleDocumentUpload = (files: FileList | File[] | null) => {
     // While documents are being read the list can't change (a file added now would be skipped or lost).
@@ -1407,9 +1447,6 @@ export default function Dashboard() {
     saveResultsView(next);
   };
 
-  /** The application already started for this grant, if any. */
-  const applicationFor = (grantId: string) => applications.find((app) => app.grant_id === grantId);
-
   const downloadResults = async (format: ExportFormat) => {
     if (!matchResults?.session_id || exporting) return;
     setExporting(format);
@@ -1483,10 +1520,11 @@ export default function Dashboard() {
         </div>
       </header>
 
-      {/* Progress Steps (click any available step to jump there) */}
+      {/* Progress Steps (click any available step to jump there). Never squeezed: when the seven
+          steps don't fit, the bar scrolls sideways and keeps the current step in view. */}
       <div className="border-b border-[var(--card-border)] py-4">
-        <div className="max-w-4xl mx-auto px-4 overflow-x-auto">
-          <div className="flex items-center justify-between min-w-max md:min-w-0">
+        <div ref={stepBarRef} className="max-w-6xl mx-auto px-4 overflow-x-auto" data-step-bar>
+          <div className="flex items-center justify-between min-w-max">
             {STEPS.map((step, index) => {
               const Icon = step.icon;
               const isActive = !restoring && step.id === currentStep;
@@ -1790,7 +1828,7 @@ export default function Dashboard() {
                 disabled={(!grantFile && discoveredTotal === 0) || Boolean(busy) || discoveryBusy !== null}
                 className="btn btn-primary w-full mt-6"
               >
-                {grantFile ? 'Upload and Continue' : `Continue with ${discoveredTotal} Discovered Grants`}
+                {grantFile ? 'Upload and Continue' : `Continue with ${countOf(discoveredTotal, 'Discovered Grant')}`}
                 <ChevronRight className="w-5 h-5 shrink-0" aria-hidden="true" />
               </button>
               {busyBanner}
@@ -1807,8 +1845,8 @@ export default function Dashboard() {
 
               {(grantStats?.total_grants || discoveredTotal) > 0 && (
                 <div className="bg-[var(--terminal-bg)] p-4 rounded-lg mb-6">
-                  <p className="text-sm text-[var(--terminal-green)]">
-                    ✓ {grantStats?.total_grants || discoveredTotal} grants in your database
+                  <p className="text-sm text-[var(--terminal-green)]" data-grant-total>
+                    ✓ {countOf(grantStats?.total_grants || discoveredTotal, 'grant')} in your database
                   </p>
                 </div>
               )}
@@ -2353,7 +2391,7 @@ export default function Dashboard() {
                                 )}
                                 <button
                                   type="button"
-                                  onClick={() => handleWriteApplication(match.grant_id)}
+                                  onClick={() => handleWriteApplication(match)}
                                   disabled={Boolean(busy)}
                                   className="btn btn-primary text-sm"
                                   aria-label={`${action}: ${match.grant_name}`}
@@ -2373,7 +2411,14 @@ export default function Dashboard() {
               {/* How to list the matches (remembered in this browser) */}
               {(() => {
                 const all = matchResults.matches as MatchItem[];
-                const hidden = resultsView.hideNotEligible ? all.filter((m) => m.score_tier === 'not_eligible').length : 0;
+                // "Hide not eligible" also hides grants no longer in the database (they can't be applied to either).
+                const hiddenNotEligible = resultsView.hideNotEligible ? all.filter((m) => !isRemoved(m) && m.score_tier === 'not_eligible').length : 0;
+                const hiddenRemoved = resultsView.hideNotEligible ? all.filter(isRemoved).length : 0;
+                const hiddenParts = [
+                  ...(hiddenNotEligible ? [`${countOf(hiddenNotEligible, 'grant')} you are not eligible for`] : []),
+                  ...(hiddenRemoved ? [`${countOf(hiddenRemoved, 'grant')} no longer in your database`] : []),
+                ];
+                const hidden = hiddenNotEligible + hiddenRemoved;
                 return (
                   <div className="rounded-xl border border-[var(--card-border)] bg-[var(--card-bg)] px-4 py-3 text-sm flex flex-wrap items-center justify-between gap-x-6 gap-y-2">
                     <div className="flex items-center gap-2">
@@ -2398,7 +2443,7 @@ export default function Dashboard() {
                     </label>
                     {hidden > 0 && (
                       <p className="w-full text-gray-400" aria-live="polite">
-                        {hidden === 1 ? '1 grant you are not eligible for is hidden.' : `${hidden} grants you are not eligible for are hidden.`}
+                        {`${listInWords(hiddenParts)} ${hidden === 1 ? 'is' : 'are'} hidden.`}
                       </p>
                     )}
                   </div>
@@ -2407,10 +2452,32 @@ export default function Dashboard() {
 
               {/* Match List */}
               {(matchResults.matches as MatchItem[])
-                .filter((match) => !(resultsView.hideNotEligible && match.score_tier === 'not_eligible'))
-                .sort(resultsView.sort === 'deadline' ? byDeadline : byScore)
+                .filter((match) => !(resultsView.hideNotEligible && (match.score_tier === 'not_eligible' || isRemoved(match))))
+                .sort(removedLast(resultsView.sort === 'deadline' ? byDeadline : byScore))
                 .map((match) => {
+                if (isRemoved(match)) {
+                  // Its grant is gone: no score, no eligibility chips, nothing to apply to.
+                  return (
+                    <div key={match.grant_id} className="card match-removed" data-grant-removed>
+                      <div className="flex items-start justify-between gap-3 mb-3">
+                        <div className="min-w-0 break-words">
+                          <h3 className="text-lg font-bold">{match.grant_name}</h3>
+                          <p className="text-gray-400">{match.funder}</p>
+                        </div>
+                        <span className="score-badge removed shrink-0">Removed</span>
+                      </div>
+                      <p className="text-sm break-words">
+                        <span className="font-semibold">No longer in your grant database.</span>{' '}
+                        <span className="text-gray-400">
+                          It was retired or removed after this match was made, so this result is out of date. Run matching again to refresh your results.
+                        </span>
+                      </p>
+                    </div>
+                  );
+                }
                 const grantUrl = webUrl(match.url);
+                const notEligible = match.score_tier === 'not_eligible';
+                const scoreBefore = scoreBeforeOf(match);
                 return (
                   <div key={match.grant_id} className="card">
                     <div className="flex items-start justify-between gap-3 mb-4">
@@ -2441,13 +2508,18 @@ export default function Dashboard() {
                       </div>
                       <div className="min-w-0 break-words">
                         <span className="text-gray-400">Category:</span>
-                        <span className="ml-2 font-medium capitalize">
-                          {String(match.category || '').replace('_', ' ')}
-                        </span>
+                        <span className="ml-2 font-medium" data-category>{categoryLabel(match.category)}</span>
                       </div>
                     </div>
                     <GrantFacts match={match} />
-                    <p className="text-gray-400 mb-4 break-words">{match.explanation}</p>
+                    {scoreBefore !== null ? (
+                      <p className="mb-4 break-words" data-ruled-out>
+                        <span className="font-semibold">Was {scoreBefore}% when matched; now not eligible:</span>{' '}
+                        <span className="text-gray-400">{match.explanation}</span>
+                      </p>
+                    ) : (
+                      <p className="text-gray-400 mb-4 break-words">{match.explanation}</p>
+                    )}
                     <div className="flex flex-wrap items-center justify-between gap-3">
                       {grantUrl && (
                         <a
@@ -2455,21 +2527,24 @@ export default function Dashboard() {
                           target="_blank"
                           rel="noopener noreferrer"
                           className="text-[var(--primary)] text-sm hover:underline"
+                          aria-label={`Visit ${match.grant_name}'s website (opens in a new tab)`}
                         >
-                          Visit Grant Website →
+                          Visit Grant Website <span aria-hidden="true">→</span>
                         </a>
                       )}
                       <div className="flex flex-wrap items-center gap-3 min-w-0 ml-auto">
                         {match.contact && (
                           <span className="text-sm text-gray-400 min-w-0 break-words">Contact: {match.contact}</span>
                         )}
+                        {/* Not eligible: still possible, but secondary and only after saying why (handleWriteApplication asks). */}
                         <button
                           type="button"
-                          onClick={() => handleWriteApplication(match.grant_id)}
+                          onClick={() => handleWriteApplication(match)}
                           disabled={Boolean(busy)}
-                          className="btn btn-primary text-sm"
+                          className={`btn ${notEligible ? 'btn-secondary' : 'btn-primary'} text-sm`}
+                          aria-label={notEligible ? `Write an application for ${match.grant_name} anyway` : `Write an application for ${match.grant_name}`}
                         >
-                          Write Application →
+                          {notEligible ? 'Write anyway' : <>Write Application <span aria-hidden="true">→</span></>}
                         </button>
                       </div>
                     </div>
