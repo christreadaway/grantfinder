@@ -299,7 +299,7 @@ check(
   'grantDetails: defaults for a grant without details (older records)',
   same(details.grantDetails({}), {
     eligibility_notes: null, deadline_notes: null, geography: null, religious_eligibility: null, focus_areas: [], typical_award: null, last_verified: null, confidence: null,
-    funder_intel: null,
+    funder_intel: null, applicants: [], religious_eligibility_text: null,
   }) && same(details.grantDetails({ focus_areas: 'not a list' as unknown as string[] }).focus_areas, []),
   details.grantDetails({}),
 );
@@ -307,7 +307,7 @@ check(
   'grantDetails: copies the detail fields (and not the sources list)',
   same(details.grantDetails({ ...full, eligibility_notes: '501(c)(3)' }), {
     eligibility_notes: '501(c)(3)', deadline_notes: full.deadline_notes, geography: 'Texas', religious_eligibility: 'eligible', focus_areas: ['STEM', 'literacy'],
-    typical_award: '$8,000', last_verified: '2026-10-01', confidence: 'verified', funder_intel: null,
+    typical_award: '$8,000', last_verified: '2026-10-01', confidence: 'verified', funder_intel: null, applicants: [], religious_eligibility_text: null,
   }),
   details.grantDetails({ ...full, eligibility_notes: '501(c)(3)' }),
 );

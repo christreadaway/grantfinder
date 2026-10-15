@@ -148,6 +148,9 @@ export function grantDetails(grant: Partial<GrantBase>): GrantDetails {
     last_verified: grant.last_verified ?? null,
     confidence: grant.confidence ?? null,
     funder_intel: grant.funder_intel ?? null,
+    applicants: Array.isArray(grant.applicants) ? grant.applicants : [],
+    religious_eligibility_text: grant.religious_eligibility_text ?? null,
+    ...(grant.status ? { status: grant.status } : {}),
   };
 }
 

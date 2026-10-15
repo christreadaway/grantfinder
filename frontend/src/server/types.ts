@@ -28,6 +28,13 @@ export const GEO_QUALIFIED_VALUES: GeoQualified[] = ['Yes', 'No', 'Yes - TX Only
 export type ReligiousEligibility = 'eligible' | 'secular_purpose_only' | 'excluded' | 'unclear';
 export const RELIGIOUS_ELIGIBILITY_VALUES: ReligiousEligibility[] = ['eligible', 'secular_purpose_only', 'excluded', 'unclear'];
 
+/**
+ * Who submits the application. A school can use a teacher grant (its teachers apply) or a
+ * diocesan program (the diocese applies for it), but it can't apply for those itself.
+ */
+export type ApplicantType = 'school' | 'parish' | 'diocese' | 'teacher' | 'family' | 'nonprofit';
+export const APPLICANT_TYPES: ApplicantType[] = ['school', 'parish', 'diocese', 'teacher', 'family', 'nonprofit'];
+
 /** excellent 85-100, good 70-84, possible 50-69, weak 25-49, not_eligible 0-24 */
 export type MatchScoreTier = 'excellent' | 'good' | 'possible' | 'weak' | 'not_eligible';
 
@@ -90,6 +97,12 @@ export interface GrantBase {
   sources?: string[];
   /** What the funder has actually funded, at what levels, and what it has announced (grant research). */
   funder_intel?: FunderIntel | null;
+  /** Who submits the application (empty: not stated). */
+  applicants?: ApplicantType[];
+  /** The religious-eligibility words exactly as the source wrote them (spreadsheet, web discovery), kept even when they couldn't be read. */
+  religious_eligibility_text?: string | null;
+  /** Starter grants only: fields the person changed with their own spreadsheet, which a starter refresh keeps. */
+  user_edited_fields?: string[];
 }
 
 /** One real past award, the recipient described by type and city (never by name). */
@@ -130,7 +143,12 @@ export type GrantDetails = Pick<
   | 'last_verified'
   | 'confidence'
   | 'funder_intel'
->;
+  | 'applicants'
+  | 'religious_eligibility_text'
+> & {
+  /** The grant's current status (CLOSED once it is retired), so results can tell. */
+  status?: GrantStatus;
+};
 
 export interface Grant extends GrantBase {
   id: string;
@@ -289,6 +307,10 @@ export interface GrantMatch extends GrantDetails {
   explanation: string;
   evidence: string[];
   is_shortlisted: boolean;
+  /** Set when results are read and the grant is no longer in the person's database (retired or deleted). */
+  grant_removed?: boolean;
+  /** Set when results are read and the grant's current record rules it out (closed, excluded, deadline passed): the score it had when it was matched. */
+  score_before?: number | null;
 }
 
 export interface MatchResults {
