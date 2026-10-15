@@ -252,13 +252,20 @@ class ApiClient {
     let failingSince: number | null = null;
     let runInFlight = false;
     let lastRunAt = 0;
+    // Seconds after which Netlify cut off our run request (502/504), if it did.
+    let cutOffAfterS: number | null = null;
     const startRun = () => {
       if (runInFlight) return;
       runInFlight = true;
       lastRunAt = Date.now();
+      const runStarted = Date.now();
       this.client
         .post(`/api/jobs/${jobId}/run`, {}, { timeout: 90_000 })
-        .catch((error) => console.warn(`[GrantFinder] Running ${kind} (job ${jobId}) did not answer; still checking its status.`, error))
+        .catch((error) => {
+          const status = (error as AxiosError)?.response?.status;
+          if (status === 502 || status === 504) cutOffAfterS = Math.round((Date.now() - runStarted) / 1000);
+          console.warn(`[GrantFinder] Running ${kind} (job ${jobId}) did not answer${status ? ` (HTTP ${status})` : ''}; still checking its status.`, error);
+        })
         .finally(() => {
           runInFlight = false;
         });
@@ -301,7 +308,12 @@ class ApiClient {
         return job.result;
       }
       if (job.status === 'failed') {
-        const detail = job.error?.detail || 'This step failed. Use "Copy debug report" for details.';
+        let detail = job.error?.detail || 'This step failed. Use "Copy debug report" for details.';
+        // Netlify cut the request off well before the minute GrantFinder plans for:
+        // say so, because trying again won't help.
+        if (cutOffAfterS !== null && cutOffAfterS < 45) {
+          detail = `Netlify stopped this step after about ${cutOffAfterS} seconds. This Netlify plan gives each request less time than an AI step needs (GrantFinder plans for 60 seconds). Fix: in Netlify, add GRANTFINDER_BACKGROUND_JOBS=true if the plan includes background functions, or move the site to a team on Netlify's current Free plan, then redeploy (docs/deployment.md, "If AI steps stop after a few seconds").`;
+        }
         console.error(`[GrantFinder] ${kind} failed (job ${jobId}): ${detail}`);
         throw apiError(job.error?.status || 500, detail);
       }

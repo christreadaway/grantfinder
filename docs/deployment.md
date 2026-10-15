@@ -98,6 +98,21 @@ If your plan has them and you want each step to have more time (for example to u
 If that deploy fails with "Background Functions not allowed by team plan", delete the variable and
 deploy again.
 
+### If AI steps stop after a few seconds
+
+Netlify's documentation gives every plan 60 seconds per request, and GrantFinder plans for that.
+If an AI step (for example **Write my questions**) fails with **Netlify stopped this step after
+about N seconds** and N is well under a minute, this Netlify account allows less time per request.
+Two fixes, either one:
+
+1. If your plan includes background functions, add `GRANTFINDER_BACKGROUND_JOBS=true` and redeploy
+   (steps above).
+2. Otherwise move to one of Netlify's current credit-based plans, which all include background
+   functions (Free included): Netlify lets a legacy team switch from its billing settings (your
+   team dashboard says whether the team is on a Legacy or credit-based plan). Then add
+   `GRANTFINDER_BACKGROUND_JOBS=true` and redeploy. Switching changes billing for every site on
+   that team, so read Netlify's plan page first.
+
 ## Step 5 (optional). Turn on Google sign-in
 
 Guest sign-in is tied to one browser. Google sign-in follows you to any computer.
