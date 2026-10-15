@@ -28,23 +28,36 @@ import { optionalString, type RequestContext } from '../http';
 import { startJob } from '../jobs';
 import { logger } from '../log';
 import { normalizeUrl } from '../net';
-import { getGrants, getMatchResults, getProfile, updateMatchResults, updateProfile } from '../repo';
+import { getFoundations, getGrants, getMatchResults, getProfile, updateMatchResults, updateProfile } from '../repo';
 import type { Router } from '../router';
 import {
   applyQuestionnaireAnswers,
   cutText,
+  deterministicPrefilter,
   DOCUMENT_TEXT_LIMIT,
+  foundationGrants,
   isBlankAnswer,
   isMatchSessionId,
   latestMatchSessionId,
   MATCH_MAX_PARTS,
   minimalProfile,
+  noApplicationsReason,
   questionnaireKey,
+  tierCounts,
   type StoredQuestionnaire,
 } from '../services/ai';
 import { documentExtension, extractDocumentText, INVALID_DOCUMENT_TYPE, isAllowedDocument } from '../services/documents';
 import { kv } from '../store';
-import type { Grant, GrantMatch, MatchResults, Questionnaire, QuestionnaireAnswer, QuestionnaireQuestion } from '../types';
+import type {
+  Foundation,
+  Grant,
+  GrantMatch,
+  MatchResults,
+  OrganizationProfile,
+  Questionnaire,
+  QuestionnaireAnswer,
+  QuestionnaireQuestion,
+} from '../types';
 import { applyProfileUpdate, parseProfileBody } from './profile';
 
 export const NO_MATCH_RESULTS = 'No match results yet. Run matching first.';
@@ -347,33 +360,100 @@ export function withDeadlines(results: MatchResults, today = todayIso()): Omit<M
   };
 }
 
-/**
- * Each match with its grant's current details (deadline, amount, link, geography, religious
- * eligibility, funder priorities, last verified), so results saved before the starter database
- * was refreshed still show the latest facts. A match whose grant is gone keeps what it saved.
- */
-export function withGrantDetails(results: MatchResults, grants: Grant[]): MatchResults {
-  if (!Array.isArray(results.matches)) return results;
-  const byId = new Map(grants.map((grant) => [grant.id, grant]));
-  return {
-    ...results,
-    matches: results.matches.map((match) => {
-      const grant = byId.get(match.grant_id);
-      if (!grant) return match;
-      return {
-        ...match,
-        deadline: grant.deadline || match.deadline,
-        amount: grant.amount || match.amount,
-        url: grant.url || match.url,
-        ...grantDetails(grant),
-      };
-    }),
-  };
+/** Starts the explanation of a match whose grant was retired or deleted after matching. */
+export const GRANT_REMOVED_PREFIX = 'No longer in your grant database. ';
+
+export interface CurrentDetailsOptions {
+  /** YYYY-MM-DD the deadline check uses (default: today in GRANTFINDER_TIMEZONE). */
+  today?: string;
+  /** The person's foundations: their "(Foundation)" matches are found by id, and one that takes no applications is ruled out. */
+  foundations?: Foundation[];
 }
 
-/** Saved results as the website reads them: current grant details, then today's deadlines. */
+/**
+ * Saved results as they stand today, computed on every read (the stored results are never
+ * rewritten), so results saved before a grant changed don't keep offering it:
+ * - each match carries its grant's current details (deadline, amount, link, status, geography,
+ *   religious eligibility, who applies, funder priorities, last verified);
+ * - a match whose grant is no longer in the person's grant database (retired by a starter
+ *   refresh, or deleted) keeps what it saved, is flagged grant_removed and says so first in its
+ *   explanation, and counts in no tier;
+ * - a match the grant's CURRENT record and the CURRENT profile now rule out (CLOSED, religious
+ *   organizations excluded, deadline passed, outside its area, a foundation that takes no
+ *   applications) becomes not eligible: score 0 with the reason, and score_before the score it
+ *   had (a match that was already not eligible is left as it was);
+ * - the tier counts are recomputed, best first, removed ones last.
+ */
+export function withGrantDetails(
+  results: MatchResults,
+  grants: Grant[],
+  profile: OrganizationProfile | null,
+  options: CurrentDetailsOptions = {},
+): MatchResults {
+  if (!Array.isArray(results.matches)) return results;
+  const today = options.today ?? todayIso();
+  const byId = new Map(grants.map((grant) => [grant.id, grant]));
+  const monitorOnly = new Map<string, string>();
+  for (const entry of foundationGrants(grants, options.foundations ?? [], results.user_id)) {
+    if (!byId.has(entry.grant.id)) byId.set(entry.grant.id, entry.grant);
+    if (entry.skip === 'no_applications') monitorOnly.set(entry.grant.id, noApplicationsReason(entry.foundation));
+  }
+  const person = profile ?? minimalProfile(results.user_id);
+
+  const matches = results.matches.map((match): GrantMatch => {
+    const grant = byId.get(match.grant_id);
+    if (!grant) {
+      return { ...match, grant_removed: true, explanation: `${GRANT_REMOVED_PREFIX}${match.explanation ?? ''}`.trim() };
+    }
+    const current: GrantMatch = {
+      ...match,
+      deadline: grant.deadline || match.deadline,
+      amount: grant.amount || match.amount,
+      url: grant.url || match.url,
+      ...grantDetails(grant),
+    };
+    if (match.score_tier === 'not_eligible') return current;
+    const reason = monitorOnly.get(grant.id);
+    const ruledOut = reason ? null : deterministicPrefilter(grant, person, today);
+    if (!reason && !ruledOut) return current;
+    return {
+      ...current,
+      score_before: match.score,
+      score: 0,
+      score_tier: 'not_eligible',
+      score_breakdown: ruledOut?.score_breakdown ?? { eligibility_fit: 0, need_alignment: 0, capacity_signals: 0, timing: 0, completeness: 100 },
+      explanation: reason ?? ruledOut?.explanation ?? '',
+      evidence: [],
+    };
+  });
+  // Best first (a match ruled out on read drops down); removed ones last. Stable, so ties keep their saved order.
+  matches.sort((a, b) => Number(Boolean(a.grant_removed)) - Number(Boolean(b.grant_removed)) || b.score - a.score);
+  return { ...results, matches, ...tierCounts(matches.filter((match) => !match.grant_removed)) };
+}
+
+/** What withGrantDetails needs to know about a person: their grants, foundations and profile. */
+export async function currentGrantFacts(userId: string): Promise<{ grants: Grant[]; foundations: Foundation[]; profile: OrganizationProfile | null }> {
+  const [grants, foundations, profile] = await Promise.all([getGrants(userId), getFoundations(userId), getProfile(userId)]);
+  return { grants, foundations, profile };
+}
+
+/** Saved results as they stand today (see withGrantDetails), with one log line when anything changed since they were saved. */
+export async function currentMatchResults(userId: string, results: MatchResults): Promise<MatchResults> {
+  const { grants, foundations, profile } = await currentGrantFacts(userId);
+  const current = withGrantDetails(results, grants, profile, { foundations });
+  if (Array.isArray(current.matches)) {
+    const removed = current.matches.filter((match) => match.grant_removed).length;
+    const ruledOut = current.matches.filter((match) => typeof match.score_before === 'number').length;
+    if (removed || ruledOut) {
+      logger.info('match_results_changed_since_matching', { user_id: userId, session_id: results.session_id, grants_removed: removed, now_not_eligible: ruledOut });
+    }
+  }
+  return current;
+}
+
+/** Saved results as the website reads them: as they stand today, then today's deadlines. */
 async function readableResults(userId: string, results: MatchResults) {
-  return withDeadlines(withGrantDetails(results, await getGrants(userId)));
+  return withDeadlines(await currentMatchResults(userId, results));
 }
 
 export function registerProcessingRoutes(router: Router): void {
