@@ -3,8 +3,8 @@
  * Port of backend/routers/discovery.py.
  *
  *   POST /api/discovery/seed        built-in curated database (instant)
- *   POST /api/discovery/grants-gov  Grants.gov federal search (background job discovery.grants_gov)
- *   POST /api/discovery/web-search  AI web discovery (background job discovery.web_search; needs the Claude key)
+ *   POST /api/discovery/grants-gov  Grants.gov federal search (job discovery.grants_gov)
+ *   POST /api/discovery/web-search  AI web discovery (job discovery.web_search; needs the Claude key)
  *   GET  /api/discovery/sources     where the user's grants came from
  *
  * Every source merges into the user's grants with name+funder deduplication.
@@ -106,7 +106,8 @@ export function registerDiscoveryRoutes(router: Router): void {
   /**
    * Search Grants.gov (free federal API) for open and forecasted
    * opportunities. Keywords come from the profile unless provided. Several
-   * requests of up to 30 seconds each, so it runs as a background job.
+   * requests, so it runs as a job (in direct job mode several at once, with
+   * shorter waits, so it ends within about a minute).
    */
   router.post('/api/discovery/grants-gov', async (ctx) => {
     const user = await ctx.user();

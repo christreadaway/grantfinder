@@ -74,13 +74,13 @@ interface AppState {
 
   // Grants
   grants: Grant[];
-  grantStats: any;
+  grantStats: Record<string, unknown> | null;
   setGrants: (grants: Grant[]) => void;
-  setGrantStats: (stats: any) => void;
+  setGrantStats: (stats: Record<string, unknown> | null) => void;
 
   // Profile
-  profile: any;
-  setProfile: (profile: any) => void;
+  profile: Record<string, unknown> | null;
+  setProfile: (profile: Record<string, unknown> | null) => void;
 
   // Match Results
   matchResults: MatchResults | null;

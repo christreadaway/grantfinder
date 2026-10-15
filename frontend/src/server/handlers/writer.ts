@@ -12,7 +12,7 @@
  */
 import { testMode } from '../config';
 import { ClaudeError, errorMessage, HttpError, isFatalClaudeError } from '../errors';
-import type { JobContext, JobHandler } from '../jobs';
+import type { JobContext, JobContinuation, JobHandler } from '../jobs';
 import { asRecord, asString, asStringList } from '../json';
 import { logger } from '../log';
 import { updateProfile } from '../repo';
@@ -65,9 +65,22 @@ const DRAFT_CONCURRENCY = 3;
 /**
  * No new section (or retry) starts after this long, so sections already in
  * flight (draft + voice check, a few minutes at most) finish inside Netlify's
- * 15-minute limit.
+ * 15-minute limit (background mode).
  */
 const DRAFT_START_BUDGET_MS = 10 * 60 * 1000;
+/**
+ * About how long one section takes (its draft plus the voice check). A section
+ * starts only with this much time left before the step's cutoff; the rest go to
+ * the next part (a step inside one Netlify request has about 50 seconds).
+ */
+const SECTION_ESTIMATE_MS = 40_000;
+/** What the grant-spec Claude call needs after the guidelines page is read. */
+const GRANT_SPEC_CALL_MS = 35_000;
+
+/** Time left before this step's Claude calls are cut off (no limit when the runner doesn't say). */
+function timeLeft(ctx: JobContext): number {
+  return typeof ctx.timeLeftMs === 'function' ? ctx.timeLeftMs() : Number.POSITIVE_INFINITY;
+}
 
 function runFor(ctx: JobContext, ai: WriterAI): WriterRun {
   return {
@@ -76,7 +89,13 @@ function runFor(ctx: JobContext, ai: WriterAI): WriterRun {
     applicationId: ctx.applicationId,
     note: (line) => ctx.note(line),
     progress: (message) => ctx.progress(message),
+    timeLeftMs: () => timeLeft(ctx),
   };
+}
+
+/** A whole number >= 0 from a job input field, else 0. */
+function countOf(value: unknown): number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : 0;
 }
 
 function input(ctx: JobContext): Record<string, unknown> {
@@ -141,7 +160,10 @@ async function grantSpecJob(ctx: JobContext): Promise<unknown> {
   } else if (grant.url && grant.url.trim()) {
     // Fall back to the source grantfinder already has (HTML or PDF, SSRF-safe).
     await ctx.progress('Reading the grant guidelines from the funder website...');
-    const fetched = await fetchGuidelines(grant.url);
+    // A slow site must leave the Claude call its time (a step inside one Netlify request has
+    // about 50 seconds in all): 15 seconds there, the usual 30 in a long background run.
+    const fetchTimeoutMs = Math.min(30_000, Math.max(5_000, timeLeft(ctx) - GRANT_SPEC_CALL_MS));
+    const fetched = await fetchGuidelines(grant.url, fetchTimeoutMs);
     if (fetched.ok) {
       guidelines = fetched.text;
       note = `Guidelines fetched from ${grant.url}`;
@@ -276,14 +298,20 @@ async function draftJob(ctx: JobContext): Promise<unknown> {
   const gaps = await getGaps(ctx.userId, app.id);
   assertDraftAllowed(app, gaps);
 
-  const onlySection = asString(input(ctx).section_id);
-  const onlyMissing = (input(ctx) as { only_missing?: unknown }).only_missing === true;
+  const params = input(ctx);
+  const onlySection = asString(params.section_id);
+  const onlyMissing = params.only_missing === true;
+  // An explicit list: the next part of a run that did not fit in one step (each section once).
+  const listed = new Set(asStringList(params.section_ids));
   // Earlier drafts, so a redraft keeps the replaced text in the section's history.
   const priorDrafts = new Map((await listSectionDrafts(ctx.userId, app.id)).map((draft) => [draft.section_id, draft]));
   // Sections that already have a draft written for the CURRENT question.
   const covered = new Set(draftsVsSpec([...priorDrafts.values()], spec).current.map((draft) => draft.section_id));
   let targets = spec.required_sections;
-  if (onlySection) {
+  if (listed.size) {
+    targets = spec.required_sections.filter((section) => listed.has(section.id));
+    if (!targets.length) throw new HttpError(404, WRITER_MESSAGES.draftSectionNotInSpec);
+  } else if (onlySection) {
     targets = spec.required_sections.filter((section) => section.id === onlySection);
     if (!targets.length) throw new HttpError(404, WRITER_MESSAGES.draftSectionNotInSpec);
   } else if (onlyMissing) {
@@ -300,7 +328,12 @@ async function draftJob(ctx: JobContext): Promise<unknown> {
   const run = runFor(ctx, await ctx.claude());
   const started = Date.now();
   const total = queue.length;
-  const outOfTime = () => Date.now() - started > DRAFT_START_BUDGET_MS;
+  // Numbering across the parts of one run ("Drafting section 4 of 6"): earlier parts drafted progress_offset sections.
+  const progressOffset = countOf(params.progress_offset);
+  const progressTotal = Math.max(countOf(params.progress_total), progressOffset + total);
+  // A section starts only if it can finish in this step; the rest continue in the next part.
+  const outOfTime = () => Date.now() - started > DRAFT_START_BUDGET_MS || timeLeft(ctx) < SECTION_ESTIMATE_MS;
+  let startedCount = 0;
   const drafted = new Map<string, SectionDraft>();
   let failed: Array<{ section: RequiredSection; error: unknown }> = [];
   const skipped: RequiredSection[] = [];
@@ -365,23 +398,27 @@ async function draftJob(ctx: JobContext): Promise<unknown> {
       const index = shared.next++;
       if (index >= total) return;
       const section = queue[index];
-      if (outOfTime()) {
+      // Every part starts at least one section, so a run always moves forward.
+      if (startedCount > 0 && outOfTime()) {
         skipped.push(section);
         continue;
       }
-      await ctx.progress(`Drafting section ${index + 1} of ${total}: ${section.title}`);
+      startedCount++;
+      await ctx.progress(`Drafting section ${progressOffset + index + 1} of ${progressTotal}: ${section.title}`);
       await draftOne(section);
     }
   };
   await Promise.all(Array.from({ length: Math.min(DRAFT_CONCURRENCY, total) }, () => worker()));
 
   // Second chance, one at a time, for sections that hit a passing problem
-  // (rate limit or overload that outlasted the client's retries, an unreadable answer).
-  if (shared.fatal === null && failed.length && !outOfTime()) {
+  // (rate limit or overload that outlasted the client's retries, an unreadable answer),
+  // when the wait and one more section still fit in this step.
+  const busyFailure = failed.some(({ error }) => error instanceof ClaudeError && (error.kind === 'rate_limit' || error.kind === 'overloaded'));
+  const retryWaitMs = testMode() ? 50 : busyFailure ? 20000 : 2000;
+  if (shared.fatal === null && failed.length && !outOfTime() && timeLeft(ctx) - retryWaitMs >= SECTION_ESTIMATE_MS) {
     const retry = failed;
     failed = [];
-    const busy = retry.some(({ error }) => error instanceof ClaudeError && (error.kind === 'rate_limit' || error.kind === 'overloaded'));
-    await new Promise((resolve) => setTimeout(resolve, testMode() ? 50 : busy ? 20000 : 2000));
+    await new Promise((resolve) => setTimeout(resolve, retryWaitMs));
     for (const item of retry) {
       if (shared.fatal !== null || outOfTime()) {
         failed.push(item);
@@ -395,29 +432,54 @@ async function draftJob(ctx: JobContext): Promise<unknown> {
 
   if (drafted.size) await touchApplication(ctx.userId, app.id, { status: 'drafting' });
 
+  // Earlier parts of this run drafted progress_offset sections (a run only continues when nothing failed).
+  const draftedInRun = progressOffset + drafted.size;
   if (shared.fatal !== null) {
     // Bad key, no credits, unknown model: every section would fail the same way.
-    if (!drafted.size) throw shared.fatal;
+    if (!draftedInRun) throw shared.fatal;
     throw new HttpError(
       failureStatus(shared.fatal),
-      `${failureDetail(shared.fatal)} (${drafted.size} of ${total} sections were drafted and saved before this.)`,
+      `${failureDetail(shared.fatal)} (${draftedInRun} of ${progressTotal} sections were drafted and saved before this.)`,
     );
   }
-  if (failed.length && !drafted.size && !skipped.length) throw failed[0].error;
-  if (failed.length || skipped.length) {
+  if (failed.length && !draftedInRun && !skipped.length) throw failed[0].error;
+  if (failed.length) {
     const parts = [
       ...failed.map(({ section, error }) => `"${section.title}" (${failureDetail(error)})`),
-      ...skipped.map((section) => `"${section.title}" (not started: stopped early to finish within the 15-minute limit)`),
+      ...skipped.map((section) => `"${section.title}" (not started: no time left in this step)`),
     ];
     throw new HttpError(
-      failed.length ? failureStatus(failed[0].error) : 503,
-      `Drafted and saved ${drafted.size} of ${total} sections. Not drafted: ${parts.join('; ')}. ` +
+      failureStatus(failed[0].error),
+      `Drafted and saved ${draftedInRun} of ${progressTotal} sections. Not drafted: ${parts.join('; ')}. ` +
         `The saved sections are kept. ${howToFinish([...failed.map((item) => item.section), ...skipped], covered)}`,
     );
   }
 
+  const sections = targets.filter((section) => drafted.has(section.id)).map((section) => drafted.get(section.id) as SectionDraft);
+  if (skipped.length) {
+    // More than fits in one step: the website starts the next part with the sections not started
+    // yet (by id, so a Redraft All never redoes a section this run already redrafted).
+    const next: JobContinuation = {
+      path: `/api/writer/applications/${app.id}/draft`,
+      body: {
+        section_ids: skipped.map((section) => section.id),
+        progress_offset: progressOffset + (total - skipped.length),
+        progress_total: progressTotal,
+      },
+    };
+    ctx.note(`Drafted ${drafted.size} section(s) in this part; continuing with ${skipped.map((section) => section.id).join(', ')}.`);
+    logger.info('draft_part_finished', {
+      correlation_id: app.correlation_id,
+      app_id: app.id,
+      sections: drafted.size,
+      remaining: skipped.length,
+      ms: Date.now() - started,
+    });
+    return { sections, __continue: next };
+  }
+
   logger.info('draft_finished', { correlation_id: app.correlation_id, app_id: app.id, sections: drafted.size, ms: Date.now() - started });
-  return { sections: targets.filter((section) => drafted.has(section.id)).map((section) => drafted.get(section.id) as SectionDraft) };
+  return { sections };
 }
 
 // =============================================================================

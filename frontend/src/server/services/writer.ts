@@ -109,7 +109,19 @@ export const SECTION_NOTES = {
   refinedClaims: 'Revised: the claim check is from the earlier draft. Re-check any new numbers or names.',
   redraftKept:
     'This section changed while it was being redrafted, so the saved text was kept. The new draft is the newest of the earlier versions.',
+  tightenSkipped:
+    'Over the limit: this step ran out of time before it could tighten the text automatically. Refine it again (for example "tighten to the limit") or edit it by hand.',
+  tightenFailed:
+    'Over the limit: the automatic tightening did not work this time. Refine it again (for example "tighten to the limit") or edit it by hand.',
 } as const;
+
+/** The note for banned phrases left in because the voice rewrite had no time to run. */
+export function enforceSkippedNote(hits: string[]): string {
+  return (
+    `Banned phrases left in (${hits.slice(0, 5).join(', ')}): this step ran out of time before it could rewrite them. ` +
+    'Refine this section (for example "remove these phrases") or edit it by hand.'
+  );
+}
 
 /** A refine whose section changed while Claude was writing is not saved (the person's text wins). */
 export function refineConflictMessage(title: string): string {
@@ -142,6 +154,20 @@ export interface WriterRun {
   note?: (line: string) => void;
   /** Updates the job's status line in the website. */
   progress?: (message: string) => Promise<void>;
+  /** Milliseconds left before this step's Claude calls are cut off (jobs.ts timeLeftMs); absent = no limit. */
+  timeLeftMs?: () => number;
+}
+
+/**
+ * An optional extra Claude call (the voice rewrite, the automatic tighten pass)
+ * starts only with at least this much time left. A step that runs inside one
+ * Netlify request has about 50 seconds; without the time, the section is
+ * saved flagged, with a note saying how to fix it.
+ */
+export const OPTIONAL_CALL_MIN_MS = 15_000;
+
+function noTimeForOptionalCall(run: WriterRun): boolean {
+  return run.timeLeftMs ? run.timeLeftMs() < OPTIONAL_CALL_MIN_MS : false;
 }
 
 // =============================================================================
@@ -601,10 +627,19 @@ export function draftsVsSpec(drafts: SectionDraft[], spec: GrantSpec): { current
 }
 
 /** Read a grant's guidelines from its website (HTML or PDF, SSRF-safe). Never throws. */
-export async function fetchGuidelines(url: string): Promise<{ ok: boolean; text: string; reason: string }> {
-  const page = await fetchPage(normalizeUrl(url), { maxChars: 60000 });
+export async function fetchGuidelines(url: string, timeoutMs = 30_000): Promise<{ ok: boolean; text: string; reason: string }> {
+  // fetchPage's timeout covers the download, not its DNS check or reading a PDF: a hard
+  // stop here keeps the step inside its time budget whatever the network does.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const hardStop = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), timeoutMs + 2_000);
+  });
+  const page = await Promise.race([fetchPage(normalizeUrl(url), { maxChars: 60000, timeoutMs }), hardStop]).finally(() => clearTimeout(timer));
+  if (!page) return { ok: false, text: '', reason: `Timed out after ${Math.round(timeoutMs / 1000)} seconds` };
   if (page.ok) return { ok: true, text: page.text, reason: '' };
-  const reason = page.status !== null && page.status >= 400 ? `HTTP ${page.status}` : page.error || 'no readable text';
+  let reason = page.status !== null && page.status >= 400 ? `HTTP ${page.status}` : page.error || 'no readable text';
+  // fetchPage's timeout message assumes its default; say how long this read was allowed.
+  if (/^Timed out after/.test(reason)) reason = `Timed out after ${Math.round(timeoutMs / 1000)} seconds`;
   return { ok: false, text: '', reason };
 }
 
@@ -1155,7 +1190,10 @@ Return ONLY a JSON object:
   applyCompliance(draft, section, profile);
 
   // Enforce voice: deterministic detect, AI rewrite if violated.
-  if (draft.banned_phrase_hits.length) return enforceVoice(run, draft, section, profile);
+  if (draft.banned_phrase_hits.length) {
+    if (noTimeForOptionalCall(run)) return skipEnforce(run, draft);
+    return enforceVoice(run, draft, section, profile);
+  }
   return draft;
 }
 
@@ -1204,10 +1242,17 @@ Return ONLY a JSON object: {"draft": "the revised section text"}`;
   }
   applyCompliance(draft, section, profile);
 
-  if (draft.banned_phrase_hits.length) draft = await enforceVoice(run, draft, section, profile);
+  if (draft.banned_phrase_hits.length) {
+    draft = noTimeForOptionalCall(run) ? skipEnforce(run, draft) : await enforceVoice(run, draft, section, profile);
+  }
 
   // Rule: if a revision pushes over the limit, produce a tightened version
   // (one automatic attempt; if still over, it stays flagged for the user).
+  if (draft.over_limit && allowAutoTighten && noTimeForOptionalCall(run)) {
+    addNote(draft, SECTION_NOTES.tightenSkipped);
+    run.note?.(`Auto-tighten of ${draft.section_id} skipped: not enough time left in this step.`);
+    return draft;
+  }
   if (draft.over_limit && allowAutoTighten) {
     const wordsOver = Boolean(section.word_limit && draft.word_count > section.word_limit);
     const tighten = wordsOver || !section.char_limit
@@ -1215,7 +1260,17 @@ Return ONLY a JSON object: {"draft": "the revised section text"}`;
       : `Tighten to at most ${section.char_limit} characters`;
     draft.compliance_notes.push(`Revision exceeded the limit; auto-tightening (${tighten}).`);
     await run.progress?.(`Tightening "${draft.title}" to the limit...`);
-    return refineSection(run, application, draft, section, profile, tighten, false);
+    try {
+      return await refineSection(run, application, draft, section, profile, tighten, false);
+    } catch (error) {
+      // A bad key or no credits fails the step; a passing problem (overload, the step's time
+      // limit) keeps the revision, flagged OVER LIMIT, instead of throwing it away.
+      if (isFatalClaudeError(error)) throw error;
+      logger.warn('auto_tighten_failed', { correlation_id: run.correlationId, section_id: draft.section_id, error: errorMessage(error) });
+      run.note?.(`Auto-tighten of ${draft.section_id} failed, kept the revision flagged: ${errorMessage(error)}`);
+      addNote(draft, SECTION_NOTES.tightenFailed);
+      return draft;
+    }
   }
   return draft;
 }
@@ -1223,6 +1278,13 @@ Return ONLY a JSON object: {"draft": "the revised section text"}`;
 // =============================================================================
 // Stage: Enforce - voice check (PRD 4.9)
 // =============================================================================
+
+/** No time for the voice rewrite: keep the section flagged (export stays blocked) and say how to fix it. */
+function skipEnforce(run: WriterRun, sectionDraft: SectionDraft): SectionDraft {
+  addNote(sectionDraft, enforceSkippedNote(sectionDraft.banned_phrase_hits));
+  run.note?.(`Voice rewrite of ${sectionDraft.section_id} skipped: not enough time left in this step.`);
+  return sectionDraft;
+}
 
 export async function enforceVoice(
   run: WriterRun,

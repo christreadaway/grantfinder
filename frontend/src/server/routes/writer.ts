@@ -394,19 +394,52 @@ async function draftSectionsRoute(ctx: RequestContext): Promise<Response> {
   const body = await ctx.json();
   const sectionId = optionalString(body, 'section_id');
   const onlyMissing = body.only_missing === true;
+  // The next part of a run that did not fit in one step sends the sections still to draft,
+  // and where the "Drafting section N of TOTAL" numbering stands.
+  const sectionIds = sectionIdList(body.section_ids);
+  const progressOffset = optionalCount(body.progress_offset, 'progress_offset');
+  const progressTotal = optionalCount(body.progress_total, 'progress_total');
   const app = await loadApplication(user.id, ctx.params.appId);
   await loadWriterProfile(user.id);
   const spec = await getGrantSpec(user.id, app.grant_id);
   if (!spec) throw new HttpError(400, WRITER_MESSAGES.specFirst);
   assertDraftAllowed(app, await getGaps(user.id, app.id));
-  if (sectionId && !spec.required_sections.some((section) => section.id === sectionId)) {
-    throw new HttpError(404, WRITER_MESSAGES.draftSectionNotInSpec);
-  }
+  const inSpec = (id: string) => spec.required_sections.some((section) => section.id === id);
+  if (sectionId && !inSpec(sectionId)) throw new HttpError(404, WRITER_MESSAGES.draftSectionNotInSpec);
+  if (sectionIds && !sectionIds.every(inSpec)) throw new HttpError(404, WRITER_MESSAGES.draftSectionNotInSpec);
   await requireApiKey(user.id);
-  return startJob(ctx, 'writer.draft', { app_id: app.id, section_id: sectionId || null, only_missing: onlyMissing }, {
+  const jobInput = {
+    app_id: app.id,
+    section_id: sectionId || null,
+    only_missing: onlyMissing,
+    ...(sectionIds ? { section_ids: sectionIds } : {}),
+    ...(progressOffset !== null ? { progress_offset: progressOffset } : {}),
+    ...(progressTotal !== null ? { progress_total: progressTotal } : {}),
+  };
+  return startJob(ctx, 'writer.draft', jobInput, {
     ...jobOptions(app),
     exclusiveKey: sectionsJobKey(app.id),
   });
+}
+
+/** An optional list of section ids (text), trimmed and without repeats; null when absent. */
+function sectionIdList(value: unknown): string[] | null {
+  if (value === undefined || value === null) return null;
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
+    throw new HttpError(422, 'Field "section_ids" must be a list of section ids.');
+  }
+  const ids = Array.from(new Set((value as string[]).map((id) => id.trim()).filter(Boolean)));
+  if (!ids.length) throw new HttpError(422, 'Field "section_ids" must list at least one section.');
+  return ids;
+}
+
+/** An optional whole number from 0 to 1000; null when absent. */
+function optionalCount(value: unknown, field: string): number | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 1000) {
+    throw new HttpError(422, `Field "${field}" must be a whole number from 0 to 1000.`);
+  }
+  return value;
 }
 
 // =============================================================================

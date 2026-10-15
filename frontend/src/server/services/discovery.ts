@@ -334,15 +334,30 @@ export interface GrantsGovSearchResult {
   notes: string[];
   /** One plain-English reason per keyword search that failed. */
   failures: string[];
+  /** Keyword searches attempted (skipped ones not counted). */
   searched: number;
+  /** Keyword searches not started because the step's time ran out (GrantsGovTiming.endBy). */
+  skipped: number;
+}
+
+/** Time limits for one Grants.gov search run (direct job mode must finish within about a minute). */
+export interface GrantsGovTiming {
+  /** Finish by this time (ms since epoch): no search starts after it, and searches in progress end by it. */
+  endBy?: number;
+  /** Longest wait for one keyword search (default 30 seconds). */
+  requestTimeoutMs?: number;
+  /** Keyword searches at the same time (default 1: one after another, as in the Python). */
+  concurrency?: number;
 }
 
 const GRANTS_GOV_TIMEOUT_MS = 30_000;
+/** A keyword search needs at least this long to be worth starting. */
+const GRANTS_GOV_MIN_START_MS = 1_000;
 
 /** Why a fetch failed, in words a person can act on. */
-function describeFetchError(error: unknown): string {
+function describeFetchError(error: unknown, timeoutMs = GRANTS_GOV_TIMEOUT_MS): string {
   const err = error as { name?: string; message?: string; cause?: unknown };
-  if (err?.name === 'TimeoutError' || err?.name === 'AbortError') return `no answer within ${GRANTS_GOV_TIMEOUT_MS / 1000} seconds`;
+  if (err?.name === 'TimeoutError' || err?.name === 'AbortError') return `no answer within ${Math.round(timeoutMs / 100) / 10} seconds`;
   const cause = err?.cause as { code?: string; message?: string; errors?: Array<{ code?: string }> } | undefined;
   const code = cause?.code || cause?.errors?.find((item) => item?.code)?.code;
   if (code) return `couldn't connect (${code})`;
@@ -360,16 +375,45 @@ interface GrantsGovHit {
   oppStatus?: unknown;
 }
 
+/** One keyword search's outcome: the answer, why it failed, or that time ran out before it started. */
+type KeywordOutcome = { payload: Record<string, unknown> } | { failure: string } | { skipped: true };
+
+/** One Search2 request. Throws with a plain-English message on any failure. */
+async function fetchGrantsGov(url: string, keyword: string, rows: number, timeoutMs: number): Promise<Record<string, unknown>> {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify({ keyword, oppStatuses: 'forecasted|posted', rows, startRecordNum: 0 }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) throw new Error(`Grants.gov answered HTTP ${response.status}`);
+  let payload: Record<string, unknown>;
+  try {
+    payload = asRecord(await response.json());
+  } catch {
+    throw new Error('Grants.gov sent an answer that is not JSON');
+  }
+  const errorCode = payload.errorcode;
+  if (typeof errorCode === 'number' && errorCode !== 0) {
+    throw new Error(`Grants.gov reported an error: ${textOf(payload.msg) || `code ${errorCode}`}`);
+  }
+  return payload;
+}
+
 /**
  * Search the Grants.gov Search2 API (public, no key) for open and forecasted
  * federal opportunities matching the keywords. One request per keyword; a
- * failed keyword is noted and skipped, as in the Python.
+ * failed keyword is noted and skipped, as in the Python. With `timing`
+ * (direct job mode) several keywords are searched at once with shorter
+ * waits, and keywords that no longer fit in the step are skipped; results
+ * are always read in keyword order, so notes and duplicates come out the same.
  */
 export async function searchGrantsGov(
   userId: string,
   keywords: string[],
   maxResults: number | null,
   onProgress?: (message: string) => Promise<void>,
+  timing: GrantsGovTiming = {},
 ): Promise<GrantsGovSearchResult> {
   const max = maxResults || GRANTS_GOV_MAX_RESULTS;
   const perKeyword = Math.max(10, Math.floor(max / Math.max(keywords.length, 1)));
@@ -378,34 +422,45 @@ export async function searchGrantsGov(
   const notes: string[] = [];
   const failures: string[] = [];
   const seenIds = new Set<string>();
+  const requestTimeout = timing.requestTimeoutMs ?? GRANTS_GOV_TIMEOUT_MS;
 
-  for (const [index, keyword] of keywords.entries()) {
-    await onProgress?.(`Searching Grants.gov for "${keyword}" (${index + 1} of ${keywords.length})...`);
-    let payload: Record<string, unknown>;
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', accept: 'application/json' },
-        body: JSON.stringify({ keyword, oppStatuses: 'forecasted|posted', rows: perKeyword, startRecordNum: 0 }),
-        signal: AbortSignal.timeout(GRANTS_GOV_TIMEOUT_MS),
-      });
-      if (!response.ok) throw new Error(`Grants.gov answered HTTP ${response.status}`);
+  const outcomes: KeywordOutcome[] = keywords.map(() => ({ skipped: true }));
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const index = next++;
+      if (index >= keywords.length) return;
+      const keyword = keywords[index];
+      const left = timing.endBy === undefined ? Number.POSITIVE_INFINITY : timing.endBy - Date.now();
+      if (left < GRANTS_GOV_MIN_START_MS) continue; // stays "skipped"
+      const timeoutMs = Math.min(requestTimeout, left);
+      await onProgress?.(`Searching Grants.gov for "${keyword}" (${index + 1} of ${keywords.length})...`);
       try {
-        payload = asRecord(await response.json());
-      } catch {
-        throw new Error('Grants.gov sent an answer that is not JSON');
+        outcomes[index] = { payload: await fetchGrantsGov(url, keyword, perKeyword, timeoutMs) };
+      } catch (error) {
+        const reason = describeFetchError(error, timeoutMs);
+        logger.warn('grants_gov_search_failed', { keyword, url, error: reason });
+        outcomes[index] = { failure: reason };
       }
-      const errorCode = payload.errorcode;
-      if (typeof errorCode === 'number' && errorCode !== 0) {
-        throw new Error(`Grants.gov reported an error: ${textOf(payload.msg) || `code ${errorCode}`}`);
-      }
-    } catch (error) {
-      const reason = describeFetchError(error);
-      logger.warn('grants_gov_search_failed', { keyword, url, error: reason });
-      notes.push(`Search '${keyword}' failed: ${reason}`);
-      failures.push(reason);
+    }
+  };
+  const workers = Math.min(Math.max(1, timing.concurrency ?? 1), keywords.length);
+  await Promise.all(Array.from({ length: workers }, () => worker()));
+
+  let skipped = 0;
+  for (const [index, keyword] of keywords.entries()) {
+    const outcome = outcomes[index];
+    if ('skipped' in outcome) {
+      skipped += 1;
+      notes.push(`Search '${keyword}' skipped: not enough time left in this step (each step on this site can run for about a minute)`);
       continue;
     }
+    if ('failure' in outcome) {
+      notes.push(`Search '${keyword}' failed: ${outcome.failure}`);
+      failures.push(outcome.failure);
+      continue;
+    }
+    const payload = outcome.payload;
 
     const hitsRaw = asRecord(payload.data).oppHits;
     const hits: GrantsGovHit[] = Array.isArray(hitsRaw) ? (hitsRaw as GrantsGovHit[]) : [];
@@ -441,8 +496,8 @@ export async function searchGrantsGov(
     }
   }
 
-  logger.info('grants_gov_search_done', { user_id: userId, keywords: keywords.length, failed: failures.length, found: grants.length });
-  return { grants, notes, failures, searched: keywords.length };
+  logger.info('grants_gov_search_done', { user_id: userId, keywords: keywords.length, failed: failures.length, skipped, found: grants.length });
+  return { grants, notes, failures, searched: keywords.length - skipped, skipped };
 }
 
 // =============================================================================
@@ -450,6 +505,13 @@ export async function searchGrantsGov(
 // =============================================================================
 
 export const WEB_DISCOVERY_PROMPT_ID = 'web_discovery_v1';
+
+/**
+ * Direct job mode (each step must end within about a minute): fewer web
+ * searches, at most one continuation of a paused turn, and a shorter list,
+ * so Claude can finish searching and writing in time.
+ */
+export const WEB_DISCOVERY_DIRECT = { maxSearches: 3, maxContinuations: 1, aim: '5-8' } as const;
 
 export const WEB_DISCOVERY_SCHEMA_HINT = `[
   {
@@ -466,8 +528,11 @@ export const WEB_DISCOVERY_SCHEMA_HINT = `[
   }
 ]`;
 
-/** The Python prompt, verbatim, filled from the profile. */
-export function buildWebDiscoveryPrompt(profile: OrganizationProfile | null, focus: string | null): string {
+/**
+ * The Python prompt, verbatim, filled from the profile. `aim` (how many
+ * opportunities to aim for) is shorter in direct job mode.
+ */
+export function buildWebDiscoveryPrompt(profile: OrganizationProfile | null, focus: string | null, aim = '8-15'): string {
   let profileLines: string[] = [];
   if (profile) {
     profileLines = [
@@ -500,7 +565,7 @@ Rules:
 - Only include grants you found real evidence for on the web (a funder page or credible listing). Never invent grants, amounts, or deadlines.
 - If you can't verify a deadline, use "Check website".
 - Include the direct URL you found for each grant.
-- Aim for 8-15 high-quality opportunities.
+- Aim for ${aim} high-quality opportunities.
 
 After searching, return ONLY a JSON array in exactly this shape (no other text after it):
 ${WEB_DISCOVERY_SCHEMA_HINT}`;

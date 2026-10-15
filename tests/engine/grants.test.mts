@@ -296,9 +296,11 @@ check(
   JSON.stringify(gov1.data?.notes) === JSON.stringify(["Search 'school security': 4 results", "Search 'food pantry': 2 results"]),
   gov1.data?.notes,
 );
+// Direct job mode searches several keywords at once, so requests may arrive in any order.
+const securityRequest = govRequests.find((r) => r.keyword === 'school security');
 check(
   'Grants.gov request body matches the Python (keyword, statuses, rows, start)',
-  govRequests.length === 2 && govRequests[0].keyword === 'school security' && govRequests[0].oppStatuses === 'forecasted|posted' && govRequests[0].rows === 25 && govRequests[0].startRecordNum === 0,
+  govRequests.length === 2 && securityRequest?.oppStatuses === 'forecasted|posted' && securityRequest.rows === 25 && securityRequest.startRecordNum === 0,
   govRequests,
 );
 grantsA = await grantsOf(tokenA);
@@ -325,12 +327,19 @@ govRequests.length = 0;
 await call('POST', '/api/discovery/grants-gov', { token: tokenA, json: { keywords: ['library'], max_results: 5 } });
 check('max_results 5 -> at least 10 rows per keyword (Python rule)', govRequests[0]?.rows === 10, govRequests[0]);
 
+/** Keywords in the order the result notes list them ("Search 'x': N results"), which is the search order. */
+const notedKeywords = (notes: unknown): string[] =>
+  (Array.isArray(notes) ? notes : []).map((note) => /^Search '(.+?)'/.exec(String(note))?.[1] ?? '').filter(Boolean);
+const sameSet = (a: string[], b: string[]) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
+
 govRequests.length = 0;
 const govDefault = await call('POST', '/api/discovery/grants-gov', { token: tokenB });
+const DEFAULT_KEYWORDS = ['nonprofit security', 'private school education', 'faith-based community'];
 check(
   'no keywords and no profile -> the 3 default keywords',
-  govDefault.status === 200 && JSON.stringify(govRequests.map((r) => r.keyword)) === JSON.stringify(['nonprofit security', 'private school education', 'faith-based community']) && govRequests[0].rows === 16,
-  govRequests.map((r) => r.keyword),
+  govDefault.status === 200 && sameSet(govRequests.map((r) => r.keyword), DEFAULT_KEYWORDS) && govRequests.every((r) => r.rows === 16) &&
+    JSON.stringify(notedKeywords(govDefault.data?.notes)) === JSON.stringify(DEFAULT_KEYWORDS),
+  [govRequests.map((r) => r.keyword), govDefault.data?.notes],
 );
 
 govMode = 'partial';
@@ -551,12 +560,12 @@ await repo.saveProfile(
 );
 govRequests.length = 0;
 const govProfile = await call('POST', '/api/discovery/grants-gov', { token: tokenA, json: {} });
+const PROFILE_KEYWORDS = ['nonprofit security grant', 'nonprofit security', 'private school education', 'faith-based community', 'community facilities', 'food assistance nonprofit'];
 check(
   'keywords derived from the profile (security first, at most 6)',
-  govProfile.status === 200 &&
-    JSON.stringify(govRequests.map((r) => r.keyword)) ===
-      JSON.stringify(['nonprofit security grant', 'nonprofit security', 'private school education', 'faith-based community', 'community facilities', 'food assistance nonprofit']),
-  govRequests.map((r) => r.keyword),
+  govProfile.status === 200 && sameSet(govRequests.map((r) => r.keyword), PROFILE_KEYWORDS) &&
+    JSON.stringify(notedKeywords(govProfile.data?.notes)) === JSON.stringify(PROFILE_KEYWORDS),
+  [govRequests.map((r) => r.keyword), govProfile.data?.notes],
 );
 
 const webFocus = await call('POST', '/api/discovery/web-search', { token: tokenA, json: { focus: '  playground equipment  ' } });

@@ -226,6 +226,7 @@ const unauth = await Promise.all([
   api('GET', '/api/processing/profile'),
   api('PUT', '/api/processing/profile', { json: {} }),
   api('POST', '/api/processing/match-grants'),
+  api('POST', '/api/processing/match-grants/continue', { json: {} }),
   api('GET', '/api/processing/match-results/latest'),
   api('GET', '/api/processing/match-results/x'),
   api('POST', '/api/processing/shortlist/x'),
@@ -964,6 +965,19 @@ check(
 
 const latestNone = await api('GET', '/api/processing/match-results/latest', { token: tokenA });
 check('latest match results before any run -> 404', latestNone.status === 404 && latestNone.data.detail === NO_MATCH_RESULTS, latestNone.data);
+
+// The follow-up part of matching (direct job mode) checks its input at once.
+const continueChecks = await Promise.all([
+  api('POST', '/api/processing/match-grants/continue', { token: tokenA, json: {} }),
+  api('POST', '/api/processing/match-grants/continue', { token: tokenA, json: { session_id: '../profiles/x' } }),
+  api('POST', '/api/processing/match-grants/continue', { token: tokenA, json: { session_id: 'match_20261014T000000000Z_00000000', part: 2 } }),
+]);
+check(
+  'match-grants/continue: a missing or malformed session id -> 422; unknown results -> 404 (no job started)',
+  continueChecks[0].status === 422 && /session_id/.test(continueChecks[0].data.detail) && continueChecks[1].status === 422 &&
+    continueChecks[2].status === 404 && continueChecks[2].data.detail === 'Session not found' && continueChecks.every((r) => !r.data?.job_id),
+  continueChecks.map((r) => [r.status, r.data]),
+);
 
 // ===========================================================================
 // 7. Matching (profile in TX)

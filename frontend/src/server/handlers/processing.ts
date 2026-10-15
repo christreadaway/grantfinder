@@ -9,32 +9,41 @@
  */
 import { JOB_MAX_RUNTIME_MS } from '../config';
 import { ClaudeError, errorMessage, HttpError, isFatalClaudeError } from '../errors';
-import { jobsPrefix, type Job, type JobContext, type JobHandler } from '../jobs';
+import { jobsPrefix, type Job, type JobContext, type JobContinuation, type JobHandler } from '../jobs';
 import { logger } from '../log';
-import { crawlSite, type CrawlResult } from '../net';
-import { getFoundations, getGrants, getProfile, saveMatchResults, updateProfile } from '../repo';
+import { crawlSite, type CrawlResult, type CrawlTiming } from '../net';
+import { getFoundations, getGrants, getMatchResults, getProfile, saveMatchResults, updateMatchResults, updateProfile } from '../repo';
 import {
   buildDocumentPrompt,
   buildQuestionnairePrompt,
   buildScanPrompt,
   defaultQuestionnaire,
-  matchGrants,
+  isRetryableUnscored,
+  MATCH_BATCH_ROOM_MS,
+  MATCH_DIRECT_CONCURRENCY,
+  MATCH_MAX_PARTS,
+  matchGrantsWithRun,
   MAX_PROFILE_EVIDENCE,
   mergeDocumentIntoProfile,
   mergeScanIntoProfile,
   minimalProfile,
+  NOT_AI_SCORED,
+  NOT_SCORED_OUT_OF_TIME_DIRECT,
   parseDocumentSignals,
   parseQuestionnaire,
   parseScanResult,
   PROMPT_IDS,
   QUESTIONNAIRE_GRANT_SAMPLE,
   questionnaireKey,
+  scoreMatches,
   withFoundations,
+  withRescoredMatches,
   type DocumentMergeStats,
+  type MatchRunOptions,
   type StoredQuestionnaire,
 } from '../services/ai';
 import { kv } from '../store';
-import type { DocumentExtractionResult, MatchResults, Questionnaire, WebsiteScanResult } from '../types';
+import type { DocumentExtractionResult, Grant, MatchResults, Questionnaire, WebsiteScanResult } from '../types';
 
 export const PROCESSING_JOB_KINDS = {
   scanWebsite: 'processing.scan_website',
@@ -66,6 +75,16 @@ export interface DocumentJobInput {
 export const SCAN_SUPERSEDED =
   'You started a newer website scan while this one was running, so this one was not saved to your profile. ' +
   "Wait for the newer scan to finish; its results are the ones that count.";
+
+/** Direct mode: the scan's Claude call was still running when the step's minute ended. */
+export const SCAN_OUT_OF_TIME =
+  "Website scan failed: Claude didn't finish reading your website in time (each step on this site can run for about a minute). " +
+  'Try the scan again; if it keeps happening, use "Enter the basics by hand" instead.';
+
+/** A Claude call stopped by this step's own time limit (direct mode: about a minute per step). */
+function stoppedByTimeLimit(ctx: JobContext, error: unknown): boolean {
+  return ctx.mode === 'direct' && error instanceof ClaudeError && error.kind === 'timeout' && ctx.timeLeftMs() < 1_000;
+}
 
 /**
  * Non-fatal Claude failures in a single-call step (scan, document) fail the
@@ -141,6 +160,17 @@ async function stopIfSuperseded(ctx: JobContext, stage: 'before_claude' | 'befor
   throw new HttpError(409, SCAN_SUPERSEDED);
 }
 
+/**
+ * Direct mode: crawling ends early enough to leave Claude most of the step's
+ * minute (about 35 of 50 seconds), and no new pages start in the last 3
+ * seconds before that. Shorter budgets (tests) scale down the same way.
+ */
+function directCrawlTiming(ctx: JobContext): CrawlTiming {
+  const budget = ctx.timeLeftMs();
+  const forClaude = Math.min(35_000, Math.round(budget * 0.7));
+  return { endBy: ctx.deadline - forClaude, minStartMs: Math.min(3_000, Math.round(budget * 0.06)), pageTimeoutMs: 10_000 };
+}
+
 async function scanWebsite(ctx: JobContext): Promise<WebsiteScanResult> {
   const input = ctx.input as ScanJobInput;
   const churchUrl = input.church_url || null;
@@ -148,12 +178,13 @@ async function scanWebsite(ctx: JobContext): Promise<WebsiteScanResult> {
   const urls = Array.from(new Set([churchUrl, schoolUrl].filter((url): url is string => Boolean(url))));
   await ctx.progress(`Reading ${urls.join(' and ')}...`);
 
+  const timing: CrawlTiming = ctx.mode === 'direct' ? directCrawlTiming(ctx) : {};
   // Same URL for church and school: crawl it once.
   const crawls = new Map<string, Promise<CrawlResult>>();
   const crawl = (url: string): Promise<CrawlResult> => {
     let pending = crawls.get(url);
     if (!pending) {
-      pending = crawlSite(url);
+      pending = crawlSite(url, undefined, timing);
       crawls.set(url, pending);
     }
     return pending;
@@ -170,6 +201,9 @@ async function scanWebsite(ctx: JobContext): Promise<WebsiteScanResult> {
     websiteContent += `\n\n=== ${label} WEBSITE (${url}) ===\n${result.text}`;
     if (!urlsRead.includes(url)) urlsRead.push(url);
     ctx.note(`Read ${result.pagesRead.length} page(s) from ${url}: ${result.pagesRead.join(', ')}`);
+    if (result.skippedForTime) {
+      ctx.note(`Stopped reading ${url} early to leave Claude time (each step can run for about a minute here); ${result.skippedForTime} more page(s) not read`);
+    }
   };
   add('CHURCH', churchUrl, church);
   add('SCHOOL', schoolUrl, school);
@@ -192,6 +226,10 @@ async function scanWebsite(ctx: JobContext): Promise<WebsiteScanResult> {
   try {
     answer = (await ai.call({ stage: 'scan', promptId: PROMPT_IDS.scan, prompt: buildScanPrompt(websiteContent), maxTokens: 2000 })).text;
   } catch (error) {
+    if (stoppedByTimeLimit(ctx, error)) {
+      logger.warn('website_scan_out_of_time', { user_id: ctx.userId, chars: websiteContent.length });
+      throw new HttpError(504, SCAN_OUT_OF_TIME);
+    }
     throw stepFailed('Website scan', error);
   }
   const result = parseScanResult(answer, websiteContent.length);
@@ -291,6 +329,14 @@ async function uploadDocument(ctx: JobContext): Promise<DocumentExtractionResult
     answer = response.text;
     stopReason = response.stopReason;
   } catch (error) {
+    if (stoppedByTimeLimit(ctx, error)) {
+      logger.warn('document_out_of_time', { user_id: ctx.userId, document_id: input.document_id, chars_sent: input.text.length });
+      throw new HttpError(
+        504,
+        `Document processing failed: Claude didn't finish reading "${input.filename}" in time (each step on this site can run for about a minute). ` +
+          'Try again; if it keeps happening, upload a shorter file (for example, only the pages that matter).',
+      );
+    }
     throw stepFailed('Document processing', error);
   }
   const signals = parseDocumentSignals(answer);
@@ -343,8 +389,71 @@ async function uploadDocument(ctx: JobContext): Promise<DocumentExtractionResult
 // Grant matching
 // =============================================================================
 
-async function matchGrantsJob(ctx: JobContext): Promise<MatchResults> {
+/**
+ * A matching job's input: {} for a new run. A follow-up part (direct mode)
+ * names the saved results whose unscored grants it scores.
+ */
+export interface MatchJobInput {
+  session_id?: string;
+  part?: number;
+}
+
+/** Where the website starts a follow-up part of matching (routes/processing.ts). */
+export const MATCH_CONTINUE_PATH = '/api/processing/match-grants/continue';
+
+type MatchJobResult = MatchResults & { __continue?: JobContinuation };
+type MatchSettings = Pick<MatchRunOptions, 'startDeadline' | 'concurrency' | 'retryWaitMs' | 'hardDeadline' | 'outOfTimeExplanation'>;
+
+/** Matching settings for where this job runs. */
+function matchSettings(ctx: JobContext, startedAt: number): MatchSettings {
+  if (ctx.mode !== 'direct') {
+    // Leave room to finish and save before Netlify's 15-minute cutoff.
+    return { startDeadline: startedAt + JOB_MAX_RUNTIME_MS - 3 * 60 * 1000 };
+  }
+  // Every batch at once (up to 8); a scoring call starts only while one still
+  // fits: half the step's budget, at most 25 seconds before its cutoff.
+  const room = Math.min(MATCH_BATCH_ROOM_MS, Math.floor(ctx.timeLeftMs() / 2));
+  return {
+    concurrency: MATCH_DIRECT_CONCURRENCY,
+    retryWaitMs: 2_000,
+    startDeadline: ctx.deadline - room,
+    hardDeadline: ctx.deadline,
+    outOfTimeExplanation: NOT_SCORED_OUT_OF_TIME_DIRECT,
+  };
+}
+
+/**
+ * Direct mode: when grants are still unscored only because time ran out (or
+ * Claude was briefly unavailable) and this part scored something, the result
+ * hands the website a follow-up request that scores the rest into the same
+ * saved results. Otherwise the results are final and say plainly which
+ * grants were not AI-scored.
+ */
+function withContinuation(ctx: JobContext, results: MatchResults, aiScored: number, part: number): MatchJobResult {
+  if (ctx.mode !== 'direct') return results;
+  const pending = results.matches.filter(isRetryableUnscored).length;
+  if (!pending) {
+    if (part > 1) ctx.note(`Part ${part}: every grant that could be scored is scored now`);
+    return results;
+  }
+  if (aiScored === 0) {
+    ctx.note(`Part ${part}: Claude scored no grants this time, so matching stops here; ${pending} grant(s) stay marked "${NOT_AI_SCORED}"`);
+    return results;
+  }
+  if (part >= MATCH_MAX_PARTS) {
+    ctx.note(`Stopped after ${part} parts; ${pending} grant(s) stay marked "${NOT_AI_SCORED}"`);
+    return results;
+  }
+  ctx.note(`Part ${part}: Claude scored ${aiScored} grant(s); the other ${pending} will be scored in part ${part + 1}`);
+  logger.info('match_continues', { user_id: ctx.userId, session_id: results.session_id, part, ai_scored: aiScored, pending });
+  return { ...results, __continue: { path: MATCH_CONTINUE_PATH, body: { session_id: results.session_id, part: part + 1 } } };
+}
+
+async function matchGrantsJob(ctx: JobContext): Promise<MatchJobResult> {
   const startedAt = Date.now();
+  const input = (ctx.input ?? {}) as MatchJobInput;
+  const sessionId = typeof input.session_id === 'string' && input.session_id ? input.session_id : null;
+  const part = sessionId ? Math.max(2, Math.floor(Number(input.part)) || 2) : 1;
   const [grants, foundations, profile] = await Promise.all([
     getGrants(ctx.userId),
     getFoundations(ctx.userId),
@@ -354,26 +463,56 @@ async function matchGrantsJob(ctx: JobContext): Promise<MatchResults> {
   if (!profile) throw new HttpError(400, NO_PROFILE_FOR_MATCHING);
 
   const allGrants = withFoundations(grants, foundations, ctx.userId);
-  await ctx.progress(`Checking ${allGrants.length} grants against hard requirements (location, deadline, status)...`);
-  let results: MatchResults;
+  const settings = matchSettings(ctx, startedAt);
+  if (ctx.mode === 'direct') {
+    const room = Math.round(((settings.hardDeadline ?? 0) - (settings.startDeadline ?? 0)) / 1000);
+    ctx.note(`Runs inside one request (about a minute): up to ${MATCH_DIRECT_CONCURRENCY} batches at once; a batch starts only with ${room}s or more left`);
+  }
+  const options: Omit<MatchRunOptions, 'grants'> = {
+    profile,
+    userId: ctx.userId,
+    claude: () => ctx.claude(),
+    progress: (message) => ctx.progress(message),
+    note: (line) => ctx.note(line),
+    ...settings,
+  };
   try {
-    results = await matchGrants({
-      grants: allGrants,
-      profile,
-      userId: ctx.userId,
-      claude: () => ctx.claude(),
-      progress: (message) => ctx.progress(message),
-      note: (line) => ctx.note(line),
-      // Leave room to finish and save before Netlify's 15-minute cutoff.
-      startDeadline: startedAt + JOB_MAX_RUNTIME_MS - 3 * 60 * 1000,
-    });
+    if (sessionId) return await matchRemaining(ctx, sessionId, part, allGrants, options);
+
+    await ctx.progress(`Checking ${allGrants.length} grants against hard requirements (location, deadline, status)...`);
+    const { results, run } = await matchGrantsWithRun({ grants: allGrants, ...options });
+    await ctx.progress('Saving results...');
+    await saveMatchResults(results);
+    return withContinuation(ctx, results, run.aiScored, part);
   } catch (error) {
-    logger.error('grant_matching_failed', { user_id: ctx.userId, grants: allGrants.length, error: errorMessage(error) });
+    logger.error('grant_matching_failed', { user_id: ctx.userId, grants: allGrants.length, part, error: errorMessage(error) });
     throw error;
   }
+}
+
+/**
+ * A follow-up part (direct mode): score the grants an earlier part couldn't
+ * (time ran out, or Claude was briefly unavailable) and merge them into the
+ * same saved results.
+ */
+async function matchRemaining(
+  ctx: JobContext,
+  sessionId: string,
+  part: number,
+  allGrants: Grant[],
+  options: Omit<MatchRunOptions, 'grants'>,
+): Promise<MatchJobResult> {
+  const saved = await getMatchResults(ctx.userId, sessionId);
+  if (!saved) throw new HttpError(404, 'These match results are no longer saved. Run matching again.');
+  const pendingIds = new Set(saved.matches.filter(isRetryableUnscored).map((match) => match.grant_id));
+  const toScore = allGrants.filter((grant) => pendingIds.has(grant.id));
+  await ctx.progress(`Part ${part}: scoring the ${toScore.length} grant(s) that didn't fit in the time so far...`);
+  const run = await scoreMatches({ grants: toScore, ...options });
   await ctx.progress('Saving results...');
-  await saveMatchResults(results);
-  return results;
+  const updated = await updateMatchResults(ctx.userId, sessionId, (current) => (current ? withRescoredMatches(current, run.matches) : undefined));
+  if (!updated) throw new HttpError(404, 'These match results are no longer saved. Run matching again.');
+  logger.info('match_part_done', { user_id: ctx.userId, session_id: sessionId, part, rescored: toScore.length, ai_scored: run.aiScored });
+  return withContinuation(ctx, updated, run.aiScored, part);
 }
 
 export const processingJobs: Record<string, JobHandler> = {

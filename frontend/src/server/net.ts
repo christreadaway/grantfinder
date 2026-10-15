@@ -214,17 +214,35 @@ export function htmlToText(html: string, baseUrl: string): { text: string; links
   return { text: parts.join('\n'), links };
 }
 
+/** "30 seconds", "1.5 seconds", "1 second". */
+function seconds(ms: number): string {
+  const value = Math.round(ms / 100) / 10;
+  return `${value} second${value === 1 ? '' : 's'}`;
+}
+
+/** Rejects with the signal's reason once it aborts, so a slow DNS check can't outlast a page's time limit. */
+function whenAborted(signal: AbortSignal): Promise<never> {
+  const aborted = new Promise<never>((_, reject) => {
+    if (signal.aborted) reject(signal.reason);
+    else signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+  });
+  aborted.catch(() => undefined); // only ever used in a race
+  return aborted;
+}
+
 /**
  * Fetch one page and return its readable text (HTML, plain text, or PDF).
  * Never throws: failures come back as ok=false with a plain-English error.
  */
 export async function fetchPage(url: string, options: { maxChars?: number; timeoutMs?: number } = {}): Promise<FetchedPage> {
   const maxChars = options.maxChars ?? 20000;
-  const deadline = AbortSignal.timeout(options.timeoutMs ?? 30000);
+  const timeoutMs = Math.max(1, Math.round(options.timeoutMs ?? 30000));
+  const deadline = AbortSignal.timeout(timeoutMs);
+  const timedOut = whenAborted(deadline);
   let current = url;
   try {
     for (let hop = 0; hop <= 5; hop++) {
-      const check = await checkUrl(current);
+      const check = await Promise.race([checkUrl(current), timedOut]);
       if (!check.ok) {
         return { url, finalUrl: current, ok: false, status: null, text: '', links: [], error: urlProblemMessage(check.reason, current) };
       }
@@ -292,7 +310,7 @@ export async function fetchPage(url: string, options: { maxChars?: number; timeo
   } catch (error) {
     const cause = (error as { cause?: { code?: string; message?: string } }).cause;
     const message = (error as Error).name === 'TimeoutError'
-      ? 'Timed out after 30 seconds'
+      ? `Timed out after ${seconds(timeoutMs)}`
       : cause?.code === 'EBLOCKED'
         ? cause.message || 'Blocked: that address points to a private or local network'
         : `${(error as Error).message}${cause?.code ? ` (${cause.code})` : ''}`;
@@ -312,17 +330,35 @@ export interface CrawlResult {
   pagesRead: string[];
   /** Per-URL problems, e.g. "https://x.org: HTTP 403 (the site blocks automated reading...)" */
   problems: string[];
+  /** Relevant pages not fetched because the crawl's time ran out (CrawlTiming.endBy). */
+  skippedForTime: number;
+}
+
+/** Time limits for one crawl (direct job mode leaves most of its minute to Claude). */
+export interface CrawlTiming {
+  /** Finish by this time (ms since epoch): no page starts after it, and fetches in progress end by it. */
+  endBy?: number;
+  /** Don't start another batch of pages with less than this long left before endBy. */
+  minStartMs?: number;
+  /** Longest wait for one page (default 30 seconds). */
+  pageTimeoutMs?: number;
 }
 
 /**
  * Homepage plus the most grant-relevant internal pages (about, school,
  * ministries, news, bulletins, giving...). Port of AIService._fetch_webpage.
+ * With timing.endBy the crawl stops in time, keeping what it already read.
  */
-export async function crawlSite(url: string, maxPages = WEBSITE_CRAWL_MAX_PAGES): Promise<CrawlResult> {
+export async function crawlSite(url: string, maxPages = WEBSITE_CRAWL_MAX_PAGES, timing: CrawlTiming = {}): Promise<CrawlResult> {
+  const pageTimeout = timing.pageTimeoutMs ?? 30000;
+  const minStart = timing.minStartMs ?? 0;
+  const timeLeft = () => (timing.endBy === undefined ? Number.POSITIVE_INFINITY : timing.endBy - Date.now());
+  // The homepage is always tried (a scan needs it), with at least the start window.
+  const timeoutFor = (floor: number) => Math.min(pageTimeout, Math.max(floor, timeLeft()));
   const start = normalizeUrl(url);
-  const home = await fetchPage(start);
+  const home = await fetchPage(start, { timeoutMs: timeoutFor(Math.max(minStart, 1000)) });
   if (!home.ok) {
-    return { text: '', pagesRead: [], problems: [`${start}: ${home.error || 'no readable text'}`] };
+    return { text: '', pagesRead: [], problems: [`${start}: ${home.error || 'no readable text'}`], skippedForTime: 0 };
   }
   const pages = [`=== PAGE: ${start} ===\n${home.text}`];
   const pagesRead = [start];
@@ -348,8 +384,14 @@ export async function crawlSite(url: string, maxPages = WEBSITE_CRAWL_MAX_PAGES)
   const targets = scored.slice(0, Math.max(0, maxPages - 1)).map((item) => item.link);
 
   // Three at a time: quick, but polite to small parish web hosts.
+  let skippedForTime = 0;
   for (let i = 0; i < targets.length; i += 3) {
-    const batch = await Promise.all(targets.slice(i, i + 3).map((link) => fetchPage(link)));
+    if (timeLeft() < Math.max(minStart, 1)) {
+      skippedForTime = targets.length - i;
+      break;
+    }
+    const pageTimeoutMs = timeoutFor(1);
+    const batch = await Promise.all(targets.slice(i, i + 3).map((link) => fetchPage(link, { timeoutMs: pageTimeoutMs })));
     batch.forEach((page, index) => {
       const link = targets[i + index];
       if (page.ok) {
@@ -362,6 +404,6 @@ export async function crawlSite(url: string, maxPages = WEBSITE_CRAWL_MAX_PAGES)
   }
 
   const combined = pages.join('\n\n').slice(0, 80000);
-  logger.info('site_crawled', { url: start, pages: pagesRead.length, problems: problems.length });
-  return { text: combined, pagesRead, problems };
+  logger.info('site_crawled', { url: start, pages: pagesRead.length, problems: problems.length, skipped_for_time: skippedForTime });
+  return { text: combined, pagesRead, problems, skippedForTime };
 }

@@ -40,14 +40,22 @@ const restore = (...ids: string[]) => mock.fixtures(Object.fromEntries(ids.map((
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Poll a job like the website does; returns the job's result (or its error) as the response. */
+/**
+ * Poll a job like the website does; returns the job's result (or its error) as
+ * the response. A result carrying __continue (a long step done in parts) is
+ * followed the way the website follows it.
+ */
 async function finishJob(first: ApiResult, token: string): Promise<ApiResult & { job?: Record<string, unknown> }> {
   if (first.status !== 202 || !first.data?.job_id) return first;
   for (let i = 0; i < 1200; i++) {
     await new Promise((resolve) => setTimeout(resolve, 100));
     const poll = await api('GET', `/api/jobs/${first.data.job_id}`, { token });
     if (poll.status !== 200) return poll;
-    if (poll.data.status === 'done') return { ...poll, status: 200, data: poll.data.result, job: poll.data };
+    if (poll.data.status === 'done') {
+      const next = poll.data.result?.__continue;
+      if (next?.path) return finishJob(await api('POST', next.path, { token, json: next.body ?? {} }), token);
+      return { ...poll, status: 200, data: poll.data.result, job: poll.data };
+    }
     if (poll.data.status === 'failed') return { ...poll, status: poll.data.error?.status ?? 500, data: { detail: poll.data.error?.detail }, job: poll.data };
   }
   throw new Error(`job ${first.data.job_id} did not finish`);
@@ -1076,7 +1084,16 @@ await restore('section_draft_v1');
 // Draft-all with one failing section (handler run directly with a stub client)
 // ---------------------------------------------------------------------------
 
-function stubContext(fail: (prompt: string) => Error | null, target: { id: string; correlation_id: string } = app) {
+/**
+ * A job context for calling a handler directly with a stub Claude. clock.left is
+ * the time left before the step's cutoff (each Claude call spends clock.perCall),
+ * like a direct-mode step inside one Netlify request.
+ */
+function stubContext(
+  fail: (prompt: string) => Error | null,
+  target: { id: string; correlation_id: string } = app,
+  clock: { left: number; perCall: number } = { left: 10 * 60_000, perCall: 0 },
+) {
   const answer = (promptId: string) => FIXTURES[promptId] ?? '{}';
   return {
     job: {} as never,
@@ -1084,8 +1101,12 @@ function stubContext(fail: (prompt: string) => Error | null, target: { id: strin
     input: { app_id: target.id, section_id: null },
     correlationId: target.correlation_id,
     applicationId: target.id,
+    mode: 'local',
+    deadline: Date.now() + clock.left,
+    timeLeftMs: () => Math.max(0, clock.left),
     claude: async () => ({
       call: async (options: { promptId: string; prompt: string }) => {
+        clock.left -= clock.perCall;
         const failure = fail(options.prompt);
         if (failure) throw failure;
         return { text: answer(options.promptId), stopReason: 'end_turn', inputTokens: 1, outputTokens: 1, webSearches: 0, latencyMs: 1, costUsd: 0, model: 'stub', content: [] };
@@ -1132,6 +1153,57 @@ check(
   'a section that hits a rate limit gets one more try, and the run succeeds',
   failedOnce && recovered.sections.map((s) => s.section_id).join(',') === 's1,s2,s3,s4',
   recovered.sections.map((s) => s.section_id),
+);
+
+let failedAndOutOfTime: { status?: number; detail?: string; __continue?: unknown } = {};
+const shortClock = { left: 45_000, perCall: 8_000 };
+try {
+  const partResult = await handlers.writerJobs['writer.draft'](
+    stubContext(
+      (prompt) =>
+        prompt.includes('SECTION: Statement of Need') ? new errors.ClaudeError('overloaded', 503, 'Claude is overloaded right now. Wait a minute and try again.', false) : null,
+      app,
+      shortClock,
+    ) as never,
+  );
+  failedAndOutOfTime = { __continue: (partResult as { __continue?: unknown }).__continue };
+} catch (error) {
+  failedAndOutOfTime = error as { status?: number; detail?: string };
+}
+check(
+  'a part where a section failed reports the failure (today\'s message) and does not continue, even with sections not started for time',
+  failedAndOutOfTime.__continue === undefined && failedAndOutOfTime.status === 503 &&
+    /^Drafted and saved 2 of 4 sections\. Not drafted: "Statement of Need" \(Claude is overloaded right now\. Wait a minute and try again\.\); "Evaluation and Sustainability" \(not started: no time left in this step\)\. The saved sections are kept\. To finish, run drafting again/.test(
+      failedAndOutOfTime.detail ?? '',
+    ),
+  failedAndOutOfTime,
+);
+
+// The automatic tighten pass fails (Claude busy, or the step's time limit): the revision is kept, flagged.
+const OVER_LIMIT_TEXT = Array.from({ length: 60 }, () => 'Our families pray, learn, and serve together every day.').join(' ');
+let refineCallNo = 0;
+const answerOf = (text: string) => ({ text, stopReason: 'end_turn', inputTokens: 1, outputTokens: 1, webSearches: 0, latencyMs: 1, costUsd: 0, model: 'stub', content: [] });
+const tightenFails = {
+  ...stubContext(() => null),
+  input: { app_id: appId, section_id: 's1', instruction: 'Add more detail' },
+  claude: async () => ({
+    call: async (options: { promptId: string }) => {
+      if (options.promptId !== 'section_refine_v1') return answerOf(FIXTURES[options.promptId] ?? '{}');
+      refineCallNo += 1;
+      if (refineCallNo === 2) {
+        throw new errors.ClaudeError('timeout', 504, 'Claude was still working when this step reached its time limit. Run it again; work that finished was saved.', false);
+      }
+      return answerOf(JSON.stringify({ draft: OVER_LIMIT_TEXT }));
+    },
+  }),
+};
+const keptRevision = (await handlers.writerJobs['writer.refine'](tightenFails as never)) as { current_draft: string; over_limit: boolean; compliance_notes: string[] };
+check(
+  'a tighten pass that fails keeps the revision (saved, flagged OVER LIMIT) with a note on how to fix it',
+  refineCallNo === 2 && keptRevision.current_draft === OVER_LIMIT_TEXT && keptRevision.over_limit === true &&
+    keptRevision.compliance_notes.includes(writer.SECTION_NOTES.tightenFailed) &&
+    (await writerRepo.getSectionDraft(userA, appId, 's1'))?.current_draft === OVER_LIMIT_TEXT,
+  [refineCallNo, keptRevision.over_limit, keptRevision.compliance_notes],
 );
 
 let fatalMid: { status?: number; detail?: string } = {};

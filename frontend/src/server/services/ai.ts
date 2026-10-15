@@ -56,6 +56,16 @@ export const PROMPT_IDS = {
 /** Python: batches of 10 grants, at most 4 scored at once (asyncio.Semaphore(4)). */
 export const MATCH_BATCH_SIZE = 10;
 export const MATCH_CONCURRENCY = 4;
+/**
+ * Direct job mode (each step must end within about a minute): every batch
+ * is scored at once, up to this many, so a typical database is scored in one
+ * request.
+ */
+export const MATCH_DIRECT_CONCURRENCY = 8;
+/** Direct mode: a scoring call starts only with about this much time left (one call). */
+export const MATCH_BATCH_ROOM_MS = 25_000;
+/** Direct mode: at most this many parts (about a minute each) to score grants that didn't fit. */
+export const MATCH_MAX_PARTS = 12;
 /** Match results expire 90 days after they are created (spec v2.6). */
 export const MATCH_EXPIRY_DAYS = 90;
 /**
@@ -860,6 +870,15 @@ export function fallbackMatch(grant: Grant, explanation: string): GrantMatch {
 const NOT_SCORED_UNREADABLE = `${NOT_AI_SCORED} Claude's answer could not be read. Re-run matching for a real score.`;
 const NOT_SCORED_SKIPPED = `${NOT_AI_SCORED} Claude's answer skipped this grant. Re-run matching for a real score.`;
 const NOT_SCORED_OUT_OF_TIME = `${NOT_AI_SCORED} matching ran out of time before reaching this grant (the background worker stops after 15 minutes). Re-run matching for a real score.`;
+/** Direct mode: the step's minute ended before Claude scored this grant (a follow-up part tries again). */
+export const NOT_SCORED_OUT_OF_TIME_DIRECT = `${NOT_AI_SCORED} matching ran out of time before Claude could score this grant (each step on this site can run for about a minute). Re-run matching for a real score.`;
+const NOT_SCORED_UNAVAILABLE = `${NOT_AI_SCORED} Claude was unavailable (`;
+
+/** Not scored for a passing reason (time ran out, Claude briefly unavailable): worth trying again in a follow-up part. */
+export function isRetryableUnscored(match: GrantMatch): boolean {
+  const text = match.explanation;
+  return text === NOT_SCORED_OUT_OF_TIME || text === NOT_SCORED_OUT_OF_TIME_DIRECT || text.startsWith(NOT_SCORED_UNAVAILABLE);
+}
 
 function unavailableExplanation(error: unknown): string {
   const kind = error instanceof ClaudeError ? error.kind : 'unknown';
@@ -1094,13 +1113,26 @@ function matchFromItem(grant: Grant, item: Record<string, unknown>): GrantMatch 
   };
 }
 
+/** When a run's Claude calls are cut off, and the label for grants that time ran out for. */
+export interface OutOfTime {
+  /** ms since epoch */
+  at: number;
+  explanation: string;
+}
+
 /**
  * Score one batch of grants with one Claude call (Python _score_grant_batch).
  * Answer items are matched to grants by id (or by name when the model put
  * the name there); grants the answer skipped still get an honest entry.
  * Fatal Claude errors are re-thrown; other failures become honest fallbacks.
  */
-export async function scoreGrantBatch(ai: Claude, batch: Grant[], profile: OrganizationProfile, today: string): Promise<GrantMatch[]> {
+export async function scoreGrantBatch(
+  ai: Claude,
+  batch: Grant[],
+  profile: OrganizationProfile,
+  today: string,
+  outOfTime?: OutOfTime,
+): Promise<GrantMatch[]> {
   let text: string;
   try {
     const response = await ai.call({
@@ -1112,6 +1144,11 @@ export async function scoreGrantBatch(ai: Claude, batch: Grant[], profile: Organ
     text = response.text;
   } catch (error) {
     if (isFatalClaudeError(error)) throw error;
+    // Stopped by the step's own time limit: say that, not "Claude was unavailable".
+    if (outOfTime && error instanceof ClaudeError && error.kind === 'timeout' && Date.now() >= outOfTime.at - 1000) {
+      logger.warn('grant_scoring_out_of_time', { grants: batch.length, grant_ids: batch.map((g) => g.id) });
+      return batch.map((grant) => fallbackMatch(grant, outOfTime.explanation));
+    }
     logger.error('grant_scoring_failed', { grants: batch.length, grant_ids: batch.map((g) => g.id), error: errorMessage(error) });
     const explanation = unavailableExplanation(error);
     return batch.map((grant) => fallbackMatch(grant, explanation));
@@ -1168,6 +1205,54 @@ export interface MatchRunOptions {
   note?: (line: string) => void;
   /** No new batch starts after this time (epoch ms); the rest get an honest "ran out of time" entry. */
   startDeadline?: number;
+  /** Batches scored at the same time (default MATCH_CONCURRENCY). */
+  concurrency?: number;
+  /** Wait before the second-chance pass for batches Claude couldn't score (default 15 seconds; 50 ms in tests). */
+  retryWaitMs?: number;
+  /** When this run's Claude calls are cut off (epoch ms): a batch stopped by it is "out of time", not "unavailable". */
+  hardDeadline?: number;
+  /** Label for grants that time ran out for (default: the background worker's 15-minute limit). */
+  outOfTimeExplanation?: string;
+}
+
+/** What one scoring run did. */
+export interface MatchRun {
+  /** One match per grant given, in no particular order. */
+  matches: GrantMatch[];
+  /** Grants ruled out by the hard filters (no Claude call). */
+  prefiltered: number;
+  batches: number;
+  /** Grants Claude actually scored in this run. */
+  aiScored: number;
+}
+
+/** Tier counts for a match list (spec v2.6 tiers). */
+export function tierCounts(
+  matches: GrantMatch[],
+): Pick<MatchResults, 'excellent_matches' | 'good_matches' | 'possible_matches' | 'weak_matches' | 'not_eligible'> {
+  return {
+    excellent_matches: matches.filter((m) => m.score >= 85).length,
+    good_matches: matches.filter((m) => m.score >= 70 && m.score < 85).length,
+    possible_matches: matches.filter((m) => m.score >= 50 && m.score < 70).length,
+    weak_matches: matches.filter((m) => m.score >= 25 && m.score < 50).length,
+    not_eligible: matches.filter((m) => m.score < 25).length,
+  };
+}
+
+/**
+ * Saved results with some grants scored again (a follow-up part in direct
+ * mode): each rescored grant replaces its earlier entry (keeping the
+ * shortlist flag), then the list is re-sorted and the tiers recounted.
+ */
+export function withRescoredMatches(saved: MatchResults, rescored: GrantMatch[]): MatchResults {
+  const byId = new Map(rescored.map((match) => [match.grant_id, match]));
+  const matches = saved.matches
+    .map((match) => {
+      const next = byId.get(match.grant_id);
+      return next ? { ...next, is_shortlisted: match.is_shortlisted } : match;
+    })
+    .sort((a, b) => b.score - a.score);
+  return { ...saved, matches, ...tierCounts(matches) };
 }
 
 /** Sorts by creation time to the millisecond, so the newest results are the last key. */
@@ -1177,12 +1262,16 @@ export function newMatchSessionId(): string {
 }
 
 /**
- * Match every grant against the profile (Python match_grants): hard
- * disqualifiers first, then batches of 10 scored by Claude, 4 at a time.
+ * Score grants against the profile: hard disqualifiers first, then batches
+ * of 10 scored by Claude (4 at a time, or every batch at once in direct
+ * mode), then one second chance for batches Claude was briefly unavailable
+ * for, time permitting. Every grant gets a match; the unscored say why.
  */
-export async function matchGrants(options: MatchRunOptions): Promise<MatchResults> {
-  const { grants, profile, userId } = options;
+export async function scoreMatches(options: MatchRunOptions): Promise<MatchRun> {
+  const { grants, profile } = options;
   const today = todayIso();
+  const outOfTimeText = options.outOfTimeExplanation ?? NOT_SCORED_OUT_OF_TIME;
+  const outOfTime = options.hardDeadline ? { at: options.hardDeadline, explanation: outOfTimeText } : undefined;
   const matches: GrantMatch[] = [];
   const toScore: Grant[] = [];
   for (const grant of grants) {
@@ -1207,40 +1296,58 @@ export async function matchGrants(options: MatchRunOptions): Promise<MatchResult
       if (index >= batches.length) return;
       const batch = batches[index];
       if (options.startDeadline && Date.now() > options.startDeadline) {
-        batchResults[index] = batch.map((grant) => fallbackMatch(grant, NOT_SCORED_OUT_OF_TIME));
+        batchResults[index] = batch.map((grant) => fallbackMatch(grant, outOfTimeText));
         continue;
       }
       const first = index * MATCH_BATCH_SIZE + 1;
       await options.progress?.(`Scoring grants ${first}-${first + batch.length - 1} of ${toScore.length}`);
       try {
-        batchResults[index] = await scoreGrantBatch(await client(), batch, profile, today);
+        batchResults[index] = await scoreGrantBatch(await client(), batch, profile, today, outOfTime);
       } catch (error) {
         fatalErrors.push(error);
         return;
       }
     }
   };
-  await Promise.all(Array.from({ length: Math.min(MATCH_CONCURRENCY, batches.length) }, () => worker()));
+  const workers = Math.min(Math.max(1, options.concurrency ?? MATCH_CONCURRENCY), batches.length);
+  await Promise.all(Array.from({ length: workers }, () => worker()));
   if (fatalErrors.length) throw fatalErrors[0];
 
   // Second chance, one batch at a time, for batches Claude couldn't score
   // because of a passing problem (rate limit, overload, timeout) that outlasted
   // the client's own retries. Lower-tier API keys hit this when 4 run at once.
-  const unavailable = `${NOT_AI_SCORED} Claude was unavailable (`;
+  // Only when the wait plus one scoring call still fits before startDeadline.
+  const retryWait = testMode() ? 50 : (options.retryWaitMs ?? 15_000);
   for (let index = 0; index < batches.length; index++) {
     const result = batchResults[index];
-    if (!result.length || !result.every((match) => match.explanation.startsWith(unavailable))) continue;
-    if (options.startDeadline && Date.now() > options.startDeadline) break;
-    await new Promise((resolve) => setTimeout(resolve, testMode() ? 50 : 15_000));
+    if (!result.length || !result.every((match) => match.explanation.startsWith(NOT_SCORED_UNAVAILABLE))) continue;
+    if (options.startDeadline && Date.now() + retryWait > options.startDeadline) break;
+    await new Promise((resolve) => setTimeout(resolve, retryWait));
     const first = index * MATCH_BATCH_SIZE + 1;
     await options.progress?.(`Trying grants ${first}-${first + batches[index].length - 1} again...`);
     options.note?.(`Retrying batch ${index + 1} once after a temporary Claude problem`);
-    batchResults[index] = await scoreGrantBatch(await client(), batches[index], profile, today);
+    batchResults[index] = await scoreGrantBatch(await client(), batches[index], profile, today, outOfTime);
   }
 
   for (const result of batchResults) matches.push(...result);
+  const sent = new Set(toScore.map((grant) => grant.id));
+  const aiScored = matches.filter((match) => sent.has(match.grant_id) && !match.explanation.startsWith(NOT_AI_SCORED)).length;
+  return { matches, prefiltered: grants.length - toScore.length, batches: batches.length, aiScored };
+}
 
-  matches.sort((a, b) => b.score - a.score);
+/**
+ * Match every grant against the profile (Python match_grants): hard
+ * disqualifiers first, then batches of 10 scored by Claude, 4 at a time.
+ */
+export async function matchGrants(options: MatchRunOptions): Promise<MatchResults> {
+  return (await matchGrantsWithRun(options)).results;
+}
+
+/** matchGrants, plus what the run did (how many grants Claude actually scored). */
+export async function matchGrantsWithRun(options: MatchRunOptions): Promise<{ results: MatchResults; run: MatchRun }> {
+  const { grants, profile, userId } = options;
+  const run = await scoreMatches(options);
+  const matches = [...run.matches].sort((a, b) => b.score - a.score);
   const created = new Date();
   const results: MatchResults = {
     session_id: newMatchSessionId(),
@@ -1248,11 +1355,7 @@ export async function matchGrants(options: MatchRunOptions): Promise<MatchResult
     profile_id: profile.id || userId,
     total_grants_evaluated: grants.length,
     matches,
-    excellent_matches: matches.filter((m) => m.score >= 85).length,
-    good_matches: matches.filter((m) => m.score >= 70 && m.score < 85).length,
-    possible_matches: matches.filter((m) => m.score >= 50 && m.score < 70).length,
-    weak_matches: matches.filter((m) => m.score >= 25 && m.score < 50).length,
-    not_eligible: matches.filter((m) => m.score < 25).length,
+    ...tierCounts(matches),
     created_at: created.toISOString(),
     expires_at: new Date(created.getTime() + MATCH_EXPIRY_DAYS * 24 * 60 * 60 * 1000).toISOString(),
   };
@@ -1262,14 +1365,14 @@ export async function matchGrants(options: MatchRunOptions): Promise<MatchResult
     user_id: userId,
     session_id: results.session_id,
     total: grants.length,
-    prefiltered: grants.length - toScore.length,
-    batches: batches.length,
+    prefiltered: run.prefiltered,
+    batches: run.batches,
     not_ai_scored: notScored,
     excellent: results.excellent_matches,
     good: results.good_matches,
     possible: results.possible_matches,
   });
-  return results;
+  return { results, run };
 }
 
 // =============================================================================
@@ -1277,6 +1380,11 @@ export async function matchGrants(options: MatchRunOptions): Promise<MatchResult
 // =============================================================================
 
 const MATCH_SESSION_RE = /^match_\d{8}T\d{9}Z_[0-9a-f]{8}$/;
+
+/** A match session id as newMatchSessionId() makes them. */
+export function isMatchSessionId(value: string): boolean {
+  return MATCH_SESSION_RE.test(value);
+}
 
 /** Newest match session id for this user (session ids sort by time), or null. */
 export async function latestMatchSessionId(userId: string): Promise<string | null> {

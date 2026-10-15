@@ -13,11 +13,13 @@ import { requireApiKey } from '../auth';
 import { maxUploadBytes } from '../config';
 import { HttpError } from '../errors';
 import {
+  MATCH_CONTINUE_PATH,
   NO_GRANTS_FOR_MATCHING,
   NO_GRANTS_FOR_QUESTIONNAIRE,
   NO_PROFILE_FOR_MATCHING,
   PROCESSING_JOB_KINDS,
   type DocumentJobInput,
+  type MatchJobInput,
   type ScanJobInput,
 } from '../handlers/processing';
 import { optionalString, type RequestContext } from '../http';
@@ -31,7 +33,9 @@ import {
   cutText,
   DOCUMENT_TEXT_LIMIT,
   isBlankAnswer,
+  isMatchSessionId,
   latestMatchSessionId,
+  MATCH_MAX_PARTS,
   minimalProfile,
   questionnaireKey,
   type StoredQuestionnaire,
@@ -267,6 +271,26 @@ async function matchGrants(ctx: RequestContext): Promise<Response> {
 }
 
 /**
+ * Direct job mode: the next part of a matching run that didn't fit in one
+ * request. The website calls this when a matching result carries
+ * __continue {path, body: {session_id, part}}; the job scores the grants still
+ * unscored and merges them into the same saved results.
+ */
+async function continueMatching(ctx: RequestContext): Promise<Response> {
+  const user = await ctx.user();
+  const body = await ctx.json();
+  const sessionId = optionalString(body, 'session_id')?.trim() ?? '';
+  if (!isMatchSessionId(sessionId)) {
+    throw new HttpError(422, 'Field "session_id" must be the id of your match results (from the first part of matching).');
+  }
+  const part = wholeNumber(body.part);
+  await requireApiKey(user.id);
+  if (!(await getMatchResults(user.id, sessionId))) throw new HttpError(404, 'Session not found');
+  const input: MatchJobInput = { session_id: sessionId, part: part !== null && part > 1 ? Math.min(part, MATCH_MAX_PARTS) : 2 };
+  return startJob(ctx, PROCESSING_JOB_KINDS.matchGrants, input);
+}
+
+/**
  * Python echoed {grant_id, shortlisted} without saving anything, so the
  * shortlist (and "export shortlisted only") never worked. Now the flag is
  * saved on the match results: the session from ?session_id= (or a JSON body
@@ -319,6 +343,7 @@ export function registerProcessingRoutes(router: Router): void {
   });
 
   router.post('/api/processing/match-grants', matchGrants);
+  router.post(MATCH_CONTINUE_PATH, continueMatching);
 
   // Static path: wins over :sessionId below.
   router.get('/api/processing/match-results/latest', async (ctx) => {
