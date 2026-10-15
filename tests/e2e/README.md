@@ -101,5 +101,5 @@ build in `frontend/` while the test runs (or use `E2E_SKIP_BUILD=1` to reuse the
 4. Paste the FAIL lines and the relevant log lines into Claude Code.
 
 Engine-level tests (no browser): `cd ~/grantfinder && bash tests/engine/run_all.sh` runs all 10
-suites (684 checks), then the processing, grants, writer, regressions and checklist suites again in
-direct job mode (1,251 checks in all); one area alone: `cd ~/grantfinder/frontend && npx tsx ../tests/engine/<area>.test.mts`.
+suites (688 checks), then the processing, grants, writer, regressions and checklist suites again in
+direct job mode (1,255 checks in all); one area alone: `cd ~/grantfinder/frontend && npx tsx ../tests/engine/<area>.test.mts`.

@@ -1,11 +1,45 @@
 # GRANTFINDER - Session History
 
 **Repository:** `grantfinder`  
-**Total Sessions Logged:** 3  
+**Total Sessions Logged:** 4  
 **Date Range:** 2025-02-01 to 2025-02-02  
 **Last Updated:** 2026-10-15
 
 This file contains a complete history of Claude Code sessions for this repository, automatically generated from transcript files. Sessions are listed in reverse chronological order (most recent first).
+
+---
+
+## 2026-10-15 (afternoon) — First Netlify Deploy: Claude Key Rejected by Netlify's AI Gateway, Fixed
+
+### What We Built
+- Merged `claude/relaxed-curie-sj0zvu` to `main` (PR #2) after re-running every gate on the exact commit (1,251 engine checks, typecheck, lint).
+- First deploy failed on purpose (`SECRET_KEY is not set`); Chris added `SECRET_KEY` and `ALLOW_GUEST_LOGIN`.
+- Then the API Key step said **Anthropic rejected this API key** for an active key. Root cause: Netlify's AI Gateway injects `ANTHROPIC_BASE_URL` (and `ANTHROPIC_API_KEY`) into every function on credit-based plans. The engine passed `ANTHROPIC_BASE_URL` to the SDK (and the SDK reads it by default anyway), so the key went to Netlify's gateway, which refused it with a 401. Anthropic never saw the key.
+- Fix: every Claude client now gets `baseURL: https://api.anthropic.com` explicitly and `authToken: null`; `ANTHROPIC_BASE_URL` is ignored; tests use `GRANTFINDER_CLAUDE_BASE_URL`. The rejected-key message now quotes what Anthropic said, `api_key_rejected` is logged with host, status and request id, and `/api/health` plus the debug report show `claude_api`.
+
+### Technical Details
+- `frontend/src/server/config.ts` (`ANTHROPIC_API_URL`, `anthropicBaseUrl()`, `anthropicHost()`), `claude.ts` (both clients, `verifyApiKey`, `apiErrorMessage`), `routes/system.ts` (health, debug report).
+- Tests: `tests/engine/helpers.mts` and `tests/e2e/run_e2e.sh` set Netlify-style decoy `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`; the mock Claude refuses any `Authorization` header; 4 new foundation checks. Against the old code those checks fail (6 failures); with the fix all pass.
+
+### Current Status
+- ✅ Engine: 1,255 checks (688 + 567 in direct job mode)
+- ✅ Browser test with the decoys in place: see PROJECT_STATUS.md
+- ✅ Docs: CLAUDE.md (Claude address rule, counts), docs/engine.md, docs/deployment.md (health example, troubleshooting row), READMEs, CONTRIBUTING, BUSINESS_SPEC
+
+### Branch Info
+- Branch `claude/relaxed-curie-sj0zvu`; Chris allowed pushing straight to `main` for this deploy.
+
+### Decisions Made
+- Use the person's own Anthropic key, not Netlify's AI Gateway: billing stays on the school's Anthropic account and nothing depends on Netlify AI features being on.
+- Workaround for an older deploy: set `ANTHROPIC_BASE_URL=https://api.anthropic.com` in Netlify (Netlify never overrides a variable you set). Harmless after the fix.
+
+### Next Steps
+1. Redeploy `main`, check `/api/health` shows `"claude_api":"api.anthropic.com"`, paste the key, load the starter database.
+2. Write and export the Kenedy application.
+3. Browser coverage for the checklist, Top picks and uploads; Google sign-in; a real-key pass over every prompt.
+
+### Questions/Blockers
+- None.
 
 ---
 

@@ -88,7 +88,7 @@ An AI-powered grant matching platform that builds a comprehensive profile of a C
 - **Built:** Complete frontend (Next.js) with setup wizard, profile builder, matching results with Top picks and deadline countdowns, and the GrantWriter (Application Checklist, Funder History, drafts you can refine or edit by hand, with earlier versions kept)
 - **Built:** AI service integration with Claude API (AI steps as jobs that fit any Netlify plan, cost and token logging)
 - **Built:** 5-category Excel parser, starter database, Grants.gov search, AI web discovery
-- **Tested:** 1,251 automated engine checks with a mock Claude (10 suites, 684 checks, then 5 of them again in direct job mode, the way Netlify runs AI steps by default), a browser test of the whole journey (443 checks), and a local run on the Netlify runtime
+- **Tested:** 1,255 automated engine checks with a mock Claude (10 suites, 688 checks, then 5 of them again in direct job mode, the way Netlify runs AI steps by default), a browser test of the whole journey (443 checks), and a local run on the Netlify runtime
 - **Deploy:** Netlify only (`docs/deployment.md`); a live-key run with real data is the next milestone
 
 ## 8. Business Model
