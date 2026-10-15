@@ -1,7 +1,7 @@
 # GrantFinder - Project Status
 
 **Last updated:** 2026-10-15
-**Branch:** `claude/relaxed-curie-sj0zvu` (pushed; not merged to `main` yet)
+**Branch:** `claude/relaxed-curie-sj0zvu`, merged to `main` on Oct 15 (PR #2)
 **Hosting:** Netlify only, on any plan. No Railway, Render, Vercel, or Supabase.
 
 ## Overall Progress: ~95% (deploy-ready; real-key use is the remaining proof)
@@ -26,7 +26,7 @@
 - AI prompts are verified against a mock Claude in tests; real-key quality depends on the model.
 
 ## Next Steps
-1. Merge `claude/relaxed-curie-sj0zvu` into `main` on GitHub, then deploy on Netlify (`docs/deployment.md`): set `SECRET_KEY` and `ALLOW_GUEST_LOGIN=true`.
+1. Deploy `main` on Netlify (`docs/deployment.md`): set `SECRET_KEY` and `ALLOW_GUEST_LOGIN=true` before deploying (the build stops without `SECRET_KEY`), then check `/api/health`.
 2. Write the Kenedy application in the writer and export it to Word.
 3. After the deadline: browser-test coverage for the checklist, Top picks and uploads; Google sign-in; a real-key pass over every prompt (including the funder research).
 

@@ -34,7 +34,7 @@ Chris asked to run GrantFinder entirely on Netlify (no Railway; none of his othe
 - ✅ Engine: 1,251 checks (10 suites, plus 5 again in direct job mode); browser: 443 checks (direct job mode, including Funder History); local Netlify runtime (no background function): 57 API checks, including drafting continued across 4 requests, Funder History, guideline PDF upload and the checklist
 - 🚧 Checklist, Top picks and uploads are covered by engine tests only (browser coverage next session)
 - ✅ No Railway anywhere; Netlify is the only host
-- ✅ Ready to merge to `main`
+- ✅ Merged to `main` on Oct 15 (PR #2) after a final re-run on the exact commit: 1,251 engine checks, typecheck and lint clean
 - 🚧 Not yet deployed; the real-key run happens when Chris uses it on the deployed site
 
 ### Branch Info
