@@ -83,7 +83,7 @@ Catholic churches and schools have access to hundreds of potential grant opportu
 
 **Notifications:**
 - Email when new grants match profile (future)
-- Deadline reminders (future)
+- Deadline reminders (future; for now, **Add Deadlines to Calendar** on the Results page downloads a calendar file with reminders 2 weeks and 3 days before each due date)
 
 ### 3.1.2 Terminal UI — Processing States
 
@@ -319,6 +319,7 @@ VERIFY BEFORE APPLYING:
 - PDF report (shareable with pastor, finance council)
 - Markdown file
 - CSV of shortlisted grants
+- Calendar file (.ics) of upcoming due dates, with reminders (added October 2026)
 
 ---
 
@@ -329,7 +330,7 @@ VERIFY BEFORE APPLYING:
 | Input | Format | Required? | Notes |
 |-------|--------|-----------|-------|
 | Claude API Key | String | Yes | Entered in web UI, stored encrypted |
-| Grant Database | Excel (.xlsx) | Yes | User uploads their grants |
+| Grant Database | Excel (.xlsx) | Yes | User uploads their grants, or loads the built-in starter database |
 | Church Website URL | URL | No | AI scans for org info |
 | School Website URL | URL | No | AI scans if separate from church |
 | Questionnaire Answers | Form responses | Yes | AI-generated questions |
@@ -347,6 +348,7 @@ VERIFY BEFORE APPLYING:
 | **Due Date** | Date | Deadline displayed prominently; "Rolling" if ongoing |
 | Match Explanations | Text | AI reasoning referencing specific inputs |
 | Export Report | PDF / MD / CSV | Shareable summary |
+| Deadline Calendar | .ics | Upcoming due dates with reminders (added October 2026) |
 
 ### Match Card Display (Required Fields)
 
@@ -420,7 +422,7 @@ Every grant gets a **match score from 0-100%** based on:
 5. Flag potentially sensitive content (don't include in profile without review)
 
 ### Matching Rules
-1. **Hard disqualifiers first** — If grant requires Texas and org is in Ohio, mark "Not Eligible"
+1. **Hard disqualifiers first** — If grant requires Texas and org is in Ohio, mark "Not Eligible". A funder that doesn't fund religious organizations is "Not Eligible" too, decided in code before any AI call
 2. **Deadline awareness** — If deadline passed, move to "Expired." If <30 days, flag "Urgent"
 3. **Source attribution** — Every match explanation should reference WHERE the need was identified
 4. **Conservative on eligibility** — If uncertain, say "Verify this requirement" rather than assuming
@@ -488,6 +490,11 @@ PostgreSQL Database
   "source": "GrantFinder v3.0 spreadsheet"
 }
 ```
+
+> **Implementation note (October 2026):** grant records also carry optional facts: `deadline_notes`,
+> `geography`, `religious_eligibility` (`eligible`, `secular_purpose_only`, `excluded`, `unclear`),
+> `focus_areas` (the funder's current priorities), `typical_award`, `last_verified`, `confidence` and
+> `sources` (`frontend/src/server/types.ts`, `docs/grant-discovery.md`).
 
 ### Organization Profile Schema
 ```json
@@ -598,6 +605,12 @@ Everything is on Netlify; no other hosting service is used.
 8. **Real-time collaboration** — Single user per session
 9. **Payment / premium tiers** — Free for v1.0
 
+> **Implementation note (October 2026):** GrantFinder now ships a starter database (89 grants a
+> Catholic school or parish in Texas can apply to, each checked on the funder's own site). A monthly
+> research run re-checks it on a review branch, and users pull each new edition with **Update my
+> grants**. Deadlines are not synced to a calendar, but **Add Deadlines to Calendar** downloads a
+> calendar file.
+
 ### Roadmap: Future Versions
 
 #### v1.5 — Teacher Edition (Classroom Grants)
@@ -682,7 +695,7 @@ A lighter version for individual teachers to find and apply to classroom grants.
 | # | Question | Options | Decision |
 |---|----------|---------|----------|
 | 1 | **Auth required?** | Anonymous sessions vs. accounts | **Google OAuth only** — no username/password storage |
-| 2 | **Pre-loaded grant database?** | Ship with default Catholic grants vs. blank | **Start blank** — user uploads their own grant database |
+| 2 | **Pre-loaded grant database?** | Ship with default Catholic grants vs. blank | **Start blank** — user uploads their own grant database (changed October 2026: a verified starter database ships and loads on request; see `docs/grant-discovery.md`) |
 | 3 | **Document size limits?** | Per-file and total limits | 50 pages per doc, 20 docs max, 500 pages total |
 | 4 | **How to handle sensitive content in docs?** | Auto-redact? Warn user? Local-only mode? | Warn user; they control what they upload |
 | 5 | **Can user edit Parish Profile after generation?** | Full edit vs. regenerate only | Allow inline edits before matching |

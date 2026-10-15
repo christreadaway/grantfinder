@@ -7,11 +7,64 @@ enter the database from four sources, all merged with automatic deduplication
 | Source | Endpoint | Requires Claude API key | What it does |
 |---|---|---|---|
 | Excel upload | `POST /api/grants/upload` | No | User's own spreadsheet (5-category format, `.xlsx`, up to 4 MB). Merges into the database: a row matching a saved grant updates the cells it filled in; nothing is deleted |
-| Starter database | `POST /api/discovery/seed` | No | Built-in curated set: national Catholic funders, secular grants faith-based orgs qualify for, TX-focused foundations, plus foundations to monitor |
-| Grants.gov | `POST /api/discovery/grants-gov` | No | Runs as a job. Live search of the free Grants.gov Search2 API for open + forecasted federal opportunities. Keywords derive from the org profile (security concerns, facility needs, food pantry, school programs) or can be passed explicitly. If Grants.gov doesn't answer, the step fails with a clear message instead of reporting 0 grants. In direct mode (the Netlify default, about a minute per step) up to 4 keyword searches run at once, 10 seconds each at most, and a keyword that no longer fits is skipped and noted; with the background worker they run one after another, 30 seconds each at most |
-| AI web discovery | `POST /api/discovery/web-search` | Yes | Runs as a job. Claude uses its server-side web search tool to find current grant opportunities tailored to the organization profile (plus an optional focus typed on the dashboard). Instructed to only report grants with real web evidence and to use "Check website" when a deadline can't be verified. In direct mode Claude runs at most 3 web searches (8 with the background worker) and one continuation of a paused search, and is asked for 5-8 grants, so the step ends within its minute. Grants already listed when time runs out are kept; if none were, the step says so plainly and suggests a narrower focus |
+| Starter database | `POST /api/discovery/seed` | No | Built-in list of 89 grants a Catholic school or parish in Texas can apply to (Catholic funders, Texas funders, and national programs open to private religious schools), each checked on the funder's own site on 2026-10-15, plus 8 foundations to monitor. Loading it again refreshes your copy (see "The starter database" below) |
+| Grants.gov | `POST /api/discovery/grants-gov` | No | Runs as a job. Live search of the free Grants.gov Search2 API for open + forecasted federal opportunities. Keywords derive from the org profile (security concerns, facility needs, food pantry, school programs) or can be passed explicitly. If Grants.gov doesn't answer, the step fails with a clear message instead of reporting 0 grants. In direct mode (the Netlify default, about a minute per step) up to 4 keyword searches run at once, 10 seconds each at most, and a keyword that no longer fits is skipped and noted; with the background worker they run one after another, 30 seconds each at most. Each result has geography "National (federal)" and religious eligibility "unclear" (check the listing) |
+| AI web discovery | `POST /api/discovery/web-search` | Yes | Runs as a job. Claude uses its server-side web search tool to find current grant opportunities tailored to the organization profile (plus an optional focus typed on the dashboard). Instructed to only report grants with real web evidence and to use "Check website" when a deadline can't be verified. It asks for the same facts the starter database has (deadline notes, typical award, funder priorities, geography, religious eligibility) and to skip programs that exclude religious organizations, religious schools or private schools. A result marked excluded anyway is never saved, and the notes say how many were skipped. In direct mode Claude runs at most 3 web searches (8 with the background worker) and one continuation of a paused search, and is asked for 5-8 grants, so the step ends within its minute. Grants already listed when time runs out are kept; if none were, the step says so plainly and suggests a narrower focus |
 
-`GET /api/discovery/sources` reports how many grants came from each source.
+`GET /api/discovery/sources` reports how many grants came from each source, plus
+`starter`: `updated` (the date of the starter database this site carries), `loaded` (the
+edition you last loaded) and `update_available` (true when you have starter grants from an
+older edition).
+
+## The starter database
+
+`frontend/src/server/data/seed_grants.json` holds 89 grants and 8 foundations. It lists only
+grants a Catholic school or parish in Texas can apply to. Programs that ended, are limited to
+another region, or are closed to parishes or parish schools are left out. Its `"updated"` field
+is the date of the last research run (2026-10-15).
+
+Every starter grant has:
+
+- `deadline`: "YYYY-MM-DD", "Annual: Month D", "Rolling" or "Check website", plus
+  `deadline_notes` (cycles, letter-of-inquiry steps)
+- `amount`, and `typical_award` when the funder publishes one
+- `focus_areas`: the funder's current priorities
+- `geography`: where applicants must be
+- `religious_eligibility`: `eligible`, `secular_purpose_only` (may apply, but the money can't
+  pay for religious activity) or `unclear` (the funder doesn't say)
+- `eligibility_notes`, `last_verified` (YYYY-MM-DD), `confidence` (`verified`, or `partial`
+  when some facts couldn't be confirmed) and `sources` (the pages it was checked against)
+
+In code the new fields are optional (`GrantBase` in `types.ts`), because uploaded and
+discovered grants may not have them. `grantDetails.ts` reads them leniently from the seed file,
+spreadsheets and Claude's answers.
+
+**Load Starter Database** refreshes your copy, so it is safe to click again:
+
+- A starter grant you already have gets the new details in place. It keeps its id, so
+  applications, shortlists and results keep working. A renamed program is found by its old
+  name (`renamed_from` in the file).
+- New starter grants are added.
+- A starter grant that is no longer listed is removed. When an application uses it, it is kept
+  as CLOSED with a note saying why.
+- Grants you added yourself (upload, Grants.gov, web discovery) are never changed.
+
+The response adds `updated` and `retired` counts, and the notes say what changed ("Updated N
+starter grants with the latest deadlines and details.", "Retired N grants no longer offered or
+not open to Catholic schools: ..."). When this site carries a newer edition than the one you
+loaded, the dashboard says "The starter grant database was updated [date]." with an **Update my
+grants** button, on the Grant Database step and on the Results page.
+
+**Monthly research.** The grant-research skill (`.claude/skills/grant-research/SKILL.md`; run it
+by hand with `/grant-research`) re-checks every grant on the funder's site and looks for new ones
+in four areas: Catholic funders, Texas funders, national programs open to private religious
+schools, and AI in education (tag `ai`). Research agents follow `tools/grant-research/BRIEF.md`.
+`tools/grant-research/merge_seed.py` validates and merges their work and writes
+`docs/grant-research-log.md` and `tools/grant-research/excluded.json` (programs found closed to
+Catholic schools, so they aren't added again). A scheduled task runs it on the 1st of every month
+at 5:54 AM Central in a fresh Claude Code session (first run 2026-11-01). It pushes the branch
+`grant-research/YYYY-MM` for review and never merges. The owner merges on GitHub, Netlify
+deploys, and each user clicks **Update my grants**.
 
 ## Recommended flow
 
@@ -27,14 +80,24 @@ enter the database from four sources, all merged with automatic deduplication
 3. Run Grants.gov search + AI web discovery — both use the profile to target
    the search, so they find more relevant grants after the profile exists.
 4. Optionally upload your own Excel on top.
-5. Run matching. Discovery is additive and idempotent — re-running a source
-   only adds grants you don't already have.
+5. Run matching. Grants.gov and web discovery only add grants you don't
+   already have, an upload also updates the grants it matches, and loading the
+   starter database again brings its grants up to date (see above).
 
 ## Matching improvements that ship with discovery
 
-- **Deterministic hard filters** (no AI cost, guaranteed): TX-only grants are
-  auto-disqualified for non-TX orgs, `CLOSED` grants and parseable past
-  deadlines are marked not-eligible before any AI scoring.
+- **Deterministic hard filters** (no AI cost, guaranteed): a grant whose
+  `religious_eligibility` is `excluded` is Not Eligible ("this funder does not
+  fund religious organizations or religious schools... No need to apply"),
+  TX-only grants are auto-disqualified for non-TX orgs, and `CLOSED` grants and
+  parseable past deadlines are marked not-eligible, all before any AI scoring.
+- **Grant facts in the scoring prompt**: when a grant has them, Claude also
+  gets its `geography`, `religious_eligibility`, `deadline_notes`,
+  `funder_priorities` (its `focus_areas`) and `typical_award`, with how to read
+  them: outside the geography means eligibility near 0; `secular_purpose_only`
+  is judged on the organization's non-religious needs; `unclear` lowers
+  completeness and the explanation says "confirm religious eligibility"; an
+  invitation-only program scores low on timing.
 - **Full context scoring**: questionnaire answers (verbatim Q&A pairs),
   free-form notes, previous grants, and student count now feed the scoring
   prompt. Previously questionnaire answers and free-form text were discarded.
@@ -95,7 +158,8 @@ enter the database from four sources, all merged with automatic deduplication
 - **Top picks** (at the top): up to 5 of your strongest matches (excellent or
   good) whose deadline is still open, soonest deadline first; when there are
   fewer than 5, possible matches fill in. Each says when it is due ("Due
-  [date] · N days left", "Rolling", or "Check the funder's site"), with
+  [date] · N days left", "Rolling", or "Check the funder's site"), its amount
+  (and typical award) and the same chips as the match cards, with
   "Investigate" (opens the funder's page in a new tab; shown only for a real
   web address) and "Start application" (or "Open application" when one
   exists).
@@ -105,17 +169,44 @@ enter the database from four sources, all merged with automatic deduplication
 - **Every match card** shows its next due date and a days-left badge (red
   within 14 days, amber within 45, "Last day", "Past deadline"; no badge for
   rolling or unknown deadlines).
+- **Grant facts on each card**, for whatever the grant record has: chips for
+  religious eligibility ("Catholic schools eligible", "Non-religious uses
+  only", "Religious eligibility not stated", "Doesn't fund religious orgs"),
+  geography, and "Verified [date]" or "Partly verified [date]"; then "Typical
+  award", "Deadline details", "What they fund now" (the funder's priorities)
+  and "Who can apply".
+- **Exports**: "Export CSV", "Export Report (Markdown)" and "Add Deadlines to
+  Calendar" (`POST /api/export`, formats `csv`, `md`, `pdf`, `ics`). The CSV
+  adds the columns Geography, Religious Eligibility, Deadline Notes, Typical
+  Award, Funder Priorities, Eligibility Notes and Last Verified; the Markdown
+  report adds a row for each one a grant has. The calendar (`ics`) has an
+  all-day event on each upcoming due date of your excellent, good and possible
+  matches (and any you shortlisted), with reminders 2 weeks and 3 days before.
+  Each event's id is the grant id plus the date, so importing the file again
+  updates the events instead of adding copies. When no grant has an upcoming
+  date (rolling and "Check website" deadlines can't go on a calendar) the
+  export answers 422 and says so.
+- **Starter update notice**: when a newer starter database is out, the
+  Results page shows "The starter grant database was updated [date]." with
+  **Update my grants** (run matching again afterwards to score any new grants).
 - **Computed on every read, never stored:** `GET /api/processing/match-results/latest`
   and `GET /api/processing/match-results/{session_id}` add to each match
   `next_deadline` (YYYY-MM-DD; "Annual: October 15" becomes the coming October
   15; null for rolling or unreadable deadlines), `days_left` (whole days from
   today, negative once passed, or null) and `deadline_passed`, counted for
   today in `GRANTFINDER_TIMEZONE` (Central time by default), so the countdown
-  is right whenever the results are opened.
+  is right whenever the results are opened. Each match also shows its grant's
+  current deadline, amount, link and grant facts (`withGrantDetails` in
+  `routes/processing.ts`), so a refreshed starter database shows up in saved
+  results and exports without matching again.
 
 ## Data model additions (used by the grant writer)
 
-`Grant` now carries `source`, `eligibility_notes`, and `funds_for` tags.
+`Grant` now carries `source`, `eligibility_notes`, and `funds_for` tags, plus
+the optional grant facts described under "The starter database"
+(`deadline_notes`, `geography`, `religious_eligibility`, `focus_areas`,
+`typical_award`, `last_verified`, `confidence`, `sources`). A match copies
+all of them except `sources`.
 `OrganizationProfile` now carries `questionnaire_answers` (verbatim Q&A) and
 `free_form_notes`. These give an application-drafting feature (v2.0 PRD) the
 raw material it needs: what the funder requires, and everything the user told
@@ -153,13 +244,23 @@ Direct-mode matching settings live in `services/ai.ts`
 `MATCH_MAX_PARTS` 12).
 
 Code: `frontend/src/server/services/discovery.ts`, `services/excel.ts`,
-`routes/grants.ts`, `routes/discovery.ts`, `handlers/discovery.ts`; profile
-building and matching in `services/ai.ts`, `routes/processing.ts`,
-`handlers/processing.ts`; the Results page in `frontend/src/app/dashboard/page.tsx`.
-Tests: `tests/engine/grants.test.mts` (130 checks),
+`routes/grants.ts`, `routes/discovery.ts`, `handlers/discovery.ts`; the
+starter database in `data/seed_grants.json`; grant facts in `types.ts` and
+`grantDetails.ts`; profile building and matching in `services/ai.ts`,
+`routes/processing.ts`, `handlers/processing.ts`; exports in
+`services/exportResults.ts` and `routes/export.ts`; the Results page in
+`frontend/src/app/dashboard/page.tsx`.
+Tests: `tests/engine/grants.test.mts` (132 checks),
 `tests/engine/processing.test.mts` (140 checks: website scan, questionnaire,
-documents, matching, and the deadline fields computed when results are read) and `tests/engine/direct-processing.test.mts` (20
+documents, matching, and the deadline fields computed when results are read), `tests/engine/direct-processing.test.mts` (20
 checks: matching in parts, and the scan, Grants.gov, web discovery, documents
-and questionnaire inside one-minute steps).
-`cd ~/grantfinder && bash tests/engine/run_all.sh` also runs the grants and
-processing suites a second time in direct job mode.
+and questionnaire inside one-minute steps) and `tests/engine/finder.test.mts`
+(134 checks: reading religious eligibility and the other grant facts, the
+starter refresh, the religious exclusion in matching and web discovery, the
+results overlay, the calendar export, the CSV and Markdown columns, and the
+new spreadsheet columns).
+`cd ~/grantfinder && bash tests/engine/run_all.sh` also runs the grants,
+processing and finder suites a second time in direct job mode. The suites
+compute deadlines from today, and the engine honors
+`GRANTFINDER_TODAY=YYYY-MM-DD` in test mode only, so you can check they pass
+on another date: `cd ~/grantfinder && GRANTFINDER_TODAY=2028-11-20 bash tests/engine/run_all.sh`.

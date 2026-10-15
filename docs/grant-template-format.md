@@ -45,6 +45,12 @@ better with a description.
 | Eligibility | Requirements to apply | "501(c)(3), community organization" |
 | Apply URL | Link to application | "https://kaboom.org/apply" |
 | Geographic Restriction | State or region limits | "Texas" or "Nationwide" |
+| Region | Where applicants must be, in the funder's words (shown on the results) | "Central Texas (Travis, Williamson, Hays counties)" |
+| Religious Eligibility | Whether a Catholic school or parish may apply (see below). A grant read as excluded is Not Eligible in matching, without an AI call | "Catholic schools eligible" |
+| Deadline Notes | Cycles, letter-of-inquiry steps, invitation-only rules | "Letter of inquiry by March 1; full proposal by invitation" |
+| Typical Award | Typical or median award, when the funder publishes it | "$5,000" |
+| Funding Priorities | The funder's current priorities, separated by semicolons or commas | "Facility repairs; Safety upgrades" |
+| Last Verified | When you last checked the grant on the funder's site (YYYY-MM-DD or a date cell) | "2026-10-15" |
 | Categories | Tags (comma-separated) | "playground, youth, facilities" |
 | Notes | Additional information | "Requires 50+ volunteers for build day" |
 
@@ -54,16 +60,37 @@ better with a description.
    - "Grant Name", "Name", "Grant", "Title"
    - "Amount Max", "Max Amount", "Maximum", "Up To"
    - "Due Date", "Deadline", "Application Deadline"
+   - "Funding Priorities", "Focus Areas", "Priorities"
+   - "Region", "Service Area"
+   - "Religious Eligibility", "Faith-Based Eligibility", "Religious Orgs Eligible"
+   - "Deadline Notes", "Cycle Notes"; "Typical Award", "Average Award"; "Last Verified", "Verified"
 
-2. **Dates** - Use YYYY-MM-DD format, an Excel date cell, "Rolling" for ongoing opportunities,
+2. **Religious Eligibility** - Write `eligible`, `secular_purpose_only`, `excluded` or `unclear`,
+   or plain words: "Yes", "No restrictions" and "Faith-based schools welcome" read as eligible;
+   "Secular programs only" as non-religious uses only; "No" and "Religious organizations are not
+   eligible" as excluded; "Unclear" or "Not stated" as unclear. Words it can't read are left blank.
+
+3. **Geography** - "Geographic Restriction" (or "Geography", "Geo Qualified") decides whether the
+   grant is Texas-only, open to all, or one to check. Any value other than a plain yes or no (or
+   "Check eligibility") is also kept, as written, as where applicants must be. A "Region" column,
+   when present, is used for that instead.
+
+4. **Dates** - Use YYYY-MM-DD format, an Excel date cell, "Rolling" for ongoing opportunities,
    or "Annual: October 15" for a deadline that repeats every year
 
-3. **Amounts** - Can include $ and commas (e.g., "$15,000" or just "15000")
+5. **Amounts** - Can include $ and commas (e.g., "$15,000" or just "15000"). A Typical Award that
+   starts with "Not published" is treated as blank.
 
-4. **Categories** - Separate multiple categories with commas
+6. **Categories** - Separate multiple categories with commas
 
 ## Sample Row
 
 | Grant Name | Granting Authority | Deadline | Amount Max | Description | Eligibility | Apply URL |
 |------------|-------------------|----------|------------|-------------|-------------|-----------|
 | Koch Foundation Grant | Koch Foundation | 2026-05-01 | 100000 | Supports evangelization, catechesis, Catholic schools | 501(c)(3), Listed in Catholic Directory | https://thekochfoundation.org |
+
+With the optional grant facts (a made-up funder, for illustration):
+
+| Grant Name | Region | Religious Eligibility | Deadline Notes | Typical Award | Funding Priorities | Last Verified |
+|------------|--------|-----------------------|----------------|---------------|--------------------|---------------|
+| School Facility Repair Grant | Example County, Texas | Faith-based schools welcome | Applications open each January | $5,000 | Facility repairs; Safety upgrades | 2026-10-15 |

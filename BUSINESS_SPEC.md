@@ -30,10 +30,12 @@ An AI-powered grant matching platform that builds a comprehensive profile of a C
 4. **Non-Catholic Qualifying** — Secular grants Catholic orgs can apply for
 5. **Catholic Foundations** — Grants from Catholic philanthropic organizations
 
+**Starter database:** 89 grants a Catholic school or parish in Texas can apply to, plus 8 foundations to monitor. Each was checked on the funder's own site (last on 2026-10-15) and is re-checked every month on a review branch. **Update my grants** refreshes a user's copy in place.
+
 ### Grant Data Structure
 - **Required Fields:** Grant Name, Deadline, Amount, Funder, Description, Contact, URL, Status, Geo Qualified
-- **Optional:** Funder Stats (historical giving data)
-- **Upload:** Excel (.xlsx) with flexible column mapping
+- **Optional:** Funder Stats (historical giving data); deadline notes, typical award, the funder's current priorities, geography, religious eligibility (Catholic schools eligible, non-religious uses only, excluded, or not stated), eligibility notes, last verified date and sources
+- **Upload:** Excel (.xlsx) with flexible column mapping, including Religious Eligibility, Deadline Notes, Typical Award, Funding Priorities, Region and Last Verified columns
 
 ### AI Matching Engine
 - **Probability Scoring (0-100%)** with weighted factors:
@@ -42,6 +44,7 @@ An AI-powered grant matching platform that builds a comprehensive profile of a C
   - Capacity (15%) — Can the org handle the application and reporting?
   - Timing (10%) — Is the deadline realistic?
   - Completeness (5%) — How much profile data is available for matching?
+- **Hard filters before any AI call:** a funder that doesn't fund religious organizations, a Texas-only grant for an organization outside Texas, a closed grant or a past deadline is Not Eligible
 
 ### Terminal-Style Processing UI
 - Real-time progress from each AI step (the website checks each running step every 1-3 seconds, and keeps checking through a Wi-Fi drop)
@@ -49,7 +52,8 @@ An AI-powered grant matching platform that builds a comprehensive profile of a C
 - Professional dark mode aesthetic
 
 ### Results Page
-- **Top picks:** up to 5 strong matches whose deadline is still open, soonest deadline first, each with "Start application" (and "Investigate" when the funder has a web address)
+- **Top picks:** up to 5 strong matches whose deadline is still open, soonest deadline first, each with its amount, eligibility chips, "Start application" (and "Investigate" when the funder has a web address)
+- **Grant facts on every match:** whether Catholic schools may apply, where applicants must be, when it was last verified, the typical award, deadline details, what the funder funds now and who can apply
 - **Deadline countdown:** every match shows its next due date and, when the date is known, a days-left badge (red within 14 days, amber within 45, "Past deadline")
 - **Sort and filter:** "Best match" or "Deadline soonest", and "Hide not eligible", remembered in the browser
 
@@ -62,7 +66,8 @@ An AI-powered grant matching platform that builds a comprehensive profile of a C
 
 ### Export Options
 - **Markdown** — Formatted report with match details (a PDF request returns this Markdown for now, ready to print to PDF)
-- **CSV** — Spreadsheet-ready data
+- **CSV** — Spreadsheet-ready data, with each grant's geography, religious eligibility, deadline notes, typical award, funder priorities, eligibility notes and last verified date
+- **Calendar (.ics)** — "Add Deadlines to Calendar": the upcoming due dates of excellent, good and possible matches, with reminders 2 weeks and 3 days before (Google, Outlook or Apple Calendar)
 - **Grant applications (GrantWriter)** — Word (.docx), Markdown, portal paste-in text with per-field counts, and a JSON form-field map
 
 ## 5. Tech Stack
@@ -87,8 +92,8 @@ An AI-powered grant matching platform that builds a comprehensive profile of a C
 - **Built:** Complete engine in TypeScript (ported from the original FastAPI backend) with all routes and services
 - **Built:** Complete frontend (Next.js) with setup wizard, profile builder, matching results with Top picks and deadline countdowns, and the GrantWriter (Application Checklist, Funder History, drafts you can refine or edit by hand, with earlier versions kept)
 - **Built:** AI service integration with Claude API (AI steps as jobs that fit any Netlify plan, cost and token logging)
-- **Built:** 5-category Excel parser, starter database, Grants.gov search, AI web discovery
-- **Tested:** 1,260 automated engine checks with a mock Claude (10 suites, 693 checks, then 5 of them again in direct job mode, the way Netlify runs AI steps by default), a browser test of the whole journey (453 checks), and a local run on the Netlify runtime
+- **Built:** 5-category Excel parser, starter database (89 grants checked on the funders' sites, refreshed monthly), Grants.gov search, AI web discovery, calendar export of deadlines
+- **Tested:** {{ENGINE_TOTAL}} automated engine checks with a mock Claude (11 suites, {{ENGINE_FIRST_PASS}} checks, then 6 of them again in direct job mode, the way Netlify runs AI steps by default), a browser test of the whole journey ({{E2E_TOTAL}} checks), and a local run on the Netlify runtime
 - **Deploy:** Netlify only (`docs/deployment.md`); a live-key run with real data is the next milestone
 
 ## 8. Business Model
@@ -105,7 +110,7 @@ An AI-powered grant matching platform that builds a comprehensive profile of a C
 
 ## 10. Open Questions / Next Steps
 - Integration with catholicevents data for automatic org profile enrichment
-- Grant deadline notification system
+- Grant deadline notification system (for now, the calendar export adds reminders 2 weeks and 3 days before each due date)
 - Application tracking (applied, pending, awarded, rejected)
 - Grant writer marketplace (connect schools with grant writers)
 - Historical success rate tracking per grant funder

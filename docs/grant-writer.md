@@ -426,7 +426,7 @@ npx tsx ../tests/engine/writer.test.mts
 ```
 
 `cd ~/grantfinder && bash tests/engine/run_all.sh` runs it twice: once with
-the other 9 suites, and again in direct job mode (the Netlify default).
+the other 10 suites, and again in direct job mode (the Netlify default).
 `tests/engine/direct.test.mts` (21 checks) covers drafting in parts (each
 section once, numbering across parts, Redraft All in parts), the skipped
 voice rewrite and tighten pass, a guidelines page that never answers, and

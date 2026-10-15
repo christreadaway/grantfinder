@@ -77,7 +77,7 @@ everyone out and makes saved API keys unreadable, so people would re-enter them)
    `"claude_api":"api.anthropic.com"` means your Claude key goes straight to Anthropic.)
 2. Open `https://<your-site>/`. You should see **Continue as guest**.
 3. Click it, paste your Claude API key (from [console.anthropic.com](https://console.anthropic.com),
-   it starts with `sk-ant-`), then **Load Starter Database**: 24 grants should load, including
+   it starts with `sk-ant-`), then **Load Starter Database**: 89 grants should load, including
    the Kenedy Memorial Foundation.
 
 Each person brings their own Claude API key; it is encrypted before it is stored, and Netlify
@@ -190,6 +190,10 @@ Paste any of these into Claude Code when something breaks.
   store under **Blobs** in the Netlify site menu.
 - **Netlify's free plan is enough** for one school (legacy or current). Each AI step's progress
   checks count as function calls.
+- **The starter grant database changes only when you deploy.** The monthly grant research pushes
+  a `grant-research/YYYY-MM` branch for review. Merge it on GitHub, Netlify deploys it, and each
+  user who loaded the starter database then sees "The starter grant database was updated" with
+  an **Update my grants** button.
 
 ## Run it on your Mac instead
 

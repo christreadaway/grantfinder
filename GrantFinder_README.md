@@ -11,11 +11,11 @@ GrantFinder AI scans your website, reads your bulletins and meeting minutes, ask
 
 ## 🎯 What It Does
 
-1. **Build your grant database** — a curated starter database, live Grants.gov search, AI web discovery, and/or your own Excel file
+1. **Build your grant database** — a starter database of 89 grants a Catholic school or parish in Texas can apply to (each checked on the funder's own site, re-checked monthly), live Grants.gov search, AI web discovery, and/or your own Excel file
 2. **Scan your website** — AI crawls your church/school site to learn about your organization (or type the basics if your site blocks bots)
 3. **Answer a smart questionnaire** — AI generates questions based on what grants actually require
 4. **Upload parish documents** — Bulletins, meeting minutes, newsletters, strategic plans, prior grant reports
-5. **Get matched** — Ranked recommendations with explanations of why each grant fits, Top picks with open deadlines (soonest first), and a days-left countdown on each match with a known deadline
+5. **Get matched** — Ranked recommendations with explanations of why each grant fits, Top picks with open deadlines (soonest first), and a days-left countdown on each match with a known deadline. Funders that don't fund religious organizations are ruled out before any AI call. Export a CSV, a Markdown report, or your deadlines as a calendar file with reminders
 6. **Write the application** — an Application Checklist (due date, next step, what is ready), requirements (pasted or from a file), the funder's history (what they have actually funded, from your notes, files or a web search, with a suggested ask), fit and gap analysis, stakeholder questions, drafts in your voice that you can refine or edit by hand (earlier versions are kept), a rubric self-score, and Word/portal exports
 
 ### Terminal-Style Processing
@@ -66,7 +66,7 @@ Every grant gets a probability score:
 └──────────────────────────────────────────────────────┘
 ```
 
-Every match shows: **Score**, **Amount**, **Due Date**, and **Why it fits**.
+Every match shows: **Score**, **Amount**, **Due Date**, and **Why it fits**. When the grant record has them, it also shows whether Catholic schools can apply, where applicants must be, when the grant was last verified, the typical award, deadline details, what the funder funds now, and who can apply.
 
 ---
 
@@ -106,7 +106,8 @@ Open [http://localhost:3000](http://localhost:3000)
 Your work is saved as you go. Come back later and the dashboard reopens it before showing a step:
 if you already have results it opens on Results; if Claude already wrote your questions it opens on
 them, with your answers filled in; and your applications are listed at the top. If your internet
-drops, nothing is lost: click **Try again**.
+drops, nothing is lost: click **Try again**. When a newer starter database is out, the dashboard says so; click
+**Update my grants** to bring your copy up to date (your applications and results keep working).
 
 ### Deploy to the Web
 
@@ -130,11 +131,17 @@ Upload an Excel file (.xlsx) with these columns:
 | Deadline | | Date (YYYY-MM-DD) or "Rolling" |
 | Amount Min | | Minimum grant amount |
 | Amount Max | | Maximum grant amount |
-| Description | ✅ | What the grant funds |
+| Description | | What the grant funds (strongly recommended) |
 | Eligibility | | Requirements to apply |
 | Apply URL | | Link to application |
 | Geographic Restriction | | State/region limits |
 | Categories | | Tags (comma-separated) |
+| Religious Eligibility | | Whether Catholic schools may apply ("Yes", "Secular programs only", "Religious organizations are not eligible"...) |
+| Region | | Where applicants must be, in the funder's words |
+| Deadline Notes | | Cycles, letter-of-inquiry steps |
+| Typical Award | | Typical award, when published |
+| Funding Priorities | | The funder's current priorities (semicolon-separated) |
+| Last Verified | | Date you last checked the funder's site (YYYY-MM-DD) |
 
 Sheet names and every accepted column are in [docs/grant-template-format.md](./docs/grant-template-format.md).
 Uploads merge into your database (nothing is deleted), up to 4 MB per file.

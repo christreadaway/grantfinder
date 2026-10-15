@@ -99,7 +99,14 @@ What keeps a step from being lost or paid for twice:
   event. Every Claude call is logged automatically with tokens, latency, cost, and the
   correlation id, and stored on its job.
 - **Deadlines**: `deadlines.ts` (`parseDeadline`, `deadlinePassed`, `isUrgent`) handles
-  dates and recurring "Annual: October 15" deadlines in Central time.
+  dates and recurring "Annual: October 15" deadlines in Central time. `todayIso()` honors
+  `GRANTFINDER_TODAY=YYYY-MM-DD` only in test mode (`GRANTFINDER_TEST_MODE=1`), so suites can
+  run as if on another date.
+- **Grant facts**: the optional fields a grant can carry (`deadline_notes`, `geography`,
+  `religious_eligibility`, `focus_areas`, `typical_award`, `last_verified`, `confidence`,
+  `sources`) are typed in `types.ts` and read leniently by `grantDetails.ts`
+  (`parseGrantDetails`, `parseReligiousEligibility`) from the starter database, spreadsheets
+  and Claude's answers. Never fill one in without a source; leave it out instead.
 - **Fetching websites**: `net.ts` (`fetchPage`, `crawlSite`, `checkUrl`) with SSRF
   protection on every redirect and again when the connection is made (a DNS answer that
   changes to a private address between the check and the connect is refused).
@@ -128,6 +135,8 @@ What keeps a step from being lost or paid for twice:
 | `json.ts` | Lenient JSON extraction from model output and coercion helpers |
 | `net.ts`, `pdf.ts` | Safe web fetching and crawling; PDF text extraction |
 | `deadlines.ts` | Deadline parsing and urgency |
+| `grantDetails.ts` | Lenient parsing of the grant facts (religious eligibility, geography, deadline notes, priorities, typical award, last verified) |
+| `data/seed_grants.json` | The starter database: 89 grants and 8 foundations a Catholic school or parish in Texas can apply to, each checked on the funder's site, refreshed monthly by `/grant-research` (`docs/grant-discovery.md`) |
 | `routes/*.ts` | API routes by area (auth, system, grants, discovery, processing, profile, export, writer, checklist). The writer's include the guidelines file (`POST /api/writer/applications/{id}/grant-spec/upload`) and the funder history (`POST .../funder-profile`, `POST .../funder-profile/upload`, `DELETE .../funder-profile/files/{name}`); `routes/checklist.ts` serves `GET`/`PUT /api/writer/applications/{id}/checklist`; `POST /api/processing/match-grants/continue` scores grants a matching part didn't reach |
 | `services/*.ts` | Business logic and prompts by area |
 | `handlers/*.ts` | Job handlers by area (every Claude call; they run in all three job modes) |
@@ -145,6 +154,7 @@ applications/{userId}/{appId}     Application
 writer/{userId}/...               writer artifacts (grant specs, fit analyses, gaps, intake, drafts, scorecards)
 writer/{userId}/funder/{grantId}  FunderRecord: funder history notes, files, web research and the funder profile (one per grant)
 writer/{userId}/checklist/{appId} Application Checklist: items ticked by hand and their notes
+seedloaded/{userId}               the starter database edition this user last loaded (for "Update my grants")
 jobs/{userId}/{jobId}             Job (input, status, result, error, AI call log, notes)
 ratelimit/{bucket}/{ipHash}       sign-in rate-limit window
 ```
@@ -153,9 +163,13 @@ ratelimit/{bucket}/{ipHash}       sign-in rate-limit window
 
 ```bash
 cd ~/grantfinder
-bash tests/engine/run_all.sh      # 10 suites: foundation, deadlines, grants, processing, writer, regressions, direct, direct-processing, checklist, security; then processing, grants, writer, regressions, checklist again in direct mode (1,260 checks)
-bash tests/e2e/run_e2e.sh         # real browser through the whole journey on a production build (453 checks)
+bash tests/engine/run_all.sh      # 11 suites: foundation, deadlines, grants, processing, writer, regressions, direct, direct-processing, checklist, security, finder ({{ENGINE_FIRST_PASS}} checks); then processing, grants, writer, regressions, checklist, finder again in direct mode ({{ENGINE_TOTAL}} checks in all)
+bash tests/e2e/run_e2e.sh         # real browser through the whole journey on a production build ({{E2E_TOTAL}} checks)
 ```
+
+The suites compute deadlines from today, never from fixed dates. To check they pass on another
+date: `cd ~/grantfinder && GRANTFINDER_TODAY=2028-11-20 bash tests/engine/run_all.sh` (the
+engine honors it in test mode only).
 
 `direct.test.mts` and `direct-processing.test.mts` run with `GRANTFINDER_JOB_MODE=direct`, a set
 job budget (`GRANTFINDER_DIRECT_JOB_BUDGET_MS`: 45 and 5 seconds) and a slow mock Claude:
