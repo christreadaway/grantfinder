@@ -132,6 +132,13 @@ export interface JobOptions {
    * Pass null to allow parallel jobs (e.g. several document uploads).
    */
   exclusiveKey?: string | null;
+  /**
+   * The exclusive key already identifies the request (e.g. the website scan's
+   * key holds a hash of its addresses), so any running job of the same kind
+   * under that key counts as the same request even if the input differs in
+   * form (a trailing slash). Otherwise the inputs must match exactly.
+   */
+  keyIdentifiesRequest?: boolean;
 }
 
 /** Job ids embed their creation time (job_YYYYMMDDTHHMMSSZ_xxxx). */
@@ -253,10 +260,25 @@ export async function startJob(
     const active = await findActiveJob(user.id, exclusiveKey);
     if (active) {
       const minutes = Math.max(0, Math.round((Date.now() - Date.parse(active.created_at)) / 60000));
-      logger.info('job_already_running', { job_id: active.id, kind, user_id: user.id });
+      const ago = minutes === 0 ? 'less than a minute' : `${minutes} minute${minutes === 1 ? '' : 's'}`;
+      // Only the very same request (a double click, or a click after a reload)
+      // waits for the running job and shares its result. A different request
+      // (a refine while a redraft runs, re-analysis with new guidelines) must
+      // not be answered with another step's result, so it gets a plain 409.
+      const sameRequest =
+        active.kind === kind && (options.keyIdentifiesRequest === true || JSON.stringify(active.input ?? null) === JSON.stringify(input ?? null));
+      logger.info('job_already_running', { job_id: active.id, kind, running_kind: active.kind, same_request: sameRequest, user_id: user.id });
+      if (!sameRequest) {
+        throw new HttpError(
+          409,
+          active.kind === kind
+            ? `This step is already running with different details (started ${ago} ago). Wait for it to finish (the page updates when it does), then try again.`
+            : `Another step that changes the same sections is still running (started ${ago} ago). Wait for it to finish, then try again. What you typed is kept.`,
+        );
+      }
       throw new HttpError(
         409,
-        `This step is already running (started ${minutes === 0 ? 'less than a minute' : `${minutes} minute${minutes === 1 ? '' : 's'}`} ago). It will finish on its own; the page updates when it does.`,
+        `This step is already running (started ${ago} ago). It will finish on its own; the page updates when it does.`,
         { job_id: active.id, kind: active.kind, running: true },
       );
     }

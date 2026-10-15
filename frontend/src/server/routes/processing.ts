@@ -161,7 +161,10 @@ async function scanWebsite(ctx: RequestContext): Promise<Response> {
   const schoolUrl = websiteUrl(optionalString(body, 'school_url'));
   if (!churchUrl && !schoolUrl) throw new HttpError(400, 'At least one website URL is required');
   const input: ScanJobInput = { church_url: churchUrl, school_url: schoolUrl };
-  return startJob(ctx, PROCESSING_JOB_KINDS.scanWebsite, input, { exclusiveKey: scanExclusiveKey(churchUrl, schoolUrl) });
+  return startJob(ctx, PROCESSING_JOB_KINDS.scanWebsite, input, {
+    exclusiveKey: scanExclusiveKey(churchUrl, schoolUrl),
+    keyIdentifiesRequest: true,
+  });
 }
 
 async function generateQuestionnaire(ctx: RequestContext): Promise<Response> {
