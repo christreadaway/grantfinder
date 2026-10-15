@@ -190,7 +190,7 @@ check(
   seed1.data,
 );
 check('first seed load: updated 0, retired 0', seed1.data?.updated === 0 && seed1.data?.retired === 0, seed1.data);
-check(`seed notes mention the ${FOUNDATION_N} foundations`, seed1.data?.notes?.[0] === `Starter database also added ${FOUNDATION_N} foundations to monitor`, seed1.data?.notes);
+check(`seed notes mention the ${FOUNDATION_N} foundations (a full sentence)`, seed1.data?.notes?.[0] === `Also added ${FOUNDATION_N} foundations to monitor.`, seed1.data?.notes);
 
 let grantsA = await grantsOf(tokenA);
 check(`GET /api/grants returns the ${SEED_N} seed grants`, grantsA.length === SEED_N && grantsA.every((g) => g.source === 'seed' && g.user_id === userA.id && /^grant_[0-9a-f]{12}$/.test(g.id)), grantsA.length);
@@ -233,7 +233,7 @@ check(
   seed2.data?.updated === 0 && seed2.data?.retired === 0 && Array.isArray(seed2.data?.notes) && !seed2.data.notes.some((n: string) => /^(Updated|Retired) /.test(n)),
   seed2.data,
 );
-check('second seed load adds no foundations', seed2.data?.notes?.[0] === 'Starter database also added 0 foundations to monitor', seed2.data?.notes);
+check('second seed load adds no foundations and says nothing more (no notes)', Array.isArray(seed2.data?.notes) && seed2.data.notes.length === 0, seed2.data?.notes);
 const foundationsA2 = await api('GET', '/api/grants/foundations', { token: tokenA });
 check(`still ${FOUNDATION_N} foundations after the second load`, foundationsA2.data.length === FOUNDATION_N, foundationsA2.data.length);
 
@@ -451,7 +451,7 @@ const web2 = await call('POST', '/api/discovery/web-search', { token: tokenA, js
 check('web discovery again: added 0, duplicates 3', web2.status === 200 && web2.data.added === 0 && web2.data.duplicates === 3, web2.data);
 
 const pausedGrants = [
-  { grant_name: 'Example Playground Grant', funder: 'Example Play Fund', category: 'catholic_school', deadline: '2027-03-15', url: 'https://example.org/play' },
+  { grant_name: 'Example Playground Grant', funder: 'Example Play Fund', category: 'catholic_school', deadline: 'Annual: March 15', url: 'https://example.org/play' },
   { grant_name: 'Example Choir Grant', funder: 'Example Music Fund', category: 'church_parish', deadline: 'Check website', url: 'https://example.org/choir' },
 ];
 await mock.reset();

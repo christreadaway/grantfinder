@@ -283,6 +283,7 @@ check(
     confidence: 'verified',
     sources: ['https://example.org/a'],
     funder_intel: null,
+    religious_eligibility_text: 'Yes', // the person's own words are kept beside the reading
   }),
   full,
 );
@@ -307,7 +308,7 @@ check(
   'grantDetails: copies the detail fields (and not the sources list)',
   same(details.grantDetails({ ...full, eligibility_notes: '501(c)(3)' }), {
     eligibility_notes: '501(c)(3)', deadline_notes: full.deadline_notes, geography: 'Texas', religious_eligibility: 'eligible', focus_areas: ['STEM', 'literacy'],
-    typical_award: '$8,000', last_verified: '2026-10-01', confidence: 'verified', funder_intel: null, applicants: [], religious_eligibility_text: null,
+    typical_award: '$8,000', last_verified: '2026-10-01', confidence: 'verified', funder_intel: null, applicants: [], religious_eligibility_text: 'Yes',
   }),
   details.grantDetails({ ...full, eligibility_notes: '501(c)(3)' }),
 );
