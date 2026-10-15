@@ -1,16 +1,21 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Search, Upload, Globe, FileText, MessageSquare, Play,
   CheckCircle, AlertCircle, Loader2, ChevronRight, Settings,
-  LogOut, Database, BarChart3, Download, Bug, PenLine,
+  LogOut, Database, BarChart3, Download, Bug, PenLine, XCircle,
 } from 'lucide-react';
-import api, { onJobProgress } from '@/lib/api';
+import api, { blobErrorDetail, errorDetail, isSessionEnded, onJobProgress } from '@/lib/api';
+import { copyText, saveFile } from '@/lib/download';
 import { useStore } from '@/lib/store';
 
 type SetupStep = 'api-key' | 'grants' | 'website' | 'questionnaire' | 'documents' | 'processing' | 'results';
+type DiscoverySource = 'seed' | 'grants_gov' | 'web_discovery';
+type ExportFormat = 'csv' | 'md';
+type MatchResultsData = NonNullable<ReturnType<typeof useStore.getState>['matchResults']>;
+type JobSummary = Awaited<ReturnType<typeof api.listJobs>>[number];
 
 interface ProcessingLog {
   timestamp: string;
@@ -27,31 +32,332 @@ interface OrgBasics {
   student_count: string;
 }
 
+/** One question as the engine writes it (services/ai.ts parseQuestionnaire). */
+interface Question {
+  id: number;
+  question: string;
+  /** "text" | "boolean" | "select" | "multiselect" */
+  question_type: string;
+  options?: string[] | null;
+  required?: boolean;
+}
+
+interface Questionnaire {
+  questions: Question[];
+  total_questions?: number;
+}
+
+/** What a question holds on screen: true/false for yes/no, a list for multiple choice, text otherwise. */
+type AnswerValue = string | boolean | string[];
+
+/** profile.questionnaire_answers: every answer the engine has saved, matched by the question's text. */
+interface SavedAnswer {
+  question: string;
+  answer: unknown;
+}
+
+/** The parts of the saved organization profile this page reads. */
+interface SavedProfile {
+  organization_name?: string | null;
+  organization_type?: string | null;
+  city?: string | null;
+  state?: string | null;
+  diocese?: string | null;
+  student_count?: number | null;
+  has_school?: boolean;
+  website_url?: string | null;
+  school_website_url?: string | null;
+  free_form_notes?: string | null;
+  questionnaire_answers?: unknown;
+  sources?: unknown;
+  [field: string]: unknown;
+}
+
+interface GrantStats {
+  total_grants: number;
+  [field: string]: unknown;
+}
+
+interface ApplicationSummary {
+  id: string;
+  grant_name: string;
+  funder: string;
+  status: string;
+  urgent?: boolean;
+}
+
+/** An uploaded document's findings (key_facts: facts the application writer can cite, when the engine sends them). */
+interface DocumentExtraction {
+  facility_needs?: string[];
+  program_needs?: string[];
+  security_concerns?: string[];
+  key_facts?: string[];
+}
+
+interface DocumentResult {
+  ok: boolean;
+  message: string;
+}
+
+interface DiscoveryResult {
+  found?: number;
+  added: number;
+  total_grants: number;
+  notes?: string[];
+}
+
 /** Netlify accepts uploads up to about 4 MB; checking here gives a clear message instantly. */
 const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
 
-const errorDetail = (error: any, fallback: string): string =>
-  error?.response?.data?.detail || error?.message || fallback;
+const BIG_FILE_HELP =
+  'For a big report, make a text copy: in Word use File > Save As > Plain Text (.txt); for a PDF, select all the text (Ctrl+A or Cmd+A), copy it, paste it into a new document and save that as .txt, then add the .txt here. You can also paste key facts into "Anything else we should know?" on the Questions step.';
+
+const CONNECTION_PROBLEM =
+  "Can't reach GrantFinder right now. Check your internet connection, then try again. Your work is saved.";
+
+const GUEST_SIGN_OUT_WARNING =
+  "You are signed in as a guest. After you sign out, this work (applications, profile, saved key) can't be opened again. Export what you need first. Sign out anyway?";
+
+/** How long the session check and the reads that reopen saved work may take before "Try again" is offered. */
+const SESSION_CHECK_TIMEOUT_MS = 20_000;
+const RESUME_TIMEOUT_MS = 30_000;
+
+/** The session this browser replaced or signed out of, kept so lost guest work can still be recovered by hand. */
+const PREVIOUS_TOKEN_KEY = 'auth_token_previous';
+
+/** Application statuses (server/types.ts ApplicationStatus) in plain words. */
+const APPLICATION_STATUS_LABELS: Record<string, string> = {
+  analysis: 'Reading requirements',
+  intake: 'Gathering information',
+  drafting: 'Drafting',
+  review: 'Reviewing the draft',
+  export: 'Ready to export',
+};
+
+/** Keyboard focus ring for a "Browse Files" label that sits right after its (visually hidden) file input. */
+const FILE_LABEL_FOCUS =
+  'peer-focus-visible:outline-2 peer-focus-visible:outline-solid peer-focus-visible:outline-offset-2 peer-focus-visible:outline-[var(--primary)]';
+
+const STEPS: Array<{ id: SetupStep; label: string; icon: typeof Settings }> = [
+  { id: 'api-key', label: 'API Key', icon: Settings },
+  { id: 'grants', label: 'Grant Database', icon: Database },
+  { id: 'website', label: 'Website', icon: Globe },
+  { id: 'questionnaire', label: 'Questions', icon: MessageSquare },
+  { id: 'documents', label: 'Documents', icon: FileText },
+  { id: 'processing', label: 'Processing', icon: Play },
+  { id: 'results', label: 'Results', icon: BarChart3 },
+];
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+function logLine(status: ProcessingLog['status'], message: string): ProcessingLog {
+  return { timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }), status, message };
+}
+
+/** Reject with a timeout error (worded by errorDetail) if the engine doesn't answer in time. */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(Object.assign(new Error('GrantFinder took too long to answer.'), { code: 'ETIMEDOUT' }));
+    }, ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+const questionKey = (text: unknown): string => String(text ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+
+/** How a question is shown: unknown types, and choices without options, are plain text boxes. */
+function questionType(q: Question): 'boolean' | 'select' | 'multiselect' | 'text' {
+  if (q.question_type === 'boolean') return 'boolean';
+  if ((q.question_type === 'select' || q.question_type === 'multiselect') && q.options?.length) return q.question_type;
+  return 'text';
+}
+
+/** A saved answer in the shape this question's input needs, or undefined when it doesn't fit. */
+function toAnswerValue(q: Question, value: unknown): AnswerValue | undefined {
+  if (value === null || value === undefined) return undefined;
+  const type = questionType(q);
+  if (type === 'boolean') {
+    if (typeof value === 'boolean') return value;
+    const text = String(value).trim().toLowerCase();
+    if (['yes', 'true', 'y', '1'].includes(text)) return true;
+    if (['no', 'false', 'n', '0'].includes(text)) return false;
+    return undefined;
+  }
+  const options = q.options ?? [];
+  const option = (text: unknown) => options.find((o) => o.trim().toLowerCase() === String(text).trim().toLowerCase());
+  if (type === 'multiselect') {
+    let picked: unknown[] = [];
+    if (Array.isArray(value)) picked = value;
+    else if (typeof value === 'string') picked = option(value) ? [value] : value.split(/\s*[,;]\s*/);
+    const chosen = Array.from(new Set(picked.map(option).filter((o): o is string => Boolean(o))));
+    return chosen.length ? chosen : undefined;
+  }
+  if (type === 'select') return option(Array.isArray(value) ? value[0] : value);
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number') return String(value);
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  if (Array.isArray(value)) return value.map(String).join(', ');
+  return undefined;
+}
+
+/** Answers for these questions taken from earlier ones with the same question text. */
+function prefillAnswers(questions: Question[], earlier: SavedAnswer[]): Record<number, AnswerValue> {
+  const byText = new Map<string, unknown>();
+  for (const item of earlier) {
+    const key = questionKey(item.question);
+    if (key) byText.set(key, item.answer);
+  }
+  const prefilled: Record<number, AnswerValue> = {};
+  for (const q of questions) {
+    const key = questionKey(q.question);
+    if (!byText.has(key)) continue;
+    const value = toAnswerValue(q, byText.get(key));
+    if (value !== undefined) prefilled[q.id] = value;
+  }
+  return prefilled;
+}
+
+const isBlank = (value: AnswerValue | undefined): boolean =>
+  value === undefined || (typeof value === 'string' && !value.trim()) || (Array.isArray(value) && value.length === 0);
+
+/**
+ * Earlier answers with the ones on screen laid over them, matched by question
+ * text the way the engine saves them (a blank answer never erases an earlier one).
+ */
+function mergeAnswers(earlier: SavedAnswer[], questions: Question[], answers: Record<number, AnswerValue>): SavedAnswer[] {
+  const merged = new Map<string, SavedAnswer>();
+  for (const item of earlier) {
+    const key = questionKey(item.question);
+    if (key) merged.set(key, item);
+  }
+  for (const q of questions) {
+    const value = answers[q.id];
+    const key = questionKey(q.question);
+    if (key && !isBlank(value)) merged.set(key, { question: q.question, answer: value });
+  }
+  return Array.from(merged.values());
+}
+
+function savedAnswersFrom(profile: SavedProfile | null): SavedAnswer[] {
+  const list = Array.isArray(profile?.questionnaire_answers) ? profile.questionnaire_answers : [];
+  return list.filter(
+    (item): item is SavedAnswer => Boolean(item) && typeof item === 'object' && typeof (item as SavedAnswer).question === 'string',
+  );
+}
+
+/** A questionnaire the page can show (odd entries dropped, options always a list of text), or null. */
+function questionnaireFrom(data: unknown): Questionnaire | null {
+  const list = (data as { questions?: unknown } | null)?.questions;
+  if (!Array.isArray(list)) return null;
+  const questions: Question[] = list
+    .filter((q): q is Question => Boolean(q) && typeof q === 'object' && typeof (q as Question).id === 'number' && typeof (q as Question).question === 'string')
+    .map((q) => ({
+      id: q.id,
+      question: q.question,
+      question_type: typeof q.question_type === 'string' ? q.question_type : 'text',
+      options: Array.isArray(q.options) ? q.options.filter((o): o is string => typeof o === 'string' && o.trim() !== '') : null,
+      required: Boolean(q.required),
+    }));
+  return questions.length ? { questions, total_questions: questions.length } : null;
+}
+
+const uniqueNames = (names: string[]) => Array.from(new Set(names.filter(Boolean)));
+
+/** File names of documents already added to the profile (sources like "Document: minutes.pdf"). */
+function documentNamesFrom(sources: unknown): string[] {
+  if (!Array.isArray(sources)) return [];
+  return uniqueNames(
+    sources
+      .filter((source): source is string => typeof source === 'string' && source.startsWith('Document: '))
+      .map((source) => source.slice('Document: '.length).trim()),
+  );
+}
+
+function findingsOf(extraction: DocumentExtraction): string[] {
+  return [...(extraction.facility_needs || []), ...(extraction.program_needs || []), ...(extraction.security_concerns || [])];
+}
+
+const factCount = (extraction: DocumentExtraction): number =>
+  Array.isArray(extraction.key_facts) ? extraction.key_facts.length : 0;
+
+/** Only real web addresses get a "Visit Grant Website" link. */
+function webUrl(url: unknown): string | null {
+  if (typeof url !== 'string' || !url.trim()) return null;
+  try {
+    const parsed = new URL(url.trim());
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.href : null;
+  } catch {
+    return null;
+  }
+}
+
+const statusLabel = (status: unknown): string => APPLICATION_STATUS_LABELS[String(status)] ?? String(status ?? '');
+
+/** True when the session saved in this browser belongs to a guest (used when the user record couldn't load). */
+function storedSessionIsGuest(): boolean {
+  try {
+    const payload = window.localStorage.getItem('auth_token')?.split('.')[1];
+    if (!payload) return false;
+    const base64 = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const claims = JSON.parse(atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, '=')));
+    return typeof claims?.sub === 'string' && claims.sub.startsWith('guest_');
+  } catch {
+    return false;
+  }
+}
+
+function keepPreviousToken() {
+  try {
+    const token = window.localStorage.getItem('auth_token');
+    if (token) window.localStorage.setItem(PREVIOUS_TOKEN_KEY, token);
+  } catch (error) {
+    console.warn('[GrantFinder] Could not keep a copy of the session before signing out:', error);
+  }
+}
+
+// =============================================================================
+// Page
+// =============================================================================
 
 export default function Dashboard() {
   const router = useRouter();
   const { user, setUser, matchResults, setMatchResults } = useStore();
   const [currentStep, setCurrentStep] = useState<SetupStep>('api-key');
+  // True until the saved key status, grants, profile, results, applications and jobs are read.
+  const [restoring, setRestoring] = useState(true);
+  const [connectionProblem, setConnectionProblem] = useState(false);
+  const [sessionCheck, setSessionCheck] = useState(0);
+  const [resumeKey, setResumeKey] = useState(0);
   const [apiKey, setApiKey] = useState('');
   const [apiKeySet, setApiKeySet] = useState(false);
   const [grantFile, setGrantFile] = useState<File | null>(null);
-  const [grantStats, setGrantStats] = useState<any>(null);
+  const [grantStats, setGrantStats] = useState<GrantStats | null>(null);
   const [discoveredTotal, setDiscoveredTotal] = useState(0);
   const [discoveryStatus, setDiscoveryStatus] = useState<string | null>(null);
-  const [discoveryBusy, setDiscoveryBusy] = useState<string | null>(null);
+  const [discoveryBusy, setDiscoveryBusy] = useState<DiscoverySource | null>(null);
   const [discoveryFocus, setDiscoveryFocus] = useState('');
   const [churchUrl, setChurchUrl] = useState('');
   const [schoolUrl, setSchoolUrl] = useState('');
   const [websiteScanned, setWebsiteScanned] = useState(false);
-  const [questionnaire, setQuestionnaire] = useState<any>(null);
-  const [answers, setAnswers] = useState<Record<number, any>>({});
+  const [questionnaire, setQuestionnaire] = useState<Questionnaire | null>(null);
+  const [answers, setAnswers] = useState<Record<number, AnswerValue>>({});
+  const [savedAnswers, setSavedAnswers] = useState<SavedAnswer[]>([]);
   const [freeFormText, setFreeFormText] = useState('');
   const [documents, setDocuments] = useState<File[]>([]);
+  const [profileDocs, setProfileDocs] = useState<string[]>([]);
+  const [docResults, setDocResults] = useState<DocumentResult[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingLogs, setProcessingLogs] = useState<ProcessingLog[]>([]);
   // Long steps run as background jobs; show which one and its latest status line.
@@ -59,7 +365,8 @@ export default function Dashboard() {
   const [jobProgress, setJobProgress] = useState<string | null>(null);
   const [stepError, setStepError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [applications, setApplications] = useState<any[]>([]);
+  const [exporting, setExporting] = useState<ExportFormat | null>(null);
+  const [applications, setApplications] = useState<ApplicationSummary[]>([]);
   const [profileExists, setProfileExists] = useState(false);
   const [showBasics, setShowBasics] = useState(false);
   const [basics, setBasics] = useState<OrgBasics>({
@@ -68,90 +375,161 @@ export default function Dashboard() {
   const terminalRef = useRef<HTMLDivElement>(null);
   const resumedFor = useRef<string | null>(null);
 
-  // Every engine call needs a session, so visitors without one go to sign-in
+  /** The engine said the session is over (401): forget it and explain on the sign-in page. */
+  const endSession = useCallback(() => {
+    try {
+      api.clearToken();
+    } catch (error) {
+      console.warn('[GrantFinder] Could not forget the ended session:', error);
+    }
+    router.replace('/?expired=1');
+  }, [router]);
+
+  // Every engine call needs a session, so visitors without one go to sign-in.
+  // Only a 401 ends the session here: a Wi-Fi blip or a Netlify error keeps the
+  // token (for a guest it is the only key to their work) and offers "Try again".
   useEffect(() => {
-    const token = api.loadToken();
+    let token: string | null = null;
+    try {
+      token = api.loadToken();
+    } catch (error) {
+      console.warn('[GrantFinder] Could not read the saved session in this browser:', error);
+    }
     if (!token) {
       router.replace('/');
       return;
     }
-    if (!user) {
-      api.getMe()
-        .then(setUser)
-        .catch(() => {
-          api.clearToken();
-          router.replace('/?expired=1');
-        });
-    }
-  }, [user, setUser, router]);
+    if (user) return;
+    let active = true;
+    withTimeout(api.getMe(), SESSION_CHECK_TIMEOUT_MS)
+      .then((me) => {
+        if (active) setUser(me);
+      })
+      .catch((error: unknown) => {
+        if (!active) return;
+        if (isSessionEnded(error)) {
+          console.warn('[GrantFinder] The session has ended; returning to sign-in.');
+          endSession();
+          return;
+        }
+        console.error(`[GrantFinder] Could not check the session (attempt ${sessionCheck + 1}); it is kept for the next try:`, error);
+        setConnectionProblem(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [user, setUser, router, endSession, sessionCheck]);
 
   // Live status lines from background jobs ("Scoring grants 11-15 of 40")
   useEffect(() => onJobProgress((info) => setJobProgress(info.progress)), []);
 
-  // Pick up where the user left off: saved key, grants, profile, results,
-  // applications, and a matching run still in progress from before a reload.
+  // Pick up where the user left off: saved key, grants, profile, questions,
+  // results, applications, and a matching run still in progress from before a
+  // reload. Nothing is shown until all of it is read, so a hiccup never looks
+  // like lost work; "Try again" (resumeKey) reads it all again.
   useEffect(() => {
-    if (!user || resumedFor.current === user.id) return;
-    resumedFor.current = user.id;
+    if (!user) return;
+    const runKey = `${user.id}#${resumeKey}`;
+    if (resumedFor.current === runKey) return;
+    resumedFor.current = runKey;
+    const me = user;
     (async () => {
-      const [stats, profile, apps, latest, keyStatus, jobs] = await Promise.all([
-        api.getGrantStats().catch(() => null),
-        api.getProfile().catch(() => null),
-        api.listApplications().catch(() => []),
-        api.getLatestMatchResults().catch(() => null),
-        api.getApiKeyStatus().catch(() => null),
-        api.listJobs().catch(() => []),
-      ]);
-      if (stats?.total_grants) {
-        setDiscoveredTotal(stats.total_grants);
-        setGrantStats(stats);
-      }
-      if (profile) {
-        setProfileExists(true);
-        setBasics({
-          organization_name: profile.organization_name || '',
-          organization_type: profile.organization_type || 'both',
-          city: profile.city || '',
-          state: profile.state || '',
-          diocese: profile.diocese || '',
-          student_count: profile.student_count ? String(profile.student_count) : '',
+      const failures: unknown[] = [];
+      const read = <T,>(request: Promise<T>, fallback: T): Promise<T> =>
+        withTimeout(request, RESUME_TIMEOUT_MS).catch((error: unknown) => {
+          failures.push(error);
+          return fallback;
         });
-        if (profile.website_url) setChurchUrl(profile.website_url);
-        if (profile.school_website_url) setSchoolUrl(profile.school_website_url);
-        if (profile.free_form_notes) setFreeFormText(profile.free_form_notes);
-      }
-      setApplications(Array.isArray(apps) ? apps : []);
-      if (latest && !matchResults) setMatchResults(latest);
-      // Ask the engine (the signed-in user object can be from before the key was saved).
-      if (keyStatus?.is_set ?? user.claude_api_key_set) {
-        setApiKeySet(true);
-        setCurrentStep((step) => (step === 'api-key' ? (stats?.total_grants ? 'website' : 'grants') : step));
-      }
-      const runningMatch = jobs.find((job) => job.kind === 'processing.match_grants' && (job.status === 'running' || job.status === 'queued'));
-      if (runningMatch) {
-        setCurrentStep('processing');
-        setIsProcessing(true);
-        setProcessingLogs([{
-          timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
-          status: 'info',
-          message: 'Matching is still running from before; picking it back up...',
-        }]);
-        try {
-          const results: any = await api.waitForJob(runningMatch.id, runningMatch.kind);
-          setMatchResults(results);
-          setIsProcessing(false);
-          setCurrentStep('results');
-        } catch (error: any) {
-          setProcessingLogs((logs) => [...logs, {
-            timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
-            status: 'error',
-            message: errorDetail(error, 'Matching failed. Run it again from the Documents step.'),
-          }]);
-          setIsProcessing(false);
+      const [stats, profile, apps, latest, keyStatus, jobs, savedQuestions] = await Promise.all([
+        read<GrantStats | null>(api.getGrantStats(), null),
+        read<SavedProfile | null>(api.getProfile(), null),
+        read<ApplicationSummary[]>(api.listApplications(), []),
+        read<MatchResultsData | null>(api.getLatestMatchResults(), null),
+        read<{ is_set?: boolean } | null>(api.getApiKeyStatus(), null),
+        read<JobSummary[]>(api.listJobs(), []),
+        withTimeout(api.getSavedQuestionnaire(), RESUME_TIMEOUT_MS).catch((error: unknown) => {
+          console.warn('[GrantFinder] Could not load the saved questions; they can be written again:', error);
+          return null;
+        }),
+      ]);
+      if (failures.length) {
+        // /api/auth/api-key/status is an auth route, so lib/api leaves its 401 to the page.
+        if (failures.some(isSessionEnded)) {
+          endSession();
+          return;
         }
+        console.error('[GrantFinder] Could not reopen the saved work (nothing was changed on screen):', failures);
+        setConnectionProblem(true);
+        return;
+      }
+
+      let runningMatch: JobSummary | undefined;
+      try {
+        // What decides the step first: the key, grants, results and applications.
+        const totalGrants = typeof stats?.total_grants === 'number' ? stats.total_grants : 0;
+        if (stats && totalGrants > 0) {
+          setDiscoveredTotal(totalGrants);
+          setGrantStats(stats);
+        }
+        setApplications(Array.isArray(apps) ? apps : []);
+        if (latest) setMatchResults(latest);
+        const results = latest ?? useStore.getState().matchResults;
+        // Ask the engine (the signed-in user object can be from before the key was saved).
+        if (keyStatus?.is_set ?? me.claude_api_key_set) {
+          setApiKeySet(true);
+          setCurrentStep((step) => (step === 'api-key' ? (results ? 'results' : totalGrants > 0 ? 'website' : 'grants') : step));
+        }
+        runningMatch = (Array.isArray(jobs) ? jobs : []).find(
+          (job) => job.kind === 'processing.match_grants' && (job.status === 'running' || job.status === 'queued'),
+        );
+        if (runningMatch) {
+          setCurrentStep('processing');
+          setIsProcessing(true);
+          setProcessingLogs([logLine('info', 'Matching is still running from before; picking it back up...')]);
+        }
+
+        const earlierAnswers = savedAnswersFrom(profile);
+        setSavedAnswers(earlierAnswers);
+        if (profile) {
+          setProfileExists(true);
+          setBasics({
+            organization_name: String(profile.organization_name || ''),
+            organization_type: String(profile.organization_type || 'both'),
+            city: String(profile.city || ''),
+            state: String(profile.state || ''),
+            diocese: String(profile.diocese || ''),
+            student_count: profile.student_count ? String(profile.student_count) : '',
+          });
+          if (profile.website_url) setChurchUrl(String(profile.website_url));
+          if (profile.school_website_url) setSchoolUrl(String(profile.school_website_url));
+          if (profile.free_form_notes) setFreeFormText(String(profile.free_form_notes));
+          setProfileDocs(documentNamesFrom(profile.sources));
+        }
+        // The last questions Claude wrote come back without a new AI call, with earlier answers filled in.
+        const saved = questionnaireFrom(savedQuestions);
+        if (saved) {
+          setQuestionnaire(saved);
+          setAnswers(prefillAnswers(saved.questions, earlierAnswers));
+        }
+      } catch (error) {
+        // Unexpected saved data must never leave the page stuck on "Opening your saved work...".
+        console.error('[GrantFinder] Some saved work could not be shown:', error);
+      }
+      setRestoring(false);
+      if (!runningMatch) return;
+      try {
+        const finished = await api.waitForJob(runningMatch.id, runningMatch.kind);
+        setMatchResults(finished as MatchResultsData);
+        setIsProcessing(false);
+        setCurrentStep('results');
+      } catch (error) {
+        if (isSessionEnded(error)) return; // lib/api is already returning to sign-in
+        console.error('[GrantFinder] Matching from before the reload failed:', error);
+        setProcessingLogs((logs) => [...logs, logLine('error', errorDetail(error, 'Matching failed. Run it again from the Documents step.'))]);
+        setIsProcessing(false);
       }
     })();
-  }, [user, matchResults, setMatchResults]);
+  }, [user, resumeKey, setMatchResults, endSession]);
 
   // Auto-scroll terminal
   useEffect(() => {
@@ -161,8 +539,15 @@ export default function Dashboard() {
   }, [processingLogs]);
 
   const addLog = (status: ProcessingLog['status'], message: string) => {
-    const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
-    setProcessingLogs(prev => [...prev, { timestamp, status, message }]);
+    setProcessingLogs((prev) => [...prev, logLine(status, message)]);
+  };
+
+  /** "Try again" after the engine couldn't be reached: check the session, then read the saved work again. */
+  const retryConnection = () => {
+    setConnectionProblem(false);
+    setRestoring(true);
+    if (user) setResumeKey((n) => n + 1);
+    else setSessionCheck((n) => n + 1);
   };
 
   /** Run one user action with a busy label; failures show inline instead of alert boxes. */
@@ -172,7 +557,7 @@ export default function Dashboard() {
     setStepError(null);
     try {
       await fn();
-    } catch (error: any) {
+    } catch (error) {
       console.error(`[GrantFinder] ${label} failed:`, error);
       setStepError(errorDetail(error, `${label} failed. Use "Copy debug report" and paste it into Claude Code.`));
     } finally {
@@ -186,26 +571,38 @@ export default function Dashboard() {
     setCurrentStep(step);
   };
 
+  const signOut = () => {
+    const guest = user ? user.id.startsWith('guest_') : storedSessionIsGuest();
+    if (guest && !window.confirm(GUEST_SIGN_OUT_WARNING)) return;
+    keepPreviousToken();
+    try {
+      api.clearToken();
+    } catch (error) {
+      console.warn('[GrantFinder] Could not forget the session in this browser:', error);
+    }
+    setUser(null);
+    setMatchResults(null);
+    router.push('/');
+  };
+
   const copyDebugReport = async () => {
     setNotice(null);
+    let report: string;
     try {
-      const report = await api.getDebugReport();
-      try {
-        await navigator.clipboard.writeText(report);
-        setNotice('Debug report copied. Paste it into Claude Code.');
-      } catch {
-        // Clipboard blocked: download it instead.
-        const url = URL.createObjectURL(new Blob([report], { type: 'text/markdown' }));
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'grantfinder-debug-report.md';
-        a.click();
-        URL.revokeObjectURL(url);
-        setNotice('Debug report downloaded (grantfinder-debug-report.md). Paste it into Claude Code.');
-      }
-    } catch (error: any) {
+      report = await api.getDebugReport();
+    } catch (error) {
+      console.error('[GrantFinder] Could not get the debug report:', error);
       setNotice(`Could not get the debug report: ${errorDetail(error, 'unknown error')}`);
+      return;
     }
+    if (await copyText(report)) {
+      setNotice('Debug report copied. Paste it into Claude Code.');
+      return;
+    }
+    // Clipboard blocked: download it instead.
+    console.warn('[GrantFinder] The browser blocked copying; downloading the debug report instead.');
+    saveFile(report, 'grantfinder-debug-report.md', 'text/markdown;charset=utf-8');
+    setNotice('Debug report downloaded (grantfinder-debug-report.md). Paste it into Claude Code.');
   };
 
   const handleApiKeySubmit = () =>
@@ -221,28 +618,28 @@ export default function Dashboard() {
       goTo(discoveredTotal > 0 ? 'website' : 'grants');
     });
 
-  const runDiscovery = async (source: 'seed' | 'grants_gov' | 'web_discovery') => {
+  const runDiscovery = async (source: DiscoverySource) => {
     setDiscoveryBusy(source);
     setDiscoveryStatus(null);
     setJobProgress(null);
     try {
-      let result;
+      let result: DiscoveryResult;
+      let summary: string;
       if (source === 'seed') {
         result = await api.loadStarterDatabase();
-        setDiscoveryStatus(`Starter database loaded: ${result.added} grants added (${result.total_grants} total).`);
+        summary = `Starter database loaded: ${result.added} grants added (${result.total_grants} total).`;
       } else if (source === 'grants_gov') {
         result = await api.searchGrantsGov();
-        setDiscoveryStatus(`Grants.gov: found ${result.found}, added ${result.added} new (${result.total_grants} total).`);
+        summary = `Grants.gov: found ${result.found}, added ${result.added} new (${result.total_grants} total).`;
       } else {
         result = await api.webDiscovery(discoveryFocus.trim() || undefined);
-        setDiscoveryStatus(`AI web discovery: found ${result.found}, added ${result.added} new (${result.total_grants} total).`);
+        summary = `AI web discovery: found ${result.found}, added ${result.added} new (${result.total_grants} total).`;
       }
-      if (Array.isArray(result.notes) && result.notes.length) {
-        setDiscoveryStatus((status) => `${status} ${result.notes.join(' ')}`);
-      }
+      const notes = Array.isArray(result.notes) ? result.notes.join(' ') : '';
+      setDiscoveryStatus(notes ? `${summary} ${notes}` : summary);
       setDiscoveredTotal(result.total_grants);
-    } catch (error: any) {
-      console.error(`Discovery (${source}) failed:`, error);
+    } catch (error) {
+      console.error(`[GrantFinder] Discovery (${source}) failed:`, error);
       setDiscoveryStatus(`Discovery failed: ${errorDetail(error, 'request failed')}`);
     } finally {
       setDiscoveryBusy(null);
@@ -255,7 +652,7 @@ export default function Dashboard() {
       // A user-uploaded Excel is optional: discovery can fill the database.
       if (!grantFile) {
         if (discoveredTotal > 0) {
-          setGrantStats((prev: any) => ({ ...(prev || {}), total_grants: discoveredTotal }));
+          setGrantStats((prev) => ({ ...(prev || {}), total_grants: discoveredTotal }));
           goTo('website');
         }
         return;
@@ -263,17 +660,24 @@ export default function Dashboard() {
       if (grantFile.size > MAX_UPLOAD_BYTES) {
         throw new Error(`${grantFile.name} is larger than 4 MB. Remove extra sheets or images and try again.`);
       }
-      const result = await api.uploadGrantDatabase(grantFile);
+      const result: GrantStats = await api.uploadGrantDatabase(grantFile);
       setGrantStats(result);
       setDiscoveredTotal(result.total_grants);
+      setGrantFile(null);
       goTo('website');
     });
 
+  /** Have Claude write questions, filling in earlier answers (saved or on screen) wherever the question text matches. */
   const loadQuestionnaire = async () => {
-    const q = await api.generateQuestionnaire();
-    setQuestionnaire(q);
+    const earlier = mergeAnswers(savedAnswers, questionnaire?.questions ?? [], answers);
+    const fresh = questionnaireFrom(await api.generateQuestionnaire());
+    if (!fresh) throw new Error('Claude did not write any questions. Please try again.');
+    setQuestionnaire(fresh);
+    setAnswers(prefillAnswers(fresh.questions, earlier));
     goTo('questionnaire');
   };
+
+  const writeQuestions = () => runBusy('Writing your questions', loadQuestionnaire);
 
   const handleWebsiteScan = () =>
     runBusy('Scanning your website', async () => {
@@ -282,7 +686,8 @@ export default function Dashboard() {
       }
       try {
         await api.scanWebsite(churchUrl, schoolUrl);
-      } catch (error: any) {
+      } catch (error) {
+        if (isSessionEnded(error)) throw error;
         setShowBasics(true);
         const detail = errorDetail(error, 'Website scan failed.');
         throw new Error(/by hand|skip/i.test(detail) ? detail : `${detail} Use "Enter the basics by hand" or "Skip to questions" below.`);
@@ -293,15 +698,13 @@ export default function Dashboard() {
       await loadQuestionnaire();
     });
 
-  const skipWebsiteScan = () => runBusy('Writing your questions', loadQuestionnaire);
-
   const saveBasics = () =>
     runBusy('Saving your organization basics', async () => {
       if (!basics.organization_name.trim() || !basics.state.trim()) {
         throw new Error('Please enter at least the organization name and state.');
       }
-      const existing = await api.getProfile();
-      const base = existing || { user_id: user?.id, organization_type: 'parish', city: '', state: '', sources: [] };
+      const existing: SavedProfile | null = await api.getProfile();
+      const base: SavedProfile = existing || { user_id: user?.id, organization_type: 'parish', city: '', state: '', sources: [] };
       const sources: string[] = Array.isArray(base.sources) ? base.sources : [];
       const studentCount = parseInt(basics.student_count, 10);
       await api.updateProfile({
@@ -325,11 +728,14 @@ export default function Dashboard() {
 
   const handleQuestionnaireSubmit = () =>
     runBusy('Saving your answers', async () => {
-      const answerArray = Object.entries(answers).map(([id, answer]) => ({
-        question_id: parseInt(id),
-        answer,
-      }));
+      const questions = questionnaire?.questions ?? [];
+      // Only questions on screen, each with the text the person saw (the engine saves answers by question text).
+      const answerArray = questions
+        .filter((q) => Object.prototype.hasOwnProperty.call(answers, q.id))
+        .map((q) => ({ question_id: q.id, answer: answers[q.id], question: q.question }));
       await api.submitQuestionnaire(answerArray, freeFormText);
+      // The engine keeps earlier answers and updates these by question text; mirror that here.
+      setSavedAnswers((earlier) => mergeAnswers(earlier, questions, answers));
       setProfileExists(true);
       goTo('documents');
     });
@@ -341,101 +747,138 @@ export default function Dashboard() {
     });
 
   const handleDocumentUpload = (files: FileList | null) => {
-    if (!files) return;
+    if (!files || !files.length) return;
     const accepted: File[] = [];
     const rejected: string[] = [];
+    let anyTooBig = false;
     Array.from(files).forEach((file) => {
-      if (file.size > MAX_UPLOAD_BYTES) rejected.push(`${file.name} is larger than 4 MB`);
-      else if (!/\.(pdf|docx|txt)$/i.test(file.name)) rejected.push(`${file.name} is not a PDF, DOCX, or TXT file`);
-      else accepted.push(file);
+      if (file.size > MAX_UPLOAD_BYTES) {
+        anyTooBig = true;
+        rejected.push(`${file.name} is ${(file.size / 1048576).toFixed(1)} MB (limit 4 MB)`);
+      } else if (!/\.(pdf|docx|txt)$/i.test(file.name)) {
+        rejected.push(`${file.name} is not a PDF, DOCX, or TXT file`);
+      } else {
+        accepted.push(file);
+      }
     });
-    setStepError(rejected.length ? `Skipped: ${rejected.join('; ')}. Split or shorten large files and add them again.` : null);
-    setDocuments(prev => [...prev, ...accepted]);
+    setStepError(rejected.length ? `Skipped: ${rejected.join('; ')}.${anyTooBig ? ` ${BIG_FILE_HELP}` : ''}` : null);
+    if (accepted.length) setDocResults([]);
+    // The same file picked twice is only processed once.
+    setDocuments((prev) => [
+      ...prev,
+      ...accepted.filter((file, i) =>
+        !prev.some((p) => p.name === file.name && p.size === file.size) &&
+        accepted.findIndex((other) => other.name === file.name && other.size === file.size) === i),
+    ]);
   };
+
+  /** Add the queued documents to the profile (for matching later and for the writer) without matching now. */
+  const addDocumentsOnly = () =>
+    runBusy('Adding documents to your profile', async () => {
+      const queued = documents;
+      const results: DocumentResult[] = [];
+      const added: string[] = [];
+      setDocResults([]);
+      for (const [index, doc] of queued.entries()) {
+        setBusy(`Adding ${doc.name} to your profile (${index + 1} of ${queued.length})`);
+        setJobProgress(null);
+        try {
+          const extraction: DocumentExtraction = await api.uploadDocument(doc);
+          const facts = factCount(extraction);
+          results.push({
+            ok: true,
+            message: `${doc.name}: ${findingsOf(extraction).length} grant-relevant item(s) found${facts > 0 ? `, ${facts} fact(s) for the writer` : ''}`,
+          });
+          added.push(doc.name);
+        } catch (error) {
+          if (isSessionEnded(error)) throw error;
+          console.error(`[GrantFinder] Adding ${doc.name} failed:`, error);
+          results.push({ ok: false, message: `${doc.name}: ${errorDetail(error, 'could not be added. Try it again.')}` });
+        }
+        setDocResults([...results]);
+      }
+      setDocuments([]);
+      if (added.length) {
+        setProfileDocs((names) => uniqueNames([...names, ...added]));
+        setProfileExists(true);
+      }
+    });
 
   const runMatching = async () => {
     setCurrentStep('processing');
     setIsProcessing(true);
     setProcessingLogs([]);
     setStepError(null);
+    setDocResults([]);
 
     try {
       // 1. Upload and extract every document for real - this is where the AI
       // catches the "playground equipment is 30 years old" class of signals.
       if (documents.length > 0) {
         addLog('info', `Processing ${documents.length} document(s)...`);
+        const added: string[] = [];
         for (const doc of documents) {
           addLog('info', `Reading ${doc.name}...`);
           try {
-            const extraction = await api.uploadDocument(doc);
-            const found =
-              (extraction.facility_needs?.length || 0) +
-              (extraction.program_needs?.length || 0) +
-              (extraction.security_concerns?.length || 0);
-            addLog('success', `${doc.name}: ${found} grant-relevant item(s) extracted`);
-            [...(extraction.facility_needs || []), ...(extraction.program_needs || []), ...(extraction.security_concerns || [])]
-              .slice(0, 4)
-              .forEach((item: string) => addLog('info', `  → ${item}`));
-          } catch (docError: any) {
+            const extraction: DocumentExtraction = await api.uploadDocument(doc);
+            const findings = findingsOf(extraction);
+            addLog('success', `${doc.name}: ${findings.length} grant-relevant item(s) extracted`);
+            findings.slice(0, 4).forEach((item) => addLog('info', `  → ${item}`));
+            const facts = factCount(extraction);
+            if (facts > 0) addLog('info', `  → ${facts} fact(s) for the application writer`);
+            added.push(doc.name);
+          } catch (docError) {
+            if (isSessionEnded(docError)) throw docError;
+            console.error(`[GrantFinder] Reading ${doc.name} failed:`, docError);
             addLog('warning', `${doc.name}: extraction failed (${errorDetail(docError, 'error')}) — continuing`);
           }
         }
         setDocuments([]);
-        setProfileExists(true);
+        if (added.length) {
+          setProfileDocs((names) => uniqueNames([...names, ...added]));
+          setProfileExists(true);
+        }
       }
 
       // 2. Real matching run
       addLog('info', 'Scoring your grants and foundations against your profile...');
       addLog('info', 'Applying geographic and deadline hard filters, then AI scoring...');
-      const results = await api.matchGrants();
+      const results: MatchResultsData = await api.matchGrants();
       setMatchResults(results);
 
       addLog('success', '=== MATCHING COMPLETE ===');
       addLog('success', `${results.total_grants_evaluated} grants evaluated: ${results.excellent_matches} excellent, ${results.good_matches} good, ${results.possible_matches} possible`);
 
       setIsProcessing(false);
-      await new Promise(r => setTimeout(r, 800));
+      await new Promise((r) => setTimeout(r, 800));
       setCurrentStep('results');
-    } catch (error: any) {
+    } catch (error) {
+      console.error('[GrantFinder] Matching failed:', error);
       addLog('error', errorDetail(error, 'Matching failed. Check that your API key is saved, then retry.'));
       setIsProcessing(false);
     }
   };
 
-  const downloadResults = async (format: 'csv' | 'md') => {
-    if (!matchResults?.session_id) return;
+  const downloadResults = async (format: ExportFormat) => {
+    if (!matchResults?.session_id || exporting) return;
+    setExporting(format);
+    setStepError(null);
     try {
-      const blob = await api.exportResults(matchResults.session_id, format, true);
-      const url = URL.createObjectURL(new Blob([blob]));
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `grant_matches.${format}`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (error: any) {
-      let detail = 'Export failed';
-      try {
-        detail = JSON.parse(await error.response.data.text()).detail || detail;
-      } catch { /* keep default */ }
-      setStepError(detail);
+      const data = await api.exportResults(matchResults.session_id, format, true);
+      saveFile(data, `grant_matches.${format}`, format === 'csv' ? 'text/csv;charset=utf-8' : 'text/markdown;charset=utf-8');
+    } catch (error) {
+      console.error(`[GrantFinder] Export (${format}) failed:`, error);
+      setStepError(await blobErrorDetail(error, 'The export failed. Please try again.'));
+    } finally {
+      setExporting(null);
     }
   };
 
-  const steps = [
-    { id: 'api-key', label: 'API Key', icon: Settings },
-    { id: 'grants', label: 'Grant Database', icon: Database },
-    { id: 'website', label: 'Website', icon: Globe },
-    { id: 'questionnaire', label: 'Questions', icon: MessageSquare },
-    { id: 'documents', label: 'Documents', icon: FileText },
-    { id: 'processing', label: 'Processing', icon: Play },
-    { id: 'results', label: 'Results', icon: BarChart3 },
-  ];
-
-  const currentStepIndex = steps.findIndex(s => s.id === currentStep);
+  const currentStepIndex = STEPS.findIndex((s) => s.id === currentStep);
 
   /** Steps the user may jump to: everything after the key is saved, results once they exist. */
-  const canVisit = (id: string) => {
-    if (busy || isProcessing) return false;
+  const canVisit = (id: SetupStep) => {
+    if (restoring || busy || isProcessing) return false;
     if (id === 'api-key') return true;
     if (!apiKeySet) return false;
     if (id === 'processing') return false;
@@ -445,43 +888,44 @@ export default function Dashboard() {
 
   const busyBanner = busy && (
     <div className="mt-4 p-3 rounded bg-[var(--terminal-bg)] text-sm flex items-center gap-2" role="status">
-      <Loader2 className="w-4 h-4 animate-spin text-[var(--primary)]" />
-      <span>{busy}...{jobProgress ? ` ${jobProgress}` : ''}</span>
+      <Loader2 className="w-4 h-4 shrink-0 animate-spin text-[var(--primary)]" aria-hidden="true" />
+      <span className="min-w-0 break-words">{busy}...{jobProgress ? ` ${jobProgress}` : ''}</span>
     </div>
   );
+
+  const questions = questionnaire?.questions ?? [];
 
   return (
     <div className="min-h-screen flex flex-col">
       {/* Header */}
       <header className="border-b border-[var(--card-border)]">
-        <div className="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 bg-[var(--primary)] rounded-lg flex items-center justify-center">
-              <Search className="w-5 h-5 text-white" />
+        <div className="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="w-8 h-8 shrink-0 bg-[var(--primary)] rounded-lg flex items-center justify-center">
+              <Search className="w-5 h-5 text-white" aria-hidden="true" />
             </div>
-            <span className="text-xl font-bold">GrantFinder AI</span>
+            <span className="text-lg sm:text-xl font-bold truncate">GrantFinder AI</span>
           </div>
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3 sm:gap-4 shrink-0">
             <button
+              type="button"
               onClick={copyDebugReport}
-              className="text-sm text-gray-500 hover:text-white flex items-center gap-1"
+              className="text-sm text-gray-400 hover:text-white flex items-center gap-1"
               title="Copy a report of recent steps and errors to paste into Claude Code"
+              aria-label="Copy debug report"
             >
-              <Bug className="w-4 h-4" />
+              <Bug className="w-4 h-4" aria-hidden="true" />
               <span className="hidden md:inline">Copy debug report</span>
             </button>
-            <span className="text-sm text-gray-500">{user?.name || user?.email || ''}</span>
+            <span className="text-sm text-gray-400 truncate max-w-[7rem] sm:max-w-[14rem]">{user?.name || user?.email || ''}</span>
             <button
-              onClick={() => {
-                api.clearToken();
-                setUser(null);
-                setMatchResults(null);
-                router.push('/');
-              }}
-              className="text-gray-500 hover:text-white"
+              type="button"
+              onClick={signOut}
+              className="text-gray-400 hover:text-white"
               aria-label="Sign out"
+              title="Sign out"
             >
-              <LogOut className="w-5 h-5" />
+              <LogOut className="w-5 h-5" aria-hidden="true" />
             </button>
           </div>
         </div>
@@ -491,35 +935,40 @@ export default function Dashboard() {
       <div className="border-b border-[var(--card-border)] py-4">
         <div className="max-w-4xl mx-auto px-4 overflow-x-auto">
           <div className="flex items-center justify-between min-w-max md:min-w-0">
-            {steps.map((step, index) => {
+            {STEPS.map((step, index) => {
               const Icon = step.icon;
-              const isActive = step.id === currentStep;
-              const isComplete = index < currentStepIndex;
-              const visitable = canVisit(step.id) && !isActive;
+              const isActive = !restoring && step.id === currentStep;
+              const isComplete = !restoring && index < currentStepIndex;
+              const visitable = canVisit(step.id);
+              const tone = isActive
+                ? 'bg-[var(--primary)] text-white'
+                : isComplete
+                  ? 'text-[var(--accent)]'
+                  : visitable
+                    ? 'text-gray-300'
+                    : 'text-gray-500';
               return (
                 <div key={step.id} className="flex items-center">
                   <button
                     type="button"
                     disabled={!visitable}
                     aria-label={step.label}
+                    aria-current={isActive ? 'step' : undefined}
                     title={step.label}
-                    onClick={() => goTo(step.id as SetupStep)}
-                    className={`
-                      flex items-center gap-2 px-3 py-2 rounded-lg
-                      ${isActive ? 'bg-[var(--primary)] text-white' : ''}
-                      ${isComplete ? 'text-[var(--accent)]' : 'text-gray-500'}
-                      ${visitable ? 'hover:bg-gray-800 cursor-pointer' : 'cursor-default'}
-                    `}
+                    onClick={() => {
+                      if (!isActive) goTo(step.id);
+                    }}
+                    className={`flex items-center gap-2 px-2 sm:px-3 py-2 rounded-lg ${tone} ${visitable && !isActive ? 'hover:bg-gray-800 cursor-pointer' : 'cursor-default'}`}
                   >
                     {isComplete ? (
-                      <CheckCircle className="w-5 h-5" />
+                      <CheckCircle className="w-5 h-5" aria-hidden="true" />
                     ) : (
-                      <Icon className="w-5 h-5" />
+                      <Icon className="w-5 h-5" aria-hidden="true" />
                     )}
                     <span className="text-sm font-medium hidden md:inline">{step.label}</span>
                   </button>
-                  {index < steps.length - 1 && (
-                    <ChevronRight className="w-4 h-4 text-gray-600 mx-1 md:mx-2" />
+                  {index < STEPS.length - 1 && (
+                    <ChevronRight className="hidden sm:block w-4 h-4 text-gray-600 mx-1 md:mx-2" aria-hidden="true" />
                   )}
                 </div>
               );
@@ -529,37 +978,56 @@ export default function Dashboard() {
       </div>
 
       {/* Main Content */}
-      <main className="flex-1 py-8">
+      <main className="flex-1 py-6 sm:py-8">
         <div className="max-w-3xl mx-auto px-4">
-          {notice && (
-            <div className="mb-4 p-3 rounded bg-green-900/30 text-green-300 text-sm flex justify-between gap-4">
-              <span>{notice}</span>
-              <button onClick={() => setNotice(null)} className="text-green-200" aria-label="Dismiss">×</button>
+          {connectionProblem && (
+            <div className="mb-4 p-3 rounded bg-red-950 border border-red-800 text-red-300 text-sm" role="alert">
+              <p className="flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" aria-hidden="true" />
+                <span className="min-w-0 break-words">{CONNECTION_PROBLEM}</span>
+              </p>
+              <button type="button" onClick={retryConnection} className="btn btn-secondary text-sm mt-3">
+                Try again
+              </button>
             </div>
           )}
 
-          {stepError && currentStep !== 'processing' && (
+          {notice && (
+            <div className="mb-4 p-3 rounded bg-green-900/30 text-green-300 text-sm flex justify-between gap-4" aria-live="polite">
+              <span className="min-w-0 break-words">{notice}</span>
+              <button type="button" onClick={() => setNotice(null)} className="text-green-200 shrink-0" aria-label="Dismiss">×</button>
+            </div>
+          )}
+
+          {stepError && currentStep !== 'processing' && !restoring && (
             <div className="sticky top-2 z-10 mb-4 p-3 rounded bg-red-950 border border-red-800 text-red-300 text-sm flex items-start gap-2" role="alert">
-              <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
-              <span>{stepError}</span>
+              <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" aria-hidden="true" />
+              <span className="min-w-0 break-words">{stepError}</span>
+            </div>
+          )}
+
+          {restoring && (
+            <div className="card text-gray-400 flex items-center gap-2" role="status">
+              <Loader2 className="w-5 h-5 shrink-0 animate-spin text-[var(--primary)]" aria-hidden="true" />
+              <span>Opening your saved work...</span>
             </div>
           )}
 
           {/* Saved applications: the fastest way back into the writer */}
-          {applications.length > 0 && currentStep !== 'processing' && (
+          {!restoring && applications.length > 0 && currentStep !== 'processing' && (
             <div className="card mb-6">
               <h2 className="text-lg font-bold mb-3 flex items-center gap-2">
-                <PenLine className="w-5 h-5" /> Your applications
+                <PenLine className="w-5 h-5" aria-hidden="true" /> Your applications
               </h2>
-              <div className="space-y-2">
-                {applications.map((app: any) => (
-                  <div key={app.id} className="flex items-center justify-between gap-4 text-sm">
-                    <div>
+              <div className="space-y-3">
+                {applications.map((app) => (
+                  <div key={app.id} className="flex items-center justify-between gap-3 text-sm">
+                    <div className="min-w-0 break-words">
                       <span className="font-medium">{app.grant_name}</span>
-                      <span className="text-gray-500"> · {app.funder} · {app.status}</span>
+                      <span className="text-gray-400"> · {app.funder} · {statusLabel(app.status)}</span>
                       {app.urgent && <span className="text-red-400"> · deadline soon</span>}
                     </div>
-                    <button onClick={() => router.push(`/writer?id=${app.id}`)} className="btn btn-secondary text-sm">
+                    <button type="button" onClick={() => router.push(`/writer?id=${app.id}`)} className="btn btn-secondary text-sm shrink-0">
                       Open →
                     </button>
                   </div>
@@ -569,7 +1037,7 @@ export default function Dashboard() {
           )}
 
           {/* Step 1: API Key */}
-          {currentStep === 'api-key' && (
+          {!restoring && currentStep === 'api-key' && (
             <div className="card">
               <h2 className="text-2xl font-bold mb-4">Enter Your Claude API Key</h2>
               <p className="text-gray-400 mb-6">
@@ -586,22 +1054,25 @@ export default function Dashboard() {
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
                 placeholder="sk-ant-..."
+                aria-label="Claude API key"
+                autoComplete="off"
                 className="input mb-4"
               />
               <button
+                type="button"
                 onClick={handleApiKeySubmit}
                 disabled={!apiKey || Boolean(busy)}
                 className="btn btn-primary w-full"
               >
                 {busy ? 'Checking key...' : 'Continue'}
-                <ChevronRight className="w-5 h-5" />
+                <ChevronRight className="w-5 h-5" aria-hidden="true" />
               </button>
               {apiKeySet && (
-                <button onClick={() => goTo(discoveredTotal > 0 ? 'website' : 'grants')} className="btn btn-secondary w-full mt-3">
+                <button type="button" onClick={() => goTo(discoveredTotal > 0 ? 'website' : 'grants')} className="btn btn-secondary w-full mt-3">
                   Keep my saved key
                 </button>
               )}
-              <p className="text-sm text-gray-500 mt-4 text-center">
+              <p className="text-sm text-gray-400 mt-4 text-center">
                 Get your API key at{' '}
                 <a href="https://console.anthropic.com/" className="text-[var(--primary)]" target="_blank" rel="noopener noreferrer">
                   console.anthropic.com
@@ -611,7 +1082,7 @@ export default function Dashboard() {
           )}
 
           {/* Step 2: Grant Database — discovery + optional upload */}
-          {currentStep === 'grants' && (
+          {!restoring && currentStep === 'grants' && (
             <div className="card">
               <h2 className="text-2xl font-bold mb-4">Build Your Grant Database</h2>
               <p className="text-gray-400 mb-6">
@@ -621,42 +1092,45 @@ export default function Dashboard() {
 
               <div className="grid gap-3 mb-6">
                 <button
+                  type="button"
                   onClick={() => runDiscovery('seed')}
                   disabled={discoveryBusy !== null}
-                  className="btn btn-secondary w-full flex items-center justify-between"
+                  className="btn btn-secondary w-full flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-left"
                 >
                   <span className="flex items-center gap-2">
-                    <Database className="w-5 h-5" />
+                    <Database className="w-5 h-5 shrink-0" aria-hidden="true" />
                     Load Starter Database
                   </span>
                   <span className="text-sm text-gray-400">
-                    {discoveryBusy === 'seed' ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Curated Catholic + secular grants'}
+                    {discoveryBusy === 'seed' ? <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" /> : 'Curated Catholic + secular grants'}
                   </span>
                 </button>
                 <button
+                  type="button"
                   onClick={() => runDiscovery('grants_gov')}
                   disabled={discoveryBusy !== null}
-                  className="btn btn-secondary w-full flex items-center justify-between"
+                  className="btn btn-secondary w-full flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-left"
                 >
                   <span className="flex items-center gap-2">
-                    <Globe className="w-5 h-5" />
+                    <Globe className="w-5 h-5 shrink-0" aria-hidden="true" />
                     Search Grants.gov
                   </span>
                   <span className="text-sm text-gray-400">
-                    {discoveryBusy === 'grants_gov' ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Live federal opportunities'}
+                    {discoveryBusy === 'grants_gov' ? <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" /> : 'Live federal opportunities'}
                   </span>
                 </button>
                 <button
+                  type="button"
                   onClick={() => runDiscovery('web_discovery')}
                   disabled={discoveryBusy !== null}
-                  className="btn btn-secondary w-full flex items-center justify-between"
+                  className="btn btn-secondary w-full flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-left"
                 >
                   <span className="flex items-center gap-2">
-                    <Search className="w-5 h-5" />
+                    <Search className="w-5 h-5 shrink-0" aria-hidden="true" />
                     AI Web Discovery
                   </span>
                   <span className="text-sm text-gray-400">
-                    {discoveryBusy === 'web_discovery' ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Claude searches the web (uses your API key)'}
+                    {discoveryBusy === 'web_discovery' ? <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" /> : 'Claude searches the web (uses your API key)'}
                   </span>
                 </button>
               </div>
@@ -666,13 +1140,14 @@ export default function Dashboard() {
                 value={discoveryFocus}
                 onChange={(e) => setDiscoveryFocus(e.target.value)}
                 placeholder="Optional focus for AI web discovery, e.g. teacher training in AI, playground equipment"
+                aria-label="Optional focus for AI web discovery"
                 className="input mb-6 text-sm"
               />
 
               {discoveryBusy && (
                 <div className="mb-6 p-3 rounded bg-[var(--terminal-bg)] text-sm flex items-center gap-2" role="status">
-                  <Loader2 className="w-4 h-4 animate-spin text-[var(--primary)]" />
-                  <span>
+                  <Loader2 className="w-4 h-4 shrink-0 animate-spin text-[var(--primary)]" aria-hidden="true" />
+                  <span className="min-w-0 break-words">
                     {discoveryBusy === 'web_discovery' ? 'Claude is searching the web (this can take a few minutes)' : 'Working'}
                     ...{jobProgress ? ` ${jobProgress}` : ''}
                   </span>
@@ -680,61 +1155,73 @@ export default function Dashboard() {
               )}
 
               {discoveryStatus && (
-                <div className={`mb-6 p-3 rounded text-sm ${discoveryStatus.startsWith('Discovery failed') ? 'bg-red-900/30 text-red-300' : 'bg-green-900/30 text-green-300'}`}>
+                <div className={`mb-6 p-3 rounded text-sm break-words ${discoveryStatus.startsWith('Discovery failed') ? 'bg-red-900/30 text-red-300' : 'bg-green-900/30 text-green-300'}`}>
                   {discoveryStatus}
                 </div>
               )}
 
-              <p className="text-gray-500 text-sm mb-3">
+              <p className="text-gray-400 text-sm mb-3">
                 Optional: upload your own Excel file with the 5 grant categories.
               </p>
               <div
-                className={`dropzone ${grantFile ? 'active' : ''}`}
+                className={`dropzone relative ${grantFile ? 'active' : ''}`}
                 onDragOver={(e) => e.preventDefault()}
                 onDrop={(e) => {
                   e.preventDefault();
                   const file = e.dataTransfer.files[0];
                   if (file && /\.xlsx?$/i.test(file.name)) {
+                    setStepError(null);
                     setGrantFile(file);
                   } else if (file) {
                     setStepError(`${file.name} is not an Excel file. Save it as .xlsx and try again.`);
                   }
                 }}
               >
-                <Upload className="w-12 h-12 text-gray-500 mx-auto mb-4" />
+                <Upload className="w-12 h-12 text-gray-500 mx-auto mb-4" aria-hidden="true" />
                 {grantFile ? (
-                  <p className="text-[var(--accent)]">{grantFile.name}</p>
+                  <div className="flex flex-wrap items-center justify-center gap-3">
+                    <p className="text-[var(--accent)] min-w-0 break-words">{grantFile.name}</p>
+                    <button
+                      type="button"
+                      onClick={() => setGrantFile(null)}
+                      disabled={Boolean(busy)}
+                      className="btn btn-secondary text-sm"
+                    >
+                      Remove
+                    </button>
+                  </div>
                 ) : (
                   <>
                     <p className="mb-2">Drag and drop your Excel file here</p>
-                    <p className="text-sm text-gray-500">or</p>
+                    <p className="text-sm text-gray-400">or</p>
                     <input
                       type="file"
                       accept=".xlsx,.xls"
                       onChange={(e) => setGrantFile(e.target.files?.[0] || null)}
-                      className="hidden"
+                      className="sr-only peer"
                       id="grant-file"
                     />
-                    <label htmlFor="grant-file" className="btn btn-secondary mt-4 cursor-pointer">
+                    <label htmlFor="grant-file" className={`btn btn-secondary mt-4 cursor-pointer ${FILE_LABEL_FOCUS}`}>
                       Browse Files
                     </label>
                   </>
                 )}
               </div>
               <button
+                type="button"
                 onClick={handleGrantUpload}
                 disabled={(!grantFile && discoveredTotal === 0) || Boolean(busy) || discoveryBusy !== null}
                 className="btn btn-primary w-full mt-6"
               >
                 {grantFile ? 'Upload and Continue' : `Continue with ${discoveredTotal} Discovered Grants`}
-                <ChevronRight className="w-5 h-5" />
+                <ChevronRight className="w-5 h-5 shrink-0" aria-hidden="true" />
               </button>
               {busyBanner}
             </div>
           )}
 
           {/* Step 3: Website URLs (or the basics by hand) */}
-          {currentStep === 'website' && (
+          {!restoring && currentStep === 'website' && (
             <div className="card">
               <h2 className="text-2xl font-bold mb-4">Enter Website URLs</h2>
               <p className="text-gray-400 mb-6">
@@ -751,8 +1238,9 @@ export default function Dashboard() {
 
               <div className="space-y-4">
                 <div>
-                  <label className="block text-sm font-medium mb-2">Church/Parish Website</label>
+                  <label htmlFor="church-url" className="block text-sm font-medium mb-2">Church/Parish Website</label>
                   <input
+                    id="church-url"
                     type="url"
                     value={churchUrl}
                     onChange={(e) => setChurchUrl(e.target.value)}
@@ -761,8 +1249,9 @@ export default function Dashboard() {
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium mb-2">School Website (if separate)</label>
+                  <label htmlFor="school-url" className="block text-sm font-medium mb-2">School Website (if separate)</label>
                   <input
+                    id="school-url"
                     type="url"
                     value={schoolUrl}
                     onChange={(e) => setSchoolUrl(e.target.value)}
@@ -772,12 +1261,13 @@ export default function Dashboard() {
                 </div>
               </div>
               <button
+                type="button"
                 onClick={handleWebsiteScan}
                 disabled={(!churchUrl && !schoolUrl) || Boolean(busy)}
                 className="btn btn-primary w-full mt-6"
               >
                 Scan Website
-                <ChevronRight className="w-5 h-5" />
+                <ChevronRight className="w-5 h-5" aria-hidden="true" />
               </button>
               {websiteScanned && !busy && (
                 <p className="text-sm text-[var(--accent)] mt-3">✓ Website scanned and added to your profile.</p>
@@ -788,11 +1278,11 @@ export default function Dashboard() {
                   Some parish sites block automated reading. You can type the basics instead, or skip
                   straight to the questions{profileExists ? ' (your saved profile is kept)' : ''}.
                 </p>
-                <div className="flex gap-3">
-                  <button onClick={() => setShowBasics((v) => !v)} disabled={Boolean(busy)} className="btn btn-secondary flex-1">
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <button type="button" onClick={() => setShowBasics((v) => !v)} disabled={Boolean(busy)} className="btn btn-secondary sm:flex-1">
                     {showBasics ? 'Hide the basics form' : 'Enter the basics by hand'}
                   </button>
-                  <button onClick={skipWebsiteScan} disabled={Boolean(busy)} className="btn btn-secondary flex-1">
+                  <button type="button" onClick={writeQuestions} disabled={Boolean(busy)} className="btn btn-secondary sm:flex-1">
                     Skip to questions
                   </button>
                 </div>
@@ -834,9 +1324,9 @@ export default function Dashboard() {
                         onChange={(e) => setBasics({ ...basics, student_count: e.target.value })} />
                     </div>
                     <div className="md:col-span-2">
-                      <button onClick={saveBasics} disabled={Boolean(busy)} className="btn btn-primary w-full">
+                      <button type="button" onClick={saveBasics} disabled={Boolean(busy)} className="btn btn-primary w-full">
                         Save basics and continue
-                        <ChevronRight className="w-5 h-5" />
+                        <ChevronRight className="w-5 h-5" aria-hidden="true" />
                       </button>
                     </div>
                   </div>
@@ -847,99 +1337,118 @@ export default function Dashboard() {
           )}
 
           {/* Step 4: Questionnaire */}
-          {currentStep === 'questionnaire' && !questionnaire && (
+          {!restoring && currentStep === 'questionnaire' && !questionnaire && (
             <div className="card">
               <h2 className="text-2xl font-bold mb-4">Answer a Few Questions</h2>
               <p className="text-gray-400 mb-6">
                 Claude writes up to 20 questions based on the grants in your database.
               </p>
-              <button onClick={skipWebsiteScan} disabled={Boolean(busy)} className="btn btn-primary w-full">
+              <button type="button" onClick={writeQuestions} disabled={Boolean(busy)} className="btn btn-primary w-full">
                 Write my questions
-                <ChevronRight className="w-5 h-5" />
+                <ChevronRight className="w-5 h-5" aria-hidden="true" />
               </button>
-              <button onClick={() => goTo('documents')} disabled={Boolean(busy)} className="btn btn-secondary w-full mt-3">
+              <button type="button" onClick={() => goTo('documents')} disabled={Boolean(busy)} className="btn btn-secondary w-full mt-3">
                 Skip to documents
               </button>
               {busyBanner}
             </div>
           )}
-          {currentStep === 'questionnaire' && questionnaire && (
+          {!restoring && currentStep === 'questionnaire' && questionnaire && (
             <div className="card">
               <h2 className="text-2xl font-bold mb-4">Answer a Few Questions</h2>
               <p className="text-gray-400 mb-6">
                 These questions help us match you with the right grants.
               </p>
               <div className="space-y-6">
-                {questionnaire.questions.map((q: any) => (
-                  <div key={q.id}>
-                    <label className="block font-medium mb-2">
-                      {q.question}
-                      {q.required && <span className="text-red-500 ml-1">*</span>}
-                    </label>
-                    {q.question_type === 'boolean' && (
-                      <div className="flex gap-4">
-                        <button
-                          onClick={() => setAnswers(prev => ({ ...prev, [q.id]: true }))}
-                          className={`btn ${answers[q.id] === true ? 'btn-primary' : 'btn-secondary'}`}
-                        >
-                          Yes
-                        </button>
-                        <button
-                          onClick={() => setAnswers(prev => ({ ...prev, [q.id]: false }))}
-                          className={`btn ${answers[q.id] === false ? 'btn-primary' : 'btn-secondary'}`}
-                        >
-                          No
-                        </button>
-                      </div>
-                    )}
-                    {(q.question_type === 'text' || !['boolean', 'select', 'multiselect'].includes(q.question_type)) && (
-                      <input
-                        type="text"
-                        value={answers[q.id] || ''}
-                        onChange={(e) => setAnswers(prev => ({ ...prev, [q.id]: e.target.value }))}
-                        className="input"
-                      />
-                    )}
-                    {q.question_type === 'select' && (
-                      <select
-                        value={answers[q.id] || ''}
-                        onChange={(e) => setAnswers(prev => ({ ...prev, [q.id]: e.target.value }))}
-                        className="input"
+                {questions.map((q) => {
+                  const type = questionType(q);
+                  const inputId = `q-${q.id}`;
+                  const labelId = `q-${q.id}-label`;
+                  const value = answers[q.id];
+                  return (
+                    <div key={q.id}>
+                      <label
+                        id={labelId}
+                        htmlFor={type === 'text' || type === 'select' ? inputId : undefined}
+                        className="block font-medium mb-2 break-words"
                       >
-                        <option value="">Select...</option>
-                        {q.options?.map((opt: string) => (
-                          <option key={opt} value={opt}>{opt}</option>
-                        ))}
-                      </select>
-                    )}
-                    {q.question_type === 'multiselect' && (
-                      <div className="flex flex-wrap gap-3">
-                        {(q.options || []).map((opt: string) => {
-                          const selected: string[] = Array.isArray(answers[q.id]) ? answers[q.id] : [];
-                          const checked = selected.includes(opt);
-                          return (
-                            <label key={opt} className="flex items-center gap-2 text-sm">
-                              <input
-                                type="checkbox"
-                                checked={checked}
-                                onChange={() => setAnswers(prev => ({
-                                  ...prev,
-                                  [q.id]: checked ? selected.filter((o) => o !== opt) : [...selected, opt],
-                                }))}
-                              />
-                              {opt}
-                            </label>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                ))}
+                        {q.question}
+                        {q.required && <span className="text-red-500 ml-1">*</span>}
+                      </label>
+                      {type === 'boolean' && (
+                        <div className="flex gap-4" role="group" aria-labelledby={labelId}>
+                          <button
+                            type="button"
+                            aria-pressed={value === true}
+                            onClick={() => setAnswers((prev) => ({ ...prev, [q.id]: true }))}
+                            className={`btn ${value === true ? 'btn-primary' : 'btn-secondary'}`}
+                          >
+                            Yes
+                          </button>
+                          <button
+                            type="button"
+                            aria-pressed={value === false}
+                            onClick={() => setAnswers((prev) => ({ ...prev, [q.id]: false }))}
+                            className={`btn ${value === false ? 'btn-primary' : 'btn-secondary'}`}
+                          >
+                            No
+                          </button>
+                        </div>
+                      )}
+                      {type === 'text' && (
+                        <input
+                          id={inputId}
+                          type="text"
+                          value={typeof value === 'string' ? value : ''}
+                          onChange={(e) => setAnswers((prev) => ({ ...prev, [q.id]: e.target.value }))}
+                          className="input"
+                        />
+                      )}
+                      {type === 'select' && (
+                        <select
+                          id={inputId}
+                          value={typeof value === 'string' ? value : ''}
+                          onChange={(e) => setAnswers((prev) => ({ ...prev, [q.id]: e.target.value }))}
+                          className="input"
+                        >
+                          <option value="">Select...</option>
+                          {(q.options ?? []).map((opt) => (
+                            <option key={opt} value={opt}>{opt}</option>
+                          ))}
+                        </select>
+                      )}
+                      {type === 'multiselect' && (
+                        <div className="flex flex-wrap gap-3" role="group" aria-labelledby={labelId}>
+                          {(q.options ?? []).map((opt) => {
+                            const checked = Array.isArray(value) && value.includes(opt);
+                            return (
+                              <label key={opt} className="flex items-center gap-2 text-sm min-w-0">
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={() => setAnswers((prev) => {
+                                    const selected = Array.isArray(prev[q.id]) ? (prev[q.id] as string[]) : [];
+                                    return {
+                                      ...prev,
+                                      [q.id]: selected.includes(opt) ? selected.filter((o) => o !== opt) : [...selected, opt],
+                                    };
+                                  })}
+                                />
+                                <span className="min-w-0 break-words">{opt}</span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
                 <div>
-                  <label className="block font-medium mb-2">
+                  <label htmlFor="q-notes" className="block font-medium mb-2">
                     Anything else we should know? (Optional)
                   </label>
                   <textarea
+                    id="q-notes"
                     value={freeFormText}
                     onChange={(e) => setFreeFormText(e.target.value)}
                     className="input min-h-[100px]"
@@ -948,70 +1457,104 @@ export default function Dashboard() {
                 </div>
               </div>
               <button
+                type="button"
                 onClick={handleQuestionnaireSubmit}
                 disabled={Boolean(busy)}
                 className="btn btn-primary w-full mt-6"
               >
                 Continue
-                <ChevronRight className="w-5 h-5" />
+                <ChevronRight className="w-5 h-5" aria-hidden="true" />
               </button>
+              <button type="button" onClick={writeQuestions} disabled={Boolean(busy)} className="btn btn-secondary w-full mt-3">
+                Write new questions
+              </button>
+              <p className="text-sm text-gray-400 mt-2 text-center">
+                Claude writes a fresh set. Answers you already gave are filled in where the questions match.
+              </p>
               {busyBanner}
             </div>
           )}
 
           {/* Step 5: Documents */}
-          {currentStep === 'documents' && (
+          {!restoring && currentStep === 'documents' && (
             <div className="card">
               <h2 className="text-2xl font-bold mb-4">Upload Documents (Optional)</h2>
               <p className="text-gray-400 mb-6">
                 Upload bulletins, meeting minutes, prior grant reports, or other documents for deeper
                 analysis. What Claude finds is added to your profile, and the application writer can cite it.
               </p>
+              {profileDocs.length > 0 && (
+                <p className="text-sm text-gray-400 mb-4 break-words">
+                  Already in your profile: {profileDocs.join(', ')}
+                </p>
+              )}
               <div
-                className="dropzone"
+                className="dropzone relative"
                 onDragOver={(e) => e.preventDefault()}
                 onDrop={(e) => {
                   e.preventDefault();
                   handleDocumentUpload(e.dataTransfer.files);
                 }}
               >
-                <FileText className="w-12 h-12 text-gray-500 mx-auto mb-4" />
+                <FileText className="w-12 h-12 text-gray-500 mx-auto mb-4" aria-hidden="true" />
                 <p className="mb-2">Drag and drop PDF, DOCX, or TXT files (up to 4 MB each)</p>
                 <input
                   type="file"
                   accept=".pdf,.docx,.txt"
                   multiple
-                  onChange={(e) => handleDocumentUpload(e.target.files)}
-                  className="hidden"
+                  onChange={(e) => {
+                    handleDocumentUpload(e.target.files);
+                    e.target.value = ''; // so the same file can be picked again later
+                  }}
+                  className="sr-only peer"
                   id="doc-files"
                 />
-                <label htmlFor="doc-files" className="btn btn-secondary mt-4 cursor-pointer">
+                <label htmlFor="doc-files" className={`btn btn-secondary mt-4 cursor-pointer ${FILE_LABEL_FOCUS}`}>
                   Browse Files
                 </label>
               </div>
               {documents.length > 0 && (
-                <div className="mt-4 space-y-2">
+                <ul className="mt-4 space-y-2">
                   {documents.map((doc, i) => (
-                    <div key={i} className="flex items-center gap-2 text-sm">
-                      <CheckCircle className="w-4 h-4 text-[var(--accent)]" />
-                      {doc.name}
-                    </div>
+                    <li key={`${doc.name}-${i}`} className="flex items-center gap-2 text-sm">
+                      <CheckCircle className="w-4 h-4 shrink-0 text-[var(--accent)]" aria-hidden="true" />
+                      <span className="min-w-0 break-words">{doc.name}</span>
+                    </li>
                   ))}
-                </div>
+                </ul>
               )}
               <button
+                type="button"
                 onClick={runMatching}
                 disabled={Boolean(busy)}
                 className="btn btn-primary w-full mt-6"
               >
                 {documents.length > 0 ? 'Process Documents & Find Matches' : 'Skip & Find Matches'}
-                <Play className="w-5 h-5" />
+                <Play className="w-5 h-5 shrink-0" aria-hidden="true" />
               </button>
+              {documents.length > 0 && (
+                <button type="button" onClick={addDocumentsOnly} disabled={Boolean(busy)} className="btn btn-secondary w-full mt-3">
+                  Add to my profile only (no new matching)
+                </button>
+              )}
+              {docResults.length > 0 && (
+                <ul className="mt-4 space-y-1 text-sm" aria-live="polite">
+                  {docResults.map((result, i) => (
+                    <li key={i} className={`flex items-start gap-2 ${result.ok ? 'text-[var(--accent)]' : 'text-red-300'}`}>
+                      {result.ok
+                        ? <CheckCircle className="w-4 h-4 mt-0.5 shrink-0" aria-hidden="true" />
+                        : <XCircle className="w-4 h-4 mt-0.5 shrink-0" aria-hidden="true" />}
+                      <span className="min-w-0 break-words">{result.message}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {busyBanner}
             </div>
           )}
 
           {/* Step 6: Processing */}
-          {currentStep === 'processing' && (
+          {!restoring && currentStep === 'processing' && (
             <div className="card">
               <h2 className="text-2xl font-bold mb-4">Finding Your Grants</h2>
               <div className="terminal">
@@ -1019,9 +1562,9 @@ export default function Dashboard() {
                   <div className="terminal-dot red"></div>
                   <div className="terminal-dot yellow"></div>
                   <div className="terminal-dot green"></div>
-                  <span className="text-sm text-gray-500 ml-2">grantfinder-ai</span>
+                  <span className="text-sm text-gray-400 ml-2">grantfinder-ai</span>
                 </div>
-                <div className="terminal-body" ref={terminalRef}>
+                <div className="terminal-body" ref={terminalRef} role="log" aria-live="polite">
                   {processingLogs.map((log, i) => (
                     <div key={i} className="terminal-line">
                       <span className="terminal-timestamp">[{log.timestamp}]</span>
@@ -1036,14 +1579,14 @@ export default function Dashboard() {
                   ))}
                   {isProcessing && (
                     <div className="terminal-line">
-                      <Loader2 className="w-4 h-4 animate-spin text-[var(--primary)]" />
+                      <Loader2 className="w-4 h-4 shrink-0 animate-spin text-[var(--primary)]" aria-hidden="true" />
                       {jobProgress && <span className="text-gray-400">{jobProgress}</span>}
                     </div>
                   )}
                 </div>
               </div>
-              {!isProcessing && processingLogs.some(l => l.status === 'error') && (
-                <button onClick={() => goTo('documents')} className="btn btn-secondary w-full mt-4">
+              {!isProcessing && processingLogs.some((l) => l.status === 'error') && (
+                <button type="button" onClick={() => goTo('documents')} className="btn btn-secondary w-full mt-4">
                   ← Back — fix the issue and retry
                 </button>
               )}
@@ -1051,57 +1594,71 @@ export default function Dashboard() {
           )}
 
           {/* Step 7: Results */}
-          {currentStep === 'results' && !matchResults && (
+          {!restoring && currentStep === 'results' && !matchResults && (
             <div className="card">
               <h2 className="text-2xl font-bold mb-4">Match Results</h2>
               <p className="text-gray-400 mb-4">No results yet. Run matching from the Documents step.</p>
-              <button onClick={() => goTo('documents')} className="btn btn-primary w-full">Go to Documents</button>
+              <button type="button" onClick={() => goTo('documents')} className="btn btn-primary w-full">Go to Documents</button>
             </div>
           )}
-          {currentStep === 'results' && matchResults && (
+          {!restoring && currentStep === 'results' && matchResults && (
             <div className="space-y-6">
               {/* Summary */}
               <div className="card">
                 <h2 className="text-2xl font-bold mb-4">Match Results</h2>
-                <div className="grid grid-cols-5 gap-4 mb-6">
+                <div className="grid grid-cols-3 sm:grid-cols-5 gap-x-2 gap-y-4 sm:gap-4 mb-6">
                   <div className="text-center">
-                    <div className="text-3xl font-bold text-[var(--score-excellent)]">
+                    <div className="text-2xl sm:text-3xl font-bold text-[var(--score-excellent)]">
                       {matchResults.excellent_matches}
                     </div>
-                    <div className="text-sm text-gray-500">Excellent</div>
+                    <div className="text-xs sm:text-sm text-gray-400">Excellent</div>
                   </div>
                   <div className="text-center">
-                    <div className="text-3xl font-bold text-[var(--score-good)]">
+                    <div className="text-2xl sm:text-3xl font-bold text-[var(--score-good)]">
                       {matchResults.good_matches}
                     </div>
-                    <div className="text-sm text-gray-500">Good</div>
+                    <div className="text-xs sm:text-sm text-gray-400">Good</div>
                   </div>
                   <div className="text-center">
-                    <div className="text-3xl font-bold text-[var(--score-possible)]">
+                    <div className="text-2xl sm:text-3xl font-bold text-[var(--score-possible)]">
                       {matchResults.possible_matches}
                     </div>
-                    <div className="text-sm text-gray-500">Possible</div>
+                    <div className="text-xs sm:text-sm text-gray-400">Possible</div>
                   </div>
                   <div className="text-center">
-                    <div className="text-3xl font-bold text-[var(--score-weak)]">
+                    <div className="text-2xl sm:text-3xl font-bold text-[var(--score-weak)]">
                       {matchResults.weak_matches}
                     </div>
-                    <div className="text-sm text-gray-500">Weak</div>
+                    <div className="text-xs sm:text-sm text-gray-400">Weak</div>
                   </div>
                   <div className="text-center">
-                    <div className="text-3xl font-bold text-gray-500">
+                    <div className="text-2xl sm:text-3xl font-bold text-gray-500">
                       {matchResults.not_eligible}
                     </div>
-                    <div className="text-sm text-gray-500">Not Eligible</div>
+                    <div className="text-xs sm:text-sm text-gray-400">Not Eligible</div>
                   </div>
                 </div>
-                <div className="flex gap-4">
-                  <button onClick={() => downloadResults('csv')} className="btn btn-secondary flex-1">
-                    <Download className="w-5 h-5" />
+                <div className="flex flex-col sm:flex-row gap-3 sm:gap-4">
+                  <button
+                    type="button"
+                    onClick={() => downloadResults('csv')}
+                    disabled={exporting !== null}
+                    className="btn btn-secondary sm:flex-1"
+                  >
+                    {exporting === 'csv'
+                      ? <Loader2 className="w-5 h-5 shrink-0 animate-spin" aria-hidden="true" />
+                      : <Download className="w-5 h-5 shrink-0" aria-hidden="true" />}
                     Export CSV
                   </button>
-                  <button onClick={() => downloadResults('md')} className="btn btn-primary flex-1">
-                    <Download className="w-5 h-5" />
+                  <button
+                    type="button"
+                    onClick={() => downloadResults('md')}
+                    disabled={exporting !== null}
+                    className="btn btn-primary sm:flex-1"
+                  >
+                    {exporting === 'md'
+                      ? <Loader2 className="w-5 h-5 shrink-0 animate-spin" aria-hidden="true" />
+                      : <Download className="w-5 h-5 shrink-0" aria-hidden="true" />}
                     Export Report (Markdown)
                   </button>
                 </div>
@@ -1109,56 +1666,64 @@ export default function Dashboard() {
               </div>
 
               {/* Match List */}
-              {matchResults.matches.map((match: any) => (
-                <div key={match.grant_id} className="card">
-                  <div className="flex items-start justify-between mb-4">
-                    <div>
-                      <h3 className="text-lg font-bold">{match.grant_name}</h3>
-                      <p className="text-gray-500">{match.funder}</p>
-                    </div>
-                    <span className={`score-badge ${match.score_tier}`}>
-                      {match.score}%
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-3 gap-4 mb-4 text-sm">
-                    <div>
-                      <span className="text-gray-500">Amount:</span>
-                      <span className="ml-2 font-medium">{match.amount}</span>
-                    </div>
-                    <div>
-                      <span className="text-gray-500">Deadline:</span>
-                      <span className="ml-2 font-medium">{match.deadline}</span>
-                    </div>
-                    <div>
-                      <span className="text-gray-500">Category:</span>
-                      <span className="ml-2 font-medium capitalize">
-                        {String(match.category || '').replace('_', ' ')}
+              {matchResults.matches.map((match) => {
+                const grantUrl = webUrl(match.url);
+                return (
+                  <div key={match.grant_id} className="card">
+                    <div className="flex items-start justify-between gap-3 mb-4">
+                      <div className="min-w-0 break-words">
+                        <h3 className="text-lg font-bold">{match.grant_name}</h3>
+                        <p className="text-gray-400">{match.funder}</p>
+                      </div>
+                      <span className={`score-badge shrink-0 ${match.score_tier}`}>
+                        {match.score}%
                       </span>
                     </div>
-                  </div>
-                  <p className="text-gray-400 mb-4">{match.explanation}</p>
-                  <div className="flex items-center justify-between">
-                    <a
-                      href={match.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-[var(--primary)] text-sm hover:underline"
-                    >
-                      Visit Grant Website →
-                    </a>
-                    <div className="flex items-center gap-4">
-                      <span className="text-sm text-gray-500">Contact: {match.contact}</span>
-                      <button
-                        onClick={() => handleWriteApplication(match.grant_id)}
-                        disabled={Boolean(busy)}
-                        className="btn btn-primary text-sm"
-                      >
-                        Write Application →
-                      </button>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 sm:gap-4 mb-4 text-sm">
+                      <div className="min-w-0 break-words">
+                        <span className="text-gray-400">Amount:</span>
+                        <span className="ml-2 font-medium">{match.amount}</span>
+                      </div>
+                      <div className="min-w-0 break-words">
+                        <span className="text-gray-400">Deadline:</span>
+                        <span className="ml-2 font-medium">{match.deadline}</span>
+                      </div>
+                      <div className="min-w-0 break-words">
+                        <span className="text-gray-400">Category:</span>
+                        <span className="ml-2 font-medium capitalize">
+                          {String(match.category || '').replace('_', ' ')}
+                        </span>
+                      </div>
+                    </div>
+                    <p className="text-gray-400 mb-4 break-words">{match.explanation}</p>
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      {grantUrl && (
+                        <a
+                          href={grantUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-[var(--primary)] text-sm hover:underline"
+                        >
+                          Visit Grant Website →
+                        </a>
+                      )}
+                      <div className="flex flex-wrap items-center gap-3 min-w-0 ml-auto">
+                        {match.contact && (
+                          <span className="text-sm text-gray-400 min-w-0 break-words">Contact: {match.contact}</span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => handleWriteApplication(match.grant_id)}
+                          disabled={Boolean(busy)}
+                          className="btn btn-primary text-sm"
+                        >
+                          Write Application →
+                        </button>
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

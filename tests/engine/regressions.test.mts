@@ -152,5 +152,66 @@ const [up1, up2] = await Promise.all([
 check('two document uploads both start their own job', up1.status === 202 && up2.status === 202 && up1.data.job_id !== up2.data.job_id, [up1.data, up2.data]);
 await mock.delay('document_signals_v1', 0);
 
+// --- 5. A strategy edited after "Strategy confirmed" is saved again and used by the next draft
+// (the writer page saves it inside every drafting action before drafting).
+const LATE_STRATEGY = 'Lead with outcomes, then the families. LATE-STRATEGY-MARKER';
+const resaved = await api('POST', `${base}/confirm-strategy`, { token, json: { strategy: LATE_STRATEGY } });
+const requestsBefore = (await mock.requests()).length;
+const redraftBudget = await call('POST', `${base}/draft`, { token, json: { section_id: 'budget' } });
+const budgetPrompts = (await mock.requests()).slice(requestsBefore).filter((r) => r.prompt_id === 'section_draft_v1');
+check(
+  'a strategy saved again after confirming is used by the next draft',
+  resaved.status === 200 && resaved.data.strategy === LATE_STRATEGY && resaved.data.strategy_confirmed === true &&
+    redraftBudget.status === 200 && budgetPrompts.length === 1 && budgetPrompts[0].prompt.includes(`CONFIRMED STRATEGY:\n${LATE_STRATEGY}`),
+  [resaved.data, redraftBudget.status, budgetPrompts.length],
+);
+
+// --- 6. A lower limit after re-analysis is flagged at once (live check), and export says by how much
+const { getSectionDraft } = await import('../../frontend/src/server/services/writerRepo.ts');
+const beforeTight = (await api('GET', base, { token })).data.sections.find((s: { section_id: string }) => s.section_id === oldIds[0]);
+await mock.fixtures({
+  grant_spec_v1: JSON.stringify({
+    required_sections: [
+      { id: oldIds[0], title: beforeTight.title, prompt: 'Background', word_limit: 10, char_limit: null, notes: '' },
+      { id: 'budget', title: 'Budget Narrative', prompt: 'Explain the budget.', word_limit: 300, char_limit: null, notes: '' },
+    ],
+    format_constraints: [],
+    deliverables: [],
+    rubric: [{ id: 'c1', name: 'Need', description: '', weight: null }],
+    rubric_source: 'explicit',
+    funder_language_cues: [],
+    funder_priorities: [],
+  }),
+});
+const tightened = await call('POST', `${base}/grant-spec`, { token, json: { guidelines_text: 'Same sections, a 10-word background.' } });
+const tightSection = (await api('GET', base, { token })).data.sections.find((s: { section_id: string }) => s.section_id === oldIds[0]);
+const storedTight = await getSectionDraft(me.id, app.id, oldIds[0]);
+check(
+  'a limit lowered by re-analysis shows OVER LIMIT in the state at once (nothing re-saved)',
+  tightened.status === 200 && beforeTight.word_count > 10 && tightSection.over_limit === true && storedTight?.over_limit === false,
+  [tightened.status, beforeTight.word_count, tightSection.over_limit, storedTight?.over_limit],
+);
+const refusedTight = await api('POST', `${base}/export`, { token, json: { format: 'md' } });
+check(
+  'export refuses it and says by how much',
+  refusedTight.status === 409 &&
+    refusedTight.data.detail.startsWith(`Cannot export: section(s) over their hard limit: ${beforeTight.title} (${tightSection.word_count} of 10 words). `),
+  refusedTight.data,
+);
+
+// --- 7. A hand edit while a refine runs is refused too (drafting and refining share one lock)
+await mock.delay('section_refine_v1', 1500);
+const slowRefine = await api('POST', `${base}/sections/budget/refine`, { token, json: { instruction: 'warm it up' } });
+const editDuringRefine = await api('PUT', `${base}/sections/budget`, { token, json: { text: 'My own words while the refine runs.' } });
+await mock.delay('section_refine_v1', 0);
+const refineDone = slowRefine.status === 202 ? await waitJob(slowRefine.data.job_id) : null;
+check(
+  'edit while a refine runs -> 409 (and the refine still finishes)',
+  slowRefine.status === 202 && editDuringRefine.status === 409 && /still running/.test(editDuringRefine.data.detail) &&
+    editDuringRefine.data.running === undefined && refineDone?.status === 'done',
+  [slowRefine.status, editDuringRefine.data, refineDone?.status],
+);
+await mock.reset();
+
 mock.stop();
 finish();

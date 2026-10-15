@@ -108,6 +108,12 @@ body {
   margin-bottom: 4px;
 }
 
+/* The message: long file names and web addresses wrap instead of widening the page. */
+.terminal-line > span:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .terminal-timestamp {
   color: var(--terminal-purple);
   flex-shrink: 0;
@@ -166,6 +172,13 @@ body {
   padding: 24px;
 }
 
+/* Phones: a little less padding so every step fits a 360px-wide screen. */
+@media (max-width: 639px) {
+  .card {
+    padding: 16px;
+  }
+}
+
 /* Buttons */
 .btn {
   display: inline-flex;
@@ -185,7 +198,7 @@ body {
   color: white;
 }
 
-.btn-primary:hover {
+.btn-primary:hover:not(:disabled) {
   background: var(--primary-hover);
 }
 
@@ -195,8 +208,19 @@ body {
   border: 1px solid var(--card-border);
 }
 
-.btn-secondary:hover {
+.btn-secondary:hover:not(:disabled) {
   background: var(--card-bg);
+}
+
+/* A button that can't be used right now must look that way (and not react to hover). */
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
 }
 
 /* Inputs */
@@ -260,6 +284,12 @@ body {
   padding: 40px;
   text-align: center;
   transition: all 0.2s;
+}
+
+@media (max-width: 639px) {
+  .dropzone {
+    padding: 24px 16px;
+  }
 }
 
 .dropzone:hover,

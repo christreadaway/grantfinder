@@ -29,6 +29,8 @@ import {
   loadWriterProfile,
   draftFitsSection,
   draftsVsSpec,
+  MAX_SECTION_VERSIONS,
+  openGapsByCoverage,
   replacedQuestionMessage,
   refineSection,
   scoreDraft,
@@ -40,6 +42,7 @@ import {
   getFitAnalysis,
   getGaps,
   getGrantSpec,
+  getIntakeRequests,
   getSectionDraft,
   listSectionDrafts,
   saveFitAnalysis,
@@ -201,9 +204,25 @@ async function intakeGenerateJob(ctx: JobContext): Promise<unknown> {
   const gaps = await getGaps(ctx.userId, app.id);
   if (!gaps.length) return { intake_requests: [], note: WRITER_MESSAGES.noGaps };
 
+  // Only open gaps that no request covers yet: a second round (after re-analysis,
+  // or for gaps the first round left unassigned) never asks about a gap twice.
+  const { uncovered, covered } = openGapsByCoverage(gaps, await getIntakeRequests(ctx.userId, app.id));
+  if (covered.length) {
+    // Asked already (an earlier run stopped before marking them): mark them asked.
+    const asked = new Set(covered.map((gap) => gap.id));
+    await updateGaps(ctx.userId, app.id, (current) =>
+      current.map((gap) => (asked.has(gap.id) && gap.status === 'open' ? { ...gap, status: 'routed' } : gap)),
+    );
+    ctx.note(`Already covered by an earlier request (marked asked): ${covered.map((gap) => gap.id).join(', ')}`);
+  }
+  if (!uncovered.length) {
+    await touchApplication(ctx.userId, app.id);
+    return covered.length ? { intake_requests: [], note: WRITER_MESSAGES.allGapsAsked } : { intake_requests: [] };
+  }
+
   await ctx.progress('Writing the stakeholder request emails...');
   const run = runFor(ctx, await ctx.claude());
-  const requests = await generateIntakePackets(run, app, gaps, profile);
+  const requests = await generateIntakePackets(run, app, uncovered, profile);
   if (requests.length) {
     await updateIntakeRequests(ctx.userId, app.id, (current) => [...current, ...requests]);
     const routed = new Set(requests.flatMap((request) => request.gap_ids));
@@ -213,13 +232,37 @@ async function intakeGenerateJob(ctx: JobContext): Promise<unknown> {
     );
   }
   await touchApplication(ctx.userId, app.id);
-  logger.info('intake_generated', { correlation_id: app.correlation_id, app_id: app.id, requests: requests.length });
+  logger.info('intake_generated', {
+    correlation_id: app.correlation_id,
+    app_id: app.id,
+    requests: requests.length,
+    gaps_routed: uncovered.length,
+    gaps_already_asked: covered.length,
+  });
   return { intake_requests: requests };
 }
 
 // =============================================================================
 // 4.5 Drafting (blocked by the strategy gate and open high-severity gaps)
 // =============================================================================
+
+/**
+ * What to click to finish after a partial run. Sections that have no draft at
+ * all show up under "Draft missing sections" (the page offers that button). A
+ * section that still has its earlier text (its redraft failed) is not missing,
+ * so that button skips it: it needs its own Redraft button.
+ */
+function howToFinish(unfinished: RequiredSection[], hadDraft: Set<string>): string {
+  const missingSentence = 'To finish, run drafting again with "Draft missing sections" (only the unfinished sections are drafted).';
+  const stillOld = unfinished.filter((section) => hadDraft.has(section.id));
+  if (!stillOld.length) return missingSentence;
+  const titles = stillOld.map((section) => `"${section.title}"`).join(', ');
+  const keeps = stillOld.length === 1 ? 'keeps its' : 'keep their';
+  if (stillOld.length === unfinished.length) {
+    return `To finish, run drafting again with the Redraft button on ${titles} (${stillOld.length === 1 ? 'it' : 'they'} ${keeps} earlier text until then).`;
+  }
+  return `${missingSentence} Then use the Redraft button on ${titles}, which ${keeps} earlier text until then.`;
+}
 
 async function draftJob(ctx: JobContext): Promise<unknown> {
   const app = await loadApplication(ctx.userId, appIdOf(ctx));
@@ -266,8 +309,8 @@ async function draftJob(ctx: JobContext): Promise<unknown> {
       const draft = await draftSection(run, app, section, spec, profile, analysis, confirmedGaps);
       const prior = priorDrafts.get(section.id);
       if (prior?.current_draft) {
-        // Keep what this replaces (including refinements), newest last, capped.
-        draft.versions = [...(prior.versions ?? []), prior.current_draft, ...draft.versions].slice(-12);
+        // Keep what this replaces (including refinements and hand edits), newest last, capped.
+        draft.versions = [...(prior.versions ?? []), prior.current_draft, ...draft.versions].slice(-MAX_SECTION_VERSIONS);
       }
       await saveSectionDraft(ctx.userId, draft);
       drafted.set(section.id, draft);
@@ -348,7 +391,7 @@ async function draftJob(ctx: JobContext): Promise<unknown> {
     throw new HttpError(
       failed.length ? failureStatus(failed[0].error) : 503,
       `Drafted and saved ${drafted.size} of ${total} sections. Not drafted: ${parts.join('; ')}. ` +
-        'The saved sections are kept; run drafting again to finish (sections without a draft go first).',
+        `The saved sections are kept. ${howToFinish([...failed.map((item) => item.section), ...skipped], covered)}`,
     );
   }
 

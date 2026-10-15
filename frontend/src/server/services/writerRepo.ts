@@ -127,6 +127,22 @@ export async function saveSectionDraft(userId: string, draft: SectionDraft): Pro
   await kv().set(sectionDraftKey(userId, draft.application_id, draft.section_id), draft);
 }
 
+/**
+ * Read-modify-write one section's draft (compare-and-swap, so a save that
+ * lands in between is never silently lost). `fn` gets a copy and returns the
+ * new draft, or undefined to leave it unchanged. Returns the stored draft
+ * afterwards (the unchanged one when `fn` returned undefined), or null when
+ * the section has no draft.
+ */
+export async function updateSectionDraft(
+  userId: string,
+  appId: string,
+  sectionId: string,
+  fn: (draft: SectionDraft) => SectionDraft | undefined,
+): Promise<SectionDraft | null> {
+  return update<SectionDraft>(sectionDraftKey(userId, appId, sectionId), (current) => (current ? fn(current) : undefined));
+}
+
 // =============================================================================
 // Scorecard (latest only)
 // =============================================================================

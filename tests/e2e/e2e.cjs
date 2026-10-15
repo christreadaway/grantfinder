@@ -153,6 +153,7 @@ const apiLog = [];
 const ALWAYS_EXPECTED = [
   { url: /\/api\/processing\/profile$/, text: /status of 404/ },
   { url: /\/api\/processing\/match-results\/latest$/, text: /status of 404/ },
+  { url: /\/api\/processing\/questionnaire$/, text: /status of 404/ }, // no saved questions yet
 ];
 let expectedWindows = [];
 
@@ -1007,7 +1008,7 @@ async function journey(browser) {
     await shot('back-from-writer');
     const appsText = await apps.innerText();
     check('"Your applications" lists the Kenedy application', appsText.includes(KENEDY), appsText);
-    check('application row shows the funder and status', /Kenedy Memorial Foundation/.test(appsText) && /·\s*(export|review|drafting|intake|analysis|spec|new)/i.test(appsText), appsText);
+    check('application row shows the funder and status', /Kenedy Memorial Foundation/.test(appsText) && /·\s*(Ready to export|Reviewing the draft|Drafting|Gathering information|Reading requirements|Getting started)/i.test(appsText), appsText);
     if (urgency.urgent) check('application row says "deadline soon"', /deadline soon/i.test(appsText), appsText);
 
     await page.reload({ waitUntil: 'domcontentloaded' });
@@ -1020,6 +1021,14 @@ async function journey(browser) {
     check('after reload: website URL remembered', (await page.getByPlaceholder('https://yourparish.org').inputValue()).startsWith(SITE));
     check('after reload: school website URL remembered', (await page.getByPlaceholder('https://yourschool.org').inputValue()) === `${SITE}/school-home`);
     check('after reload: "Your applications" still listed', (await card(page, /Your applications/).innerText()).includes(KENEDY));
+    const questionsBefore = await requestCount();
+    await goToStep(page, 'questionnaire');
+    const qcard = card(page, 'Answer a Few Questions');
+    check('after reload: the saved questions are shown (no new "Write my questions")',
+      (await qcard.getByRole('button', { name: 'Write my questions' }).count()) === 0 && (await qcard.locator('input[type=text], select, input[type=checkbox]').count()) > 0);
+    const filled = await qcard.locator('input[type=text]').evaluateAll((els) => els.filter((el) => el.value.trim()).length);
+    check('after reload: earlier answers are filled in', filled > 0, `${filled} text answer(s) filled`);
+    check('after reload: no new AI call to write questions', (await promptsFor('questionnaire_v1', questionsBefore)).length === 0);
     const resultsStep = page.getByRole('button', { name: 'Results', exact: true });
     check('after reload: Results step is clickable', await resultsStep.isEnabled());
     await resultsStep.click();
@@ -1264,6 +1273,38 @@ async function writerFlow(page, S, urgency) {
     const app = await appApi();
     const need = (app.sections || []).find((s) => s.title === 'Statement of Need');
     check('previous version kept (version history)', need && Array.isArray(need.versions) && need.versions.length >= 1, need && need.versions);
+  });
+
+  await step('Writer 9b: edit a section by hand, then restore the earlier version', async () => {
+    const title = 'Organization Background';
+    const before = ((await appApi()).sections || []).find((x) => x.title === title);
+    await sectionCard(page, title).getByRole('button', { name: 'Edit', exact: true }).click();
+    const box = page.getByRole('textbox', { name: `Edit ${title}` });
+    await box.waitFor({ timeout: 10000 });
+    check('the edit box starts with the current text', before && (await box.inputValue()) === before.current_draft);
+    const edited = 'HAND-EDIT-MARKER Our parish school has served families on the east side of town since 1952.';
+    await box.fill(edited);
+    check('live word count shown while editing', /Your edit: \d+ words/.test(await sectionCard(page, title).innerText()), (await sectionCard(page, title).innerText()).slice(0, 300));
+    await sectionCard(page, title).getByRole('button', { name: 'Save', exact: true }).click();
+    await sectionCard(page, title).filter({ hasText: 'HAND-EDIT-MARKER' }).locator('pre').waitFor({ timeout: 30000 });
+    const after = ((await appApi()).sections || []).find((x) => x.title === title);
+    check('the hand edit is saved on the server', after && after.current_draft === edited, after && after.current_draft);
+    check('the text before the edit is kept in the history', after && (after.versions || []).includes(before.current_draft), after && after.versions);
+    check('counts recomputed for the edited text', after && after.word_count > 0 && after.word_count < before.word_count, after && [before.word_count, after.word_count]);
+
+    const history = sectionCard(page, title).locator('details').filter({ hasText: /Earlier versions/ });
+    if (!(await history.evaluate((el) => el.open))) await history.locator('summary').click();
+    let asked = '';
+    page.once('dialog', (dialog) => {
+      asked = dialog.message();
+      dialog.accept().catch(() => {});
+    });
+    await history.getByRole('button', { name: /Restore this version/ }).first().click();
+    await waitUntil(async () => (((await appApi()).sections || []).find((x) => x.title === title) || {}).current_draft === before.current_draft, 30000, 'the earlier version to be restored');
+    check('"Restore this version" asks first', /Put this earlier version back/i.test(asked), asked);
+    const restored = ((await appApi()).sections || []).find((x) => x.title === title);
+    check('the newest earlier version is restored, and the hand edit is kept in the history', restored.current_draft === before.current_draft && (restored.versions || []).includes(edited), restored.versions);
+    await waitUntil(async () => !(await sectionCard(page, title).locator('pre').innerText()).includes('HAND-EDIT-MARKER'), 15000, 'the page to show the restored text');
   });
 
   await step('Writer 10: Score Draft', async () => {
@@ -2007,8 +2048,10 @@ async function persist(browser) {
     await page.waitForURL(/\/dashboard$/, { timeout: 30000 });
     check('landing forwards a signed-in user to the dashboard', true);
     await page.getByText('Guest', { exact: true }).first().waitFor({ timeout: 20000 });
-    await page.getByRole('heading', { name: 'Enter Website URLs' }).waitFor({ timeout: 20000 });
+    await waitForDashboard(page);
+    check('a returning user with results lands on Results', await onStep(page, 'results'));
     check('no API key prompt after restart', (await page.getByRole('heading', { name: 'Enter Your Claude API Key' }).count()) === 0);
+    await goToStep(page, 'website');
     check('grant count after restart (24)', await page.getByText(/24 grants in your database/).isVisible());
     const appsText = await card(page, /Your applications/).innerText();
     check('"Your applications" after restart', appsText.includes(KENEDY), appsText);

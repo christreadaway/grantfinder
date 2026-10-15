@@ -80,8 +80,22 @@ function waitForOnline(maxMs: number): Promise<void> {
  * there is one, otherwise a plain explanation (lost connection, timeout, a
  * Netlify error page) instead of axios's raw "Network Error".
  */
-export function errorDetail(error: any, fallback: string): string {
-  const detail = error?.response?.data?.detail;
+/** The parts of an axios (or apiError) error that the messages below read. */
+interface ErrorLike {
+  code?: string;
+  isAxiosError?: boolean;
+  message?: string;
+  response?: { status?: number; data?: unknown };
+}
+
+function asErrorLike(error: unknown): ErrorLike {
+  return error && typeof error === 'object' ? (error as ErrorLike) : {};
+}
+
+export function errorDetail(error: unknown, fallback: string): string {
+  const e = asErrorLike(error);
+  const data = e.response?.data;
+  const detail = data && typeof data === 'object' ? (data as { detail?: unknown }).detail : undefined;
   if (typeof detail === 'string' && detail.trim()) return detail;
   if (detail && typeof detail === 'object') {
     try {
@@ -90,36 +104,37 @@ export function errorDetail(error: any, fallback: string): string {
       // fall through
     }
   }
-  if (error?.code === 'ECONNABORTED' || error?.code === 'ETIMEDOUT') {
+  if (e.code === 'ECONNABORTED' || e.code === 'ETIMEDOUT') {
     return 'GrantFinder took too long to answer. Check your internet connection, then click the same button again (a step still running is picked back up, not started twice).';
   }
-  if (error?.code === 'ERR_NETWORK' || (error?.isAxiosError && !error?.response)) return NETWORK_MESSAGE;
-  const status = error?.response?.status;
-  if (status >= 500) {
+  if (e.code === 'ERR_NETWORK' || (e.isAxiosError && !e.response)) return NETWORK_MESSAGE;
+  const status = e.response?.status;
+  if (status && status >= 500) {
     return `GrantFinder had a problem (HTTP ${status}). Wait a minute and try again. If it keeps happening, use "Copy debug report" and paste it into Claude Code.`;
   }
   if (status) return `${fallback} (HTTP ${status})`;
-  return error?.message || fallback;
+  return e.message || fallback;
 }
 
 /** errorDetail for downloads: their error bodies arrive as a Blob that must be read first. */
-export async function blobErrorDetail(error: any, fallback: string): Promise<string> {
-  const data = error?.response?.data;
+export async function blobErrorDetail(error: unknown, fallback: string): Promise<string> {
+  const e = asErrorLike(error);
+  const data = e.response?.data as { text?: () => Promise<string> } | undefined;
   if (data && typeof data.text === 'function') {
     try {
-      const parsed = JSON.parse(await data.text());
+      const parsed = JSON.parse(await data.text()) as { detail?: unknown };
       if (typeof parsed?.detail === 'string' && parsed.detail.trim()) return parsed.detail;
     } catch {
       // Not JSON (e.g. a Netlify error page): fall back to the status.
     }
-    return errorDetail({ ...error, response: { ...error.response, data: {} } }, fallback);
+    return errorDetail({ code: e.code, isAxiosError: e.isAxiosError, message: e.message, response: { status: e.response?.status, data: {} } }, fallback);
   }
   return errorDetail(error, fallback);
 }
 
 /** True when the engine said the session is over (as opposed to a network blip or a server error). */
-export function isSessionEnded(error: any): boolean {
-  return error?.response?.status === 401;
+export function isSessionEnded(error: unknown): boolean {
+  return asErrorLike(error).response?.status === 401;
 }
 
 class ApiClient {
@@ -244,24 +259,36 @@ class ApiClient {
     }
   }
 
+  // Browser storage can be blocked (strict privacy settings, some private
+  // windows). The session then lasts only while this page stays open, which
+  // is better than failing to sign in at all.
   setToken(token: string) {
     this.token = token;
-    if (typeof window !== 'undefined') {
+    if (typeof window === 'undefined') return;
+    try {
       localStorage.setItem('auth_token', token);
+    } catch (error) {
+      console.warn('[GrantFinder] Browser storage is blocked; this sign-in lasts only while the page stays open.', error);
     }
   }
 
   loadToken() {
-    if (typeof window !== 'undefined') {
-      this.token = localStorage.getItem('auth_token');
+    if (typeof window === 'undefined') return this.token;
+    try {
+      this.token = localStorage.getItem('auth_token') ?? this.token;
+    } catch {
+      // Storage blocked: keep the session held in memory, if any.
     }
     return this.token;
   }
 
   clearToken() {
     this.token = null;
-    if (typeof window !== 'undefined') {
+    if (typeof window === 'undefined') return;
+    try {
       localStorage.removeItem('auth_token');
+    } catch {
+      // Storage blocked: nothing was saved there.
     }
   }
 
@@ -357,7 +384,7 @@ class ApiClient {
     return response.data;
   }
 
-  async submitQuestionnaire(answers: any[], freeFormText?: string) {
+  async submitQuestionnaire(answers: Array<{ question_id: number; answer: unknown; question?: string }>, freeFormText?: string) {
     const response = await this.client.post('/api/processing/submit-questionnaire', {
       answers,
       free_form_text: freeFormText,
@@ -396,7 +423,7 @@ class ApiClient {
     }
   }
 
-  async updateProfile(profile: any) {
+  async updateProfile(profile: Record<string, unknown>) {
     const response = await this.client.put('/api/processing/profile', profile);
     return response.data;
   }

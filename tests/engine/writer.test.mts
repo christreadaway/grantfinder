@@ -28,6 +28,8 @@ const handlers = await import('../../frontend/src/server/handlers/writer.ts');
 const errors = await import('../../frontend/src/server/errors.ts');
 
 type Grant = import('../../frontend/src/server/types.ts').Grant;
+type Gap = import('../../frontend/src/server/types.ts').Gap;
+type GapStatus = import('../../frontend/src/server/types.ts').GapStatus;
 
 const FIXTURES: Record<string, string> = JSON.parse(
   fs.readFileSync(path.join(repoRoot, 'tests', 'mock-claude', 'fixtures', 'writer.json'), 'utf8'),
@@ -654,6 +656,11 @@ check(
     refined.data.versions[1] === enforcedText && refined.data.over_limit === false && refined.data.word_count === writer.countWords(refineText),
   refined.data,
 );
+check(
+  'a refine notes that the claim check is from the earlier draft',
+  refined.data?.compliance_notes?.includes('Revised: the claim check is from the earlier draft. Re-check any new numbers or names.'),
+  refined.data?.compliance_notes,
+);
 const refinePrompt = await lastPrompt('section_refine_v1');
 check(
   'refine prompt: one instruction, current draft, hard limit',
@@ -676,6 +683,15 @@ check(
   md.status === 200 && md.headers.get('content-type') === 'text/markdown; charset=utf-8' &&
     md.headers.get('content-disposition') === `attachment; filename="Kenedy_Memorial_Foundation_Grants_application_${stamp}.md"`,
   [md.status, md.headers.get('content-type'), md.headers.get('content-disposition'), md.text.slice(0, 200)],
+);
+const mdNotice = decodeURIComponent(md.headers.get('x-grantfinder-notice') || '');
+check(
+  'export notice lists the [NEEDS INPUT] placeholders still in the file (export not blocked)',
+  md.status === 200 &&
+    mdNotice ===
+      'Still in the file: 3 [NEEDS INPUT] placeholder(s), in Statement of Need (1), Project Description and Budget Narrative (1), ' +
+        'Evaluation and Sustainability (1). Fill them in before you submit.',
+  mdNotice,
 );
 check(
   'export md: content and checklist',
@@ -756,10 +772,17 @@ check(
 );
 const blockedOver = await api('POST', `${appPath}/export`, { token: tokenA, json: { format: 'docx' } });
 check(
-  'GATE 2: export refuses over-limit content (409, Python wording)',
+  'GATE 2: export refuses over-limit content (409: names the section and its count; tighten or edit by hand)',
   blockedOver.status === 409 &&
-    blockedOver.data.detail === "Cannot export: section(s) over their hard limit: Organization Background. Refine them (e.g. 'tighten to the limit') first.",
+    blockedOver.data.detail ===
+      `Cannot export: section(s) over their hard limit: Organization Background (${tooLong.data?.word_count} of 250 words). ` +
+        'Refine it (for example "tighten to the limit") or edit it by hand first.',
   blockedOver.data,
+);
+check(
+  'a refine adds the "re-check new numbers" claim note exactly once (even with the auto-tighten pass)',
+  tooLong.data?.compliance_notes?.filter((n: string) => n === writer.SECTION_NOTES.refinedClaims).length === 1,
+  tooLong.data?.compliance_notes,
 );
 
 await mock.fixtures({
@@ -770,14 +793,196 @@ const dirty = await run('POST', `${appPath}/sections/s1/refine`, tokenA, { instr
 check('banned phrase left in after enforcement stays flagged', dirty.status === 200 && JSON.stringify(dirty.data.banned_phrase_hits) === '["cutting-edge"]' && dirty.data.over_limit === false, dirty.data);
 const blockedDirty = await api('POST', `${appPath}/export`, { token: tokenA, json: { format: 'md' } });
 check(
-  'GATE 2: export refuses banned phrases (409, Python wording)',
-  blockedDirty.status === 409 && blockedDirty.data.detail === 'Cannot export: banned phrases remain in: Organization Background. Refine first.',
+  'GATE 2: export refuses banned phrases (409: names the section and the phrase; refine or edit by hand)',
+  blockedDirty.status === 409 &&
+    blockedDirty.data.detail ===
+      'Cannot export: banned phrases remain in: Organization Background ("cutting-edge"). ' +
+        'Refine that section (for example "remove these phrases") or edit it by hand first.',
   blockedDirty.data,
 );
 await restore('section_refine_v1', 'voice_enforce_v1');
 const clean = await run('POST', `${appPath}/sections/s1/refine`, tokenA, { instruction: 'Restore the plain version' });
 const exportOk = await api('POST', `${appPath}/export`, { token: tokenA, json: { format: 'md' } });
 check('after refining, export works again', clean.status === 200 && clean.data.banned_phrase_hits.length === 0 && exportOk.status === 200, exportOk.data ?? exportOk.status);
+
+// ---------------------------------------------------------------------------
+// Live compliance: a phrase banned AFTER drafting shows up at once (nothing re-saved)
+// ---------------------------------------------------------------------------
+
+type SectionState = { section_id: string; title: string; current_draft: string; versions: string[]; claims: unknown[]; compliance_notes: string[]; banned_phrase_hits: string[]; over_limit: boolean; word_count: number; char_count: number };
+const sectionOf = async (sectionId: string, token = tokenA): Promise<SectionState> =>
+  (await api('GET', appPath, { token })).data.sections.find((s: SectionState) => s.section_id === sectionId);
+const withExtraBanned = (phrases: string[]) =>
+  repo.updateProfile(userA, (profile) =>
+    profile ? { ...profile, voice_profile: { ...(profile.voice_profile ?? {}), banned_phrases: phrases } } : undefined,
+  );
+const bannedBefore = ((await repo.getProfile(userA))!.voice_profile as { banned_phrases: string[] }).banned_phrases;
+await withExtraBanned([...bannedBefore, 'truest sense']);
+const liveS3 = await sectionOf('s3');
+const storedS3 = await writerRepo.getSectionDraft(userA, appId, 's3');
+check(
+  'a phrase banned after drafting shows up in the application state (live check, nothing re-saved)',
+  liveS3.banned_phrase_hits.includes('truest sense') && storedS3?.banned_phrase_hits.length === 0,
+  [liveS3.banned_phrase_hits, storedS3?.banned_phrase_hits],
+);
+const blockedLive = await api('POST', `${appPath}/export`, { token: tokenA, json: { format: 'md' } });
+check(
+  'export refusal names each section with the newly banned phrase',
+  blockedLive.status === 409 &&
+    blockedLive.data.detail ===
+      'Cannot export: banned phrases remain in: Statement of Need ("truest sense"), Project Description and Budget Narrative ("truest sense"), ' +
+        'Evaluation and Sustainability ("truest sense"). Refine those sections (for example "remove these phrases") or edit them by hand first.',
+  blockedLive.data,
+);
+await withExtraBanned(bannedBefore);
+const liveAgain = await sectionOf('s3');
+check('removing the phrase from the profile clears the flag again', liveAgain.banned_phrase_hits.length === 0, liveAgain.banned_phrase_hits);
+
+// ---------------------------------------------------------------------------
+// 4.7b Hand edits: PUT .../sections/:sectionId {text}
+// ---------------------------------------------------------------------------
+
+const s2Before = await sectionOf('s2');
+const appBeforeEdit = (await api('GET', appPath, { token: tokenA })).data.application;
+const EDIT_TEXT = 'Our families walk in together at 7:30 every morning.\r\nWe pray, we learn, and we look after each other. [NEEDS INPUT: number of families]';
+const EDIT_SAVED = EDIT_TEXT.replace(/\r\n/g, '\n');
+const edited = await api('PUT', `${appPath}/sections/s2`, { token: tokenA, json: { text: EDIT_TEXT } });
+check(
+  'hand edit saves the new text (line breaks normalized to \\n)',
+  edited.status === 200 && edited.data.section_id === 's2' && edited.data.current_draft === EDIT_SAVED,
+  edited.data,
+);
+check(
+  'hand edit keeps the previous text in versions (newest last)',
+  edited.data?.versions?.length === s2Before.versions.length + 1 && edited.data.versions[edited.data.versions.length - 1] === s2Before.current_draft,
+  edited.data?.versions,
+);
+check(
+  'hand edit recomputes counts and flags',
+  edited.data?.word_count === writer.countWords(EDIT_SAVED) && edited.data.char_count === writer.countChars(EDIT_SAVED) &&
+    edited.data.over_limit === false && edited.data.banned_phrase_hits.length === 0,
+  [edited.data?.word_count, edited.data?.char_count, edited.data?.over_limit, edited.data?.banned_phrase_hits],
+);
+check(
+  'hand edit keeps the claims and adds the two notes',
+  JSON.stringify(edited.data?.claims) === JSON.stringify(s2Before.claims) &&
+    edited.data.compliance_notes.includes('Edited by hand.') &&
+    edited.data.compliance_notes.includes('The claim check is from the AI draft; re-check any numbers or names you added.'),
+  edited.data?.compliance_notes,
+);
+const s2AfterEdit = await sectionOf('s2');
+const appAfterEdit = (await api('GET', appPath, { token: tokenA })).data.application;
+check(
+  'the application state shows the edit; the application was touched',
+  s2AfterEdit.current_draft === EDIT_SAVED && appAfterEdit.updated_at > appBeforeEdit.updated_at,
+  [s2AfterEdit.current_draft.slice(0, 60), appBeforeEdit.updated_at, appAfterEdit.updated_at],
+);
+const EDIT_TEXT_2 = `${EDIT_SAVED}\nThank you for considering our families.`;
+const edited2 = await api('PUT', `${appPath}/sections/s2`, { token: tokenA, json: { text: EDIT_TEXT_2 } });
+check(
+  'a second edit adds one more version and never duplicates the notes',
+  edited2.status === 200 && edited2.data.versions.length === s2Before.versions.length + 2 &&
+    edited2.data.compliance_notes.filter((n: string) => n === 'Edited by hand.').length === 1 &&
+    edited2.data.compliance_notes.filter((n: string) => n.startsWith('The claim check is from the AI draft')).length === 1,
+  edited2.data?.compliance_notes,
+);
+const appBeforeSame = (await api('GET', appPath, { token: tokenA })).data.application;
+const same = await api('PUT', `${appPath}/sections/s2`, { token: tokenA, json: { text: EDIT_TEXT_2.replace(/\n/g, '\r\n') } });
+const appAfterSame = (await api('GET', appPath, { token: tokenA })).data.application;
+check(
+  'saving unchanged text is a no-op (no new version, application not touched)',
+  same.status === 200 && same.data.current_draft === EDIT_TEXT_2 && same.data.versions.length === edited2.data.versions.length &&
+    appAfterSame.updated_at === appBeforeSame.updated_at,
+  [same.status, same.data?.versions?.length, appBeforeSame.updated_at, appAfterSame.updated_at],
+);
+
+const LONG_EDIT = Array.from({ length: 320 }, (_, i) => `word${i}`).join(' ');
+const overEdit = await api('PUT', `${appPath}/sections/s2`, { token: tokenA, json: { text: LONG_EDIT } });
+const s2Over = await sectionOf('s2');
+check(
+  'an over-limit edit is saved and flagged OVER LIMIT (response and state)',
+  overEdit.status === 200 && overEdit.data.over_limit === true && overEdit.data.word_count === 320 && s2Over.over_limit === true,
+  [overEdit.status, overEdit.data?.over_limit, overEdit.data?.word_count, s2Over.over_limit],
+);
+const blockedByEdit = await api('POST', `${appPath}/export`, { token: tokenA, json: { format: 'md' } });
+check(
+  'export refuses the over-limit edit (409) and names the section',
+  blockedByEdit.status === 409 &&
+    blockedByEdit.data.detail.startsWith('Cannot export: section(s) over their hard limit: Statement of Need (320 of 300 words).') &&
+    /tighten/.test(blockedByEdit.data.detail) && /by hand/.test(blockedByEdit.data.detail),
+  blockedByEdit.data,
+);
+const dirtyEdit = await api('PUT', `${appPath}/sections/s2`, { token: tokenA, json: { text: 'We are thrilled to keep the reading lab open after school.' } });
+check(
+  'a banned phrase in an edit is flagged',
+  dirtyEdit.status === 200 && JSON.stringify(dirtyEdit.data.banned_phrase_hits) === '["we are thrilled"]' && dirtyEdit.data.over_limit === false,
+  dirtyEdit.data,
+);
+const blockedByDirtyEdit = await api('POST', `${appPath}/export`, { token: tokenA, json: { format: 'md' } });
+check(
+  'export refuses the banned phrase from the edit and names it',
+  blockedByDirtyEdit.status === 409 &&
+    blockedByDirtyEdit.data.detail ===
+      'Cannot export: banned phrases remain in: Statement of Need ("we are thrilled"). Refine that section (for example "remove these phrases") or edit it by hand first.',
+  blockedByDirtyEdit.data,
+);
+for (let i = 1; i <= 8; i++) {
+  await api('PUT', `${appPath}/sections/s2`, { token: tokenA, json: { text: `Hand edit number ${i}.` } });
+}
+const versionsNow = (await sectionOf('s2')).versions;
+check(
+  'versions stay capped at the last 12 (newest last)',
+  versionsNow.length === 12 && versionsNow[11] === 'Hand edit number 7.' && versionsNow[10] === 'Hand edit number 6.',
+  versionsNow.slice(-3),
+);
+const restoredEdit = await api('PUT', `${appPath}/sections/s2`, { token: tokenA, json: { text: s2Before.current_draft } });
+const exportAfterEdit = await api('POST', `${appPath}/export`, { token: tokenA, json: { format: 'md' } });
+check(
+  'restoring an earlier version by saving its text clears the flags; export works again',
+  restoredEdit.status === 200 && restoredEdit.data.current_draft === s2Before.current_draft && exportAfterEdit.status === 200 &&
+    exportAfterEdit.text.includes(s2Before.current_draft),
+  [restoredEdit.status, exportAfterEdit.status, exportAfterEdit.data?.detail],
+);
+
+const blankEdit = await api('PUT', `${appPath}/sections/s2`, { token: tokenA, json: { text: '  \r\n ' } });
+const missingEdit = await api('PUT', `${appPath}/sections/s2`, { token: tokenA, json: {} });
+check(
+  'blank or missing text -> 400 "Section text is empty."',
+  blankEdit.status === 400 && blankEdit.data.detail === 'Section text is empty.' && missingEdit.status === 400 && missingEdit.data.detail === 'Section text is empty.',
+  [blankEdit.data, missingEdit.data],
+);
+const tooLongEdit = await api('PUT', `${appPath}/sections/s2`, { token: tokenA, json: { text: 'a'.repeat(60001) } });
+const notTextEdit = await api('PUT', `${appPath}/sections/s2`, { token: tokenA, json: { text: 42 } });
+check('text over 60,000 characters -> 400; text that is not text -> 422', tooLongEdit.status === 400 && /too long/.test(tooLongEdit.data.detail) && notTextEdit.status === 422, [tooLongEdit.data, notTextEdit.data]);
+const unknownSectionEdit = await api('PUT', `${appPath}/sections/s99`, { token: tokenA, json: { text: 'Some text.' } });
+const unknownAppEdit = await api('PUT', '/api/writer/applications/app_000000000000/sections/s2', { token: tokenA, json: { text: 'Some text.' } });
+check(
+  'unknown section -> 404 "Section draft not found"; unknown application -> 404 "Application not found"',
+  unknownSectionEdit.status === 404 && unknownSectionEdit.data.detail === 'Section draft not found' &&
+    unknownAppEdit.status === 404 && unknownAppEdit.data.detail === 'Application not found',
+  [unknownSectionEdit.data, unknownAppEdit.data],
+);
+const unauthEdit = await api('PUT', `${appPath}/sections/s2`, { json: { text: 'Some text.' } });
+check('hand edit needs sign-in (401)', unauthEdit.status === 401, unauthEdit.data);
+
+// While drafting or refining runs for this application, an edit is refused (not attached to the job).
+await mock.delay('section_draft_v1', 1500);
+const slowDraft = await api('POST', `${appPath}/draft`, { token: tokenA, json: { section_id: 's4' } });
+const busyEdit = await api('PUT', `${appPath}/sections/s2`, { token: tokenA, json: { text: 'An edit while drafting runs.' } });
+await mock.delay('section_draft_v1', 0);
+const slowDone = await finishJob(slowDraft, tokenA);
+check(
+  'edit while a drafting job runs -> 409 with what to do, and no "running" flag',
+  slowDraft.status === 202 && busyEdit.status === 409 &&
+    busyEdit.data.detail === 'Drafting or refining is still running for this application. Wait for it to finish, then save your edit again.' &&
+    busyEdit.data.running === undefined && busyEdit.data.job_id === undefined,
+  busyEdit.data,
+);
+const s2AfterBusy = await sectionOf('s2');
+check('the refused edit changed nothing; the drafting job still finished', slowDone.status === 200 && s2AfterBusy.current_draft === s2Before.current_draft, [slowDone.status, s2AfterBusy.current_draft.slice(0, 60)]);
+const editAfterBusy = await api('PUT', `${appPath}/sections/s2`, { token: tokenA, json: { text: `${s2Before.current_draft} ` } });
+check('after the job finishes, the edit is accepted', editAfterBusy.status === 200, editAfterBusy.data);
+await api('PUT', `${appPath}/sections/s2`, { token: tokenA, json: { text: s2Before.current_draft } });
 
 // ---------------------------------------------------------------------------
 // Claude failures: transient with the Python's fallback, transient without, fatal
@@ -832,14 +1037,14 @@ await restore('section_draft_v1');
 // Draft-all with one failing section (handler run directly with a stub client)
 // ---------------------------------------------------------------------------
 
-function stubContext(fail: (prompt: string) => Error | null) {
+function stubContext(fail: (prompt: string) => Error | null, target: { id: string; correlation_id: string } = app) {
   const answer = (promptId: string) => FIXTURES[promptId] ?? '{}';
   return {
     job: {} as never,
     userId: userA,
-    input: { app_id: appId, section_id: null },
-    correlationId: app.correlation_id as string,
-    applicationId: appId,
+    input: { app_id: target.id, section_id: null },
+    correlationId: target.correlation_id,
+    applicationId: target.id,
     claude: async () => ({
       call: async (options: { promptId: string; prompt: string }) => {
         const failure = fail(options.prompt);
@@ -865,10 +1070,11 @@ try {
 }
 const afterPartial = (await writerRepo.listSectionDrafts(userA, appId)).reduce<Record<string, string>>((m, d) => ({ ...m, [d.section_id]: d.id }), {});
 check(
-  'one section failing does not lose the others: each saved, clear summary',
+  'one section failing does not lose the others: each saved, clear summary (a redraft that failed keeps its old text: use Redraft)',
   partialError.status === 503 &&
     partialError.detail ===
-      'Drafted and saved 3 of 4 sections. Not drafted: "Statement of Need" (Claude is overloaded right now. Wait a minute and try again.). The saved sections are kept; run drafting again to finish (sections without a draft go first).' &&
+      'Drafted and saved 3 of 4 sections. Not drafted: "Statement of Need" (Claude is overloaded right now. Wait a minute and try again.). ' +
+        'The saved sections are kept. To finish, run drafting again with the Redraft button on "Statement of Need" (it keeps its earlier text until then).' &&
     afterPartial.s2 === beforePartial.s2 && afterPartial.s1 !== beforePartial.s1 && afterPartial.s3 !== beforePartial.s3 && afterPartial.s4 !== beforePartial.s4,
   partialError,
 );
@@ -922,6 +1128,125 @@ check(
 await restore('fit_gap_v1');
 
 // ---------------------------------------------------------------------------
+// First drafting run with one failing section: "Draft missing sections" finishes it
+// ---------------------------------------------------------------------------
+
+const confirmFetch = await api('POST', `${fetchPath}/confirm-strategy`, { token: tokenA, json: { strategy: 'Lead with the reading lab.' } });
+let firstRunError: { status?: number; detail?: string } = {};
+try {
+  await handlers.writerJobs['writer.draft'](
+    stubContext(
+      (prompt) =>
+        prompt.includes('SECTION: Statement of Need') ? new errors.ClaudeError('overloaded', 503, 'Claude is overloaded right now. Wait a minute and try again.', false) : null,
+      fetchApp,
+    ) as never,
+  );
+} catch (error) {
+  firstRunError = error as { status?: number; detail?: string };
+}
+const fetchState = (await api('GET', fetchPath, { token: tokenA })).data;
+check(
+  'first run, one section failing: the message says to use "Draft missing sections"',
+  confirmFetch.status === 200 && firstRunError.status === 503 &&
+    firstRunError.detail ===
+      'Drafted and saved 3 of 4 sections. Not drafted: "Statement of Need" (Claude is overloaded right now. Wait a minute and try again.). ' +
+        'The saved sections are kept. To finish, run drafting again with "Draft missing sections" (only the unfinished sections are drafted).' &&
+    /Drafted and saved [1-3] of 4 sections/.test(firstRunError.detail) && /run drafting again/i.test(firstRunError.detail),
+  firstRunError,
+);
+check(
+  '...and the section that was not drafted is in missing_sections (so the page offers that button)',
+  fetchState.sections.length === 3 && JSON.stringify(fetchState.missing_sections) === JSON.stringify([{ id: 's2', title: 'Statement of Need' }]),
+  [fetchState.sections.length, fetchState.missing_sections],
+);
+const finishMissing = await run('POST', `${fetchPath}/draft`, tokenA, { only_missing: true });
+const fetchFinished = (await api('GET', fetchPath, { token: tokenA })).data;
+check(
+  '"Draft missing sections" drafts just that section; nothing is missing afterwards',
+  finishMissing.status === 200 && finishMissing.data.sections.length === 1 && finishMissing.data.sections[0].section_id === 's2' &&
+    fetchFinished.missing_sections.length === 0 && fetchFinished.sections.length === 4,
+  [finishMissing.status, finishMissing.data, fetchFinished.missing_sections],
+);
+
+// ---------------------------------------------------------------------------
+// Stakeholder requests again: only open gaps that no request covers yet
+// ---------------------------------------------------------------------------
+
+const downPath = `/api/writer/applications/${downApp.id}`;
+const testGap = (id: string, status: GapStatus, description: string): Gap => ({
+  id,
+  application_id: downApp.id,
+  criterion_ref: 'c1',
+  description,
+  severity: 'medium',
+  suggested_owner_role: 'Finance',
+  status,
+  answer: status === 'answered' ? 'Grades K-8: 214 students.' : null,
+});
+const testRequest = (id: string, gapIds: string[]) => ({
+  id,
+  application_id: downApp.id,
+  stakeholder_role: 'Finance',
+  gap_ids: gapIds,
+  framing: 'Earlier request.',
+  questions: ['Earlier question?'],
+  expected_format: 'A few sentences is fine.',
+  suggested_deadline: null,
+  email_packet: 'Hi [Staff Name], an earlier request.',
+  status: 'draft',
+  response: null,
+});
+await writerRepo.saveGaps(userA, downApp.id, [
+  testGap('gap_askedopen1', 'open', 'Audited financial statements'), // open, but an earlier request already asks about it
+  testGap('gap_routed0001', 'routed', 'Board list with minutes'),
+  testGap('gap_answered01', 'answered', 'Enrollment by grade'),
+  testGap('gap_brandnew01', 'open', 'Name and experience of the project lead'), // open and not asked yet
+]);
+await writerRepo.updateIntakeRequests(userA, downApp.id, () => [testRequest('intake_earlier001', ['gap_askedopen1', 'gap_routed0001', 'gap_answered01'])]);
+await mock.fixtures({
+  intake_packets_v1: JSON.stringify([
+    { stakeholder_role: 'Principal', gap_ids: ['gap_askedopen1', 'gap_routed0001', 'gap_answered01', 'gap_brandnew01'], framing: 'Who leads it?', questions: ['Who will lead the project?'], email_packet: EMAIL },
+  ]),
+});
+const secondRound = await run('POST', `${downPath}/intake/generate`, tokenA);
+const secondPrompt = await lastPrompt('intake_packets_v1');
+const downState = (await api('GET', downPath, { token: tokenA })).data;
+const downStatus = Object.fromEntries(downState.gaps.map((g: { id: string; status: string }) => [g.id, g.status]));
+check(
+  'second round: a new request only for the open gap no request covers yet',
+  secondRound.status === 200 && secondRound.data.intake_requests.length === 1 &&
+    JSON.stringify(secondRound.data.intake_requests[0].gap_ids) === '["gap_brandnew01"]',
+  secondRound.data,
+);
+check(
+  '...only that gap reaches Claude',
+  secondPrompt.includes('gap_brandnew01') && !secondPrompt.includes('gap_askedopen1') && !secondPrompt.includes('gap_routed0001') && !secondPrompt.includes('gap_answered01'),
+  secondPrompt.slice(0, 300),
+);
+check(
+  '...no duplicate requests; the already-asked open gap is marked asked; answered stays answered',
+  downState.intake_requests.length === 2 && downStatus.gap_askedopen1 === 'routed' && downStatus.gap_brandnew01 === 'routed' &&
+    downStatus.gap_routed0001 === 'routed' && downStatus.gap_answered01 === 'answered',
+  [downState.intake_requests.length, downStatus],
+);
+const nothingOpen = await api('POST', `${downPath}/intake/generate`, { token: tokenA });
+check(
+  'with no open gap left, generating again writes nothing (no job, no new request)',
+  nothingOpen.status === 200 && nothingOpen.data.intake_requests.length === 0 && (await writerRepo.getIntakeRequests(userA, downApp.id)).length === 2,
+  nothingOpen.data,
+);
+await writerRepo.updateGaps(userA, downApp.id, (current) => current.map((g): Gap => (g.id === 'gap_askedopen1' ? { ...g, status: 'open' } : g)));
+const coveredOnly = await api('POST', `${downPath}/intake/generate`, { token: tokenA });
+check(
+  'when every open gap already has a request: no Claude call, the gap is marked asked, a note says so',
+  coveredOnly.status === 200 && coveredOnly.data.intake_requests.length === 0 &&
+    coveredOnly.data.note === 'Every open gap already has a stakeholder request. Record their answers on the requests below.' &&
+    (await writerRepo.getGaps(userA, downApp.id)).find((g) => g.id === 'gap_askedopen1')?.status === 'routed',
+  coveredOnly.data,
+);
+await restore('intake_packets_v1');
+
+// ---------------------------------------------------------------------------
 // Other users: no API key, no profile, someone else's application
 // ---------------------------------------------------------------------------
 
@@ -941,6 +1266,14 @@ const notMineDraft = await api('POST', `${appPath}/draft`, { token: tokenB, json
 const notMineExport = await api('POST', `${appPath}/export`, { token: tokenB, json: { format: 'md' } });
 const notMineBundle = await api('GET', `${appPath}/debug-bundle`, { token: tokenB });
 check("someone else's application can't be drafted, exported, or debugged", [notMineDraft, notMineExport, notMineBundle].every((r) => r.status === 404), [notMineDraft.status, notMineExport.status, notMineBundle.status]);
+const s1BeforeOther = (await writerRepo.getSectionDraft(userA, appId, 's1'))?.current_draft;
+const notMineEdit = await api('PUT', `${appPath}/sections/s1`, { token: tokenB, json: { text: 'Text from another account.' } });
+check(
+  "someone else's application can't be edited by hand (404, nothing saved)",
+  notMineEdit.status === 404 && notMineEdit.data.detail === 'Application not found' &&
+    (await writerRepo.getSectionDraft(userA, appId, 's1'))?.current_draft === s1BeforeOther,
+  notMineEdit.data,
+);
 
 const tokenC = await guest();
 await saveKey(tokenC);

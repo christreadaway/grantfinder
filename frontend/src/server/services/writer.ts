@@ -89,7 +89,33 @@ export const WRITER_MESSAGES = {
   gapNotFound: 'Gap not found',
   noSamples: 'Provide at least one writing sample',
   noGaps: 'No gaps to route',
+  // Added in the TypeScript engine (no Python equivalent).
+  sectionTextEmpty: 'Section text is empty.',
+  sectionsBusy:
+    'Drafting or refining is still running for this application. Wait for it to finish, then save your edit again.',
+  allGapsAsked: 'Every open gap already has a stakeholder request. Record their answers on the requests below.',
 } as const;
+
+/** Earlier texts kept per section (newest last): the same cap for redrafts, refinements, voice rewrites and hand edits. */
+export const MAX_SECTION_VERSIONS = 12;
+
+/** The most text a hand edit may save into one section. */
+export const MAX_SECTION_CHARS = 60000;
+
+/** Compliance notes about where a section's text came from (each is added at most once). */
+export const SECTION_NOTES = {
+  handEdited: 'Edited by hand.',
+  handEditClaims: 'The claim check is from the AI draft; re-check any numbers or names you added.',
+  refinedClaims: 'Revised: the claim check is from the earlier draft. Re-check any new numbers or names.',
+} as const;
+
+/** "[NEEDS INPUT: ...]" markers that drafting leaves where the profile lacked a fact (the writer page uses the same pattern). */
+const NEEDS_INPUT = /\[NEEDS INPUT[^\]]*\]/gi;
+
+/** The "[NEEDS INPUT ...]" placeholders still in a text, in order. */
+export function findPlaceholders(text: string): string[] {
+  return text.match(NEEDS_INPUT) ?? [];
+}
 
 // =============================================================================
 // Claude access for the stages
@@ -565,6 +591,78 @@ export function applyCompliance(draft: SectionDraft, section: RequiredSection | 
   if (section?.char_limit && draft.char_count > section.char_limit) over = true;
   draft.over_limit = over;
   draft.banned_phrase_hits = findBannedPhrases(text, orgBannedPhrases(profile));
+}
+
+/** The requirement whose limits apply to a draft: the section it was written for, or null for a stale draft. */
+export function limitsFor(draft: SectionDraft, spec: GrantSpec | null): RequiredSection | null {
+  const section = spec?.required_sections.find((item) => item.id === draft.section_id);
+  return section && draftFitsSection(draft, section) ? section : null;
+}
+
+/**
+ * Copies of the drafts re-checked against the CURRENT requirements and the
+ * CURRENT banned phrases (stored flags go stale when the grant is re-analyzed
+ * or a voice profile adds phrases). Nothing is saved.
+ */
+export function liveCompliance(drafts: SectionDraft[], spec: GrantSpec | null, profile: OrganizationProfile | null): SectionDraft[] {
+  return drafts.map((draft) => {
+    const checked = structuredClone(draft);
+    applyCompliance(checked, limitsFor(checked, spec), profile);
+    return checked;
+  });
+}
+
+/** Add a compliance note unless the section already has it. */
+export function addNote(draft: SectionDraft, note: string): void {
+  draft.compliance_notes = draft.compliance_notes ?? [];
+  if (!draft.compliance_notes.includes(note)) draft.compliance_notes.push(note);
+}
+
+/** Keep text that is being replaced in the section's history (newest last, capped). */
+function keepVersion(draft: SectionDraft, text: string): void {
+  draft.versions = [...(draft.versions ?? []), text].slice(-MAX_SECTION_VERSIONS);
+}
+
+/** Line breaks as the browser sends them (\r\n) saved as \n, so counts and comparisons are stable. */
+export function normalizeLineBreaks(text: string): string {
+  return text.replace(/\r\n?/g, '\n');
+}
+
+/**
+ * The person's own edit replaces a section's text: the replaced text goes into
+ * the history, counts and banned phrases are re-checked against the current
+ * limits, and the claim list (from the AI draft) is kept with a note to re-check it.
+ */
+export function applyHandEdit(
+  draft: SectionDraft,
+  text: string,
+  section: RequiredSection | null,
+  profile: OrganizationProfile | null,
+): SectionDraft {
+  keepVersion(draft, draft.current_draft);
+  draft.current_draft = text;
+  applyCompliance(draft, section, profile);
+  addNote(draft, SECTION_NOTES.handEdited);
+  addNote(draft, SECTION_NOTES.handEditClaims);
+  return draft;
+}
+
+/** "Portal Summary (1243 of 1000 characters)": which limit a section is over, for the export refusal. */
+export function overLimitLabel(draft: SectionDraft, section: RequiredSection | null): string {
+  if (section?.word_limit && draft.word_count > section.word_limit) return `${draft.title} (${draft.word_count} of ${section.word_limit} words)`;
+  if (section?.char_limit && draft.char_count > section.char_limit) return `${draft.title} (${draft.char_count} of ${section.char_limit} characters)`;
+  return draft.title;
+}
+
+/**
+ * Open gaps split by whether a stakeholder request already covers them. New
+ * requests are written only for `uncovered`; a `covered` gap was asked already
+ * (an earlier run stopped before marking it) and is treated as routed.
+ */
+export function openGapsByCoverage(gaps: Gap[], requests: IntakeRequest[]): { uncovered: Gap[]; covered: Gap[] } {
+  const asked = new Set(requests.flatMap((request) => request.gap_ids ?? []));
+  const open = gaps.filter((gap) => gap.status === 'open');
+  return { uncovered: open.filter((gap) => !asked.has(gap.id)), covered: open.filter((gap) => asked.has(gap.id)) };
 }
 
 // =============================================================================
@@ -1066,8 +1164,10 @@ Return ONLY a JSON object: {"draft": "the revised section text"}`;
   if (!answer) throw unreadableAnswer(run, 'section_refine_v1', res, `revision of "${sectionDraft.title}"`);
 
   let draft = sectionDraft;
-  draft.versions.push(draft.current_draft);
+  keepVersion(draft, draft.current_draft);
   draft.current_draft = answer.draft;
+  // The claim list was checked against the text before this revision.
+  addNote(draft, SECTION_NOTES.refinedClaims);
   if (answer.truncated) {
     draft.compliance_notes.push("Claude's revision was cut off before it finished; check the end of this section.");
   }
@@ -1117,7 +1217,7 @@ Return ONLY a JSON object: {"draft": "the corrected full text"}`;
     const data = parseObject(res.text);
     const corrected = data ? asString(data.draft) : '';
     if (corrected.trim()) {
-      sectionDraft.versions.push(sectionDraft.current_draft);
+      keepVersion(sectionDraft, sectionDraft.current_draft);
       sectionDraft.current_draft = corrected;
       sectionDraft.compliance_notes.push(`Voice enforcement rewrote banned phrases: ${hits.slice(0, 5).join(', ')}`);
       applyCompliance(sectionDraft, section, profile);

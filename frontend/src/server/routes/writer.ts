@@ -21,21 +21,29 @@ import crypto from 'node:crypto';
 import { requireApiKey } from '../auth';
 import { HttpError } from '../errors';
 import { fileResponse, optionalString, requireString, type RequestContext } from '../http';
-import { listJobs, newCorrelationId, startJob, type Job } from '../jobs';
+import { findActiveJob, listJobs, newCorrelationId, startJob, type Job } from '../jobs';
 import { clamp } from '../json';
 import { logger } from '../log';
 import { getApplication, getProfile, listApplications, updateProfile } from '../repo';
 import { getGrantOrFoundation } from '../services/ai';
 import type { Router } from '../router';
 import {
-  applyCompliance,
+  applyHandEdit,
   assertDraftAllowed,
   blockingGaps,
+  countChars,
+  findPlaceholders,
+  limitsFor,
+  liveCompliance,
   loadApplication,
   loadWriterProfile,
+  MAX_SECTION_CHARS,
   newId,
+  normalizeLineBreaks,
   draftFitsSection,
   draftsVsSpec,
+  openGapsByCoverage,
+  overLimitLabel,
   replacedQuestionMessage,
   orderDrafts,
   withUrgency,
@@ -54,12 +62,18 @@ import {
   touchApplication,
   updateGaps,
   updateIntakeRequests,
+  updateSectionDraft,
 } from '../services/writerRepo';
 import type { AICallLog, Application, Gap, IntakeRequest, SectionDraft, WriterExportFormat } from '../types';
 
 /** Every job for one application shares its correlation id, so the debug bundle can trace it. */
 function jobOptions(app: Application) {
   return { applicationId: app.id, correlationId: app.correlation_id };
+}
+
+/** Drafting and refining write the same section records, so they share one exclusive job key (hand edits check it too). */
+function sectionsJobKey(appId: string): string {
+  return `writer.sections:${appId}`;
 }
 
 /** One application per grant per user: the id is derived from both, so a double click can't make two. */
@@ -167,7 +181,9 @@ async function getApplicationState(ctx: RequestContext): Promise<Record<string, 
     gaps,
     open_blocking_gaps: blockingGaps(gaps),
     intake_requests: intake,
-    sections: orderDrafts(drafts, spec),
+    // Over-limit flags, counts and banned phrases re-checked against the CURRENT
+    // requirements and banned phrases on every read (copies; nothing is saved).
+    sections: liveCompliance(orderDrafts(drafts, spec), spec, profile),
     // Required sections with no draft yet, and drafts the current requirements no longer ask for.
     missing_sections: coverage ? coverage.missing.map((section) => ({ id: section.id, title: section.title })) : [],
     stale_section_ids: coverage ? coverage.stale.map((draft) => draft.section_id) : [],
@@ -244,7 +260,11 @@ async function confirmStrategy(ctx: RequestContext): Promise<Application> {
 // 4.4 Stakeholder intake
 // =============================================================================
 
-/** Generate per-stakeholder request packets for all open gaps. Sending is human work: copy-paste emails. */
+/**
+ * Generate per-stakeholder request packets for the open gaps that no request
+ * covers yet (a second click after re-analysis or a partial run never asks
+ * about the same gap twice). Sending is human work: copy-paste emails.
+ */
 async function generateIntakeRoute(ctx: RequestContext): Promise<unknown> {
   const user = await ctx.user();
   const app = await loadApplication(user.id, ctx.params.appId);
@@ -256,6 +276,16 @@ async function generateIntakeRoute(ctx: RequestContext): Promise<unknown> {
     // Every gap is already routed or resolved: nothing for Claude to write (the Python returned the same).
     await touchApplication(user.id, app.id);
     return { intake_requests: [] };
+  }
+  const { uncovered, covered } = openGapsByCoverage(gaps, await getIntakeRequests(user.id, app.id));
+  if (!uncovered.length) {
+    // Each open gap was asked about already (an earlier run stopped before marking it): mark it asked.
+    const asked = new Set(covered.map((gap) => gap.id));
+    await updateGaps(user.id, app.id, (current) =>
+      current.map((gap): Gap => (asked.has(gap.id) && gap.status === 'open' ? { ...gap, status: 'routed' } : gap)),
+    );
+    await touchApplication(user.id, app.id);
+    return { intake_requests: [], note: WRITER_MESSAGES.allGapsAsked };
   }
   return startJob(ctx, 'writer.intake_generate', { app_id: app.id }, jobOptions(app));
 }
@@ -369,7 +399,7 @@ async function draftSectionsRoute(ctx: RequestContext): Promise<Response> {
   await requireApiKey(user.id);
   return startJob(ctx, 'writer.draft', { app_id: app.id, section_id: sectionId || null, only_missing: onlyMissing }, {
     ...jobOptions(app),
-    exclusiveKey: `writer.sections:${app.id}`,
+    exclusiveKey: sectionsJobKey(app.id),
   });
 }
 
@@ -406,8 +436,55 @@ async function refineSectionRoute(ctx: RequestContext): Promise<Response> {
   // Drafting and refining write the same section records, so they never run at once.
   return startJob(ctx, 'writer.refine', { app_id: app.id, section_id: sectionId, instruction }, {
     ...jobOptions(app),
-    exclusiveKey: `writer.sections:${app.id}`,
+    exclusiveKey: sectionsJobKey(app.id),
   });
+}
+
+/**
+ * Save the person's own edit of one section (no AI). The replaced text goes
+ * into the section's history; counts, limits and banned phrases are checked
+ * against the CURRENT requirements, exactly as after drafting.
+ */
+async function editSectionRoute(ctx: RequestContext): Promise<SectionDraft> {
+  const user = await ctx.user();
+  const body = await ctx.json();
+  const raw = body.text;
+  if (raw !== undefined && raw !== null && typeof raw !== 'string') throw new HttpError(422, 'Field "text" must be text.');
+  const text = normalizeLineBreaks(typeof raw === 'string' ? raw : '');
+  if (!text.trim()) throw new HttpError(400, WRITER_MESSAGES.sectionTextEmpty);
+  const chars = countChars(text);
+  if (chars > MAX_SECTION_CHARS) {
+    throw new HttpError(
+      400,
+      `Section text is too long (${chars.toLocaleString('en-US')} characters). ` +
+        `A section can hold at most ${MAX_SECTION_CHARS.toLocaleString('en-US')} characters.`,
+    );
+  }
+  const app = await loadApplication(user.id, ctx.params.appId);
+  const sectionId = ctx.params.sectionId;
+  if (!(await getSectionDraft(user.id, app.id, sectionId))) throw new HttpError(404, WRITER_MESSAGES.sectionDraftNotFound);
+  // A running draft or refine saves whole sections and would overwrite this edit (or this edit its result).
+  // No `running` flag here: the website would wait for that job and show its result as if it were the edit.
+  if (await findActiveJob(user.id, sectionsJobKey(app.id))) throw new HttpError(409, WRITER_MESSAGES.sectionsBusy);
+
+  const [spec, profile] = await Promise.all([getGrantSpec(user.id, app.grant_id), getProfile(user.id)]);
+  let changed = false as boolean;
+  const saved = await updateSectionDraft(user.id, app.id, sectionId, (draft) => {
+    changed = normalizeLineBreaks(draft.current_draft) !== text;
+    return changed ? applyHandEdit(draft, text, limitsFor(draft, spec), profile) : undefined;
+  });
+  if (!saved) throw new HttpError(404, WRITER_MESSAGES.sectionDraftNotFound);
+  if (!changed) return saved; // the same text: nothing to save
+  await touchApplication(user.id, app.id);
+  logger.info('writer_section_edited', {
+    correlation_id: app.correlation_id,
+    app_id: app.id,
+    section_id: saved.section_id,
+    words: saved.word_count,
+    over_limit: saved.over_limit,
+    banned_hits: saved.banned_phrase_hits.length,
+  });
+  return saved;
 }
 
 // =============================================================================
@@ -432,24 +509,29 @@ async function exportApplication(ctx: RequestContext): Promise<Response> {
   if (!current.length) throw new HttpError(400, WRITER_MESSAGES.nothingToExport);
 
   // Re-check every section against the CURRENT limits and banned phrases (never trust a stale flag).
-  const limits = new Map(spec.required_sections.map((section) => [section.id, section]));
-  const checkedDrafts = current.map((draft) => {
-    const checked = structuredClone(draft);
-    applyCompliance(checked, limits.get(draft.section_id) ?? null, profile);
-    return checked;
-  });
+  const checkedDrafts = liveCompliance(current, spec, profile);
 
-  // Hard rule: never export over-limit content.
-  const overLimit = checkedDrafts.filter((draft) => draft.over_limit).map((draft) => draft.title);
+  // Hard rule: never export over-limit content. Say by how much, and both ways to fix it.
+  const overLimit = checkedDrafts.filter((draft) => draft.over_limit);
   if (overLimit.length) {
+    const them = overLimit.length === 1 ? 'it' : 'them';
     throw new HttpError(
       409,
-      `Cannot export: section(s) over their hard limit: ${overLimit.join(', ')}. Refine them (e.g. 'tighten to the limit') first.`,
+      `Cannot export: section(s) over their hard limit: ${overLimit.map((draft) => overLimitLabel(draft, limitsFor(draft, spec))).join(', ')}. ` +
+        `Refine ${them} (for example "tighten to the limit") or edit ${them} by hand first.`,
     );
   }
-  const dirty = checkedDrafts.filter((draft) => draft.banned_phrase_hits.length).map((draft) => draft.title);
+  // Hard rule: no banned phrases. Name each phrase so the person can find it.
+  const dirty = checkedDrafts.filter((draft) => draft.banned_phrase_hits.length);
   if (dirty.length) {
-    throw new HttpError(409, `Cannot export: banned phrases remain in: ${dirty.join(', ')}. Refine first.`);
+    const one = dirty.length === 1;
+    throw new HttpError(
+      409,
+      `Cannot export: banned phrases remain in: ${dirty
+        .map((draft) => `${draft.title} (${draft.banned_phrase_hits.map((phrase) => `"${phrase}"`).join(', ')})`)
+        .join(', ')}. ` +
+        `Refine ${one ? 'that section' : 'those sections'} (for example "remove these phrases") or edit ${one ? 'it' : 'them'} by hand first.`,
+    );
   }
 
   const placeholders: SectionDraft[] = missing.map((section) => ({
@@ -470,9 +552,19 @@ async function exportApplication(ctx: RequestContext): Promise<Response> {
 
   const file = await buildExport(format, app, spec, drafts);
   await touchApplication(user.id, app.id, { status: 'export' });
+  // [NEEDS INPUT ...] placeholders never block an export, but the person is told where they are.
+  const withPlaceholders = checkedDrafts
+    .map((draft) => ({ title: draft.title, count: findPlaceholders(draft.current_draft).length }))
+    .filter((item) => item.count > 0);
+  const placeholderTotal = withPlaceholders.reduce((sum, item) => sum + item.count, 0);
   const notices = [
     missing.length ? `Not drafted yet (marked in the file): ${missing.map((section) => section.title).join(', ')}.` : '',
     stale.length ? `Left out because the current requirements no longer ask for them: ${stale.map((draft) => draft.title).join(', ')}.` : '',
+    placeholderTotal
+      ? `Still in the file: ${placeholderTotal} [NEEDS INPUT] placeholder(s), in ${withPlaceholders
+          .map((item) => `${item.title} (${item.count})`)
+          .join(', ')}. Fill them in before you submit.`
+      : '',
   ].filter(Boolean);
   logger.info('application_exported', {
     correlation_id: app.correlation_id,
@@ -481,6 +573,7 @@ async function exportApplication(ctx: RequestContext): Promise<Response> {
     file: file.filename,
     missing_sections: missing.length,
     stale_sections: stale.length,
+    placeholders: placeholderTotal,
   });
   const response = fileResponse(file.body, file.filename, file.contentType);
   if (notices.length) response.headers.set('x-grantfinder-notice', encodeURIComponent(notices.join(' ')));
@@ -512,7 +605,7 @@ function describeJob(job: Job): string[] {
 async function debugBundle(ctx: RequestContext): Promise<{ bundle_markdown: string }> {
   const user = await ctx.user();
   const app = await loadApplication(user.id, ctx.params.appId);
-  const [jobs, spec, analysis, gaps, intake, stored, scorecard] = await Promise.all([
+  const [jobs, spec, analysis, gaps, intake, stored, scorecard, profile] = await Promise.all([
     listJobs(user.id, 200),
     getGrantSpec(user.id, app.grant_id),
     getFitAnalysis(user.id, app.id),
@@ -520,10 +613,12 @@ async function debugBundle(ctx: RequestContext): Promise<{ bundle_markdown: stri
     getIntakeRequests(user.id, app.id),
     listSectionDrafts(user.id, app.id),
     getScorecard(user.id, app.id),
+    getProfile(user.id),
   ]);
   const appJobs = jobs.filter((job) => job.application_id === app.id).reverse(); // oldest first
   const calls: AICallLog[] = appJobs.flatMap((job) => job.ai_calls).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-  const drafts = orderDrafts(stored, spec);
+  // The same live flags the writer page shows.
+  const drafts = liveCompliance(orderDrafts(stored, spec), spec, profile);
   const limits = new Map((spec?.required_sections ?? []).map((section) => [section.id, section]));
   const statusCounts = Array.from(new Set(gaps.map((gap) => gap.status)))
     .map((status) => `${status} ${gaps.filter((gap) => gap.status === status).length}`)
@@ -556,7 +651,8 @@ async function debugBundle(ctx: RequestContext): Promise<{ bundle_markdown: stri
       return (
         `  - ${d.section_id} ${d.title}: ${d.word_count} words / ${d.char_count} chars (${limit})` +
         `${d.over_limit ? ' OVER LIMIT' : ''}${d.banned_phrase_hits.length ? ` banned: ${d.banned_phrase_hits.join(', ')}` : ''}` +
-        ` | ${d.claims.filter((c) => c.flagged).length} unsupported claim(s) | ${d.versions.length} earlier version(s)`
+        ` | ${d.claims.filter((c) => c.flagged).length} unsupported claim(s) | ${findPlaceholders(d.current_draft).length} [NEEDS INPUT]` +
+        ` | ${d.versions.length} earlier version(s)`
       );
     }),
     `- Scorecard: ${scorecard ? 'yes' : 'no'}`,
@@ -621,6 +717,7 @@ export function registerWriterRoutes(router: Router): void {
   router.post('/api/writer/applications/:appId/draft', draftSectionsRoute);
   router.post('/api/writer/applications/:appId/score', scoreApplicationRoute);
   router.post('/api/writer/applications/:appId/sections/:sectionId/refine', refineSectionRoute);
+  router.put('/api/writer/applications/:appId/sections/:sectionId', editSectionRoute);
   router.post('/api/writer/applications/:appId/export', exportApplication);
   router.get('/api/writer/applications/:appId/debug-bundle', debugBundle);
   router.get('/api/writer/logs/recent', recentAiLogs);
