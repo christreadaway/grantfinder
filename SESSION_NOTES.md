@@ -11,6 +11,8 @@ This file contains a complete history of Claude Code sessions for this repositor
 
 ## 2026-10-14 (later) — Web Deploy via Netlify: Fix Sign-In, Deploy Guards, Real Tests
 
+> **Superseded:** Railway was dropped. The engine was rewritten in TypeScript and everything (website, engine, AI jobs, storage) now runs on Netlify alone. See the newest entry.
+
 ### What We Built
 Chris asked for GrantFinder to web deploy via Netlify. Netlify Functions run JavaScript, TypeScript, and Go only, so the Python engine can't live there: the website deploys to Netlify and the engine to Railway, and visitors only see the Netlify address.
 1. **Found and fixed a dead end:** "Get Started (Demo Mode)" skipped sign-in, but every API route requires a session token, so every action after it failed. Replaced with guest sign-in behind `ALLOW_GUEST_LOGIN` (backend, off by default): `POST /api/auth/guest`, plus public `GET /api/auth/options` so the landing page shows exactly the sign-in methods the backend offers.
@@ -113,6 +115,8 @@ Audit of "anything else that needs building" found the dashboard was partly thea
 ---
 
 ## 2026-07-10 (evening) — Netlify Deployment Readiness
+
+> **Superseded:** Railway was dropped. The engine was rewritten in TypeScript and everything (website, engine, AI jobs, storage) now runs on Netlify alone. See the newest entry.
 
 ### What We Built
 Made the repo deployable: frontend to Netlify, backend to Railway/Render (Netlify can't run Python servers — split matches spec section 7's hosting table).

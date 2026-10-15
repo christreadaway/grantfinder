@@ -549,19 +549,21 @@ PostgreSQL Database
 | Dependency | Purpose | Notes |
 |------------|---------|-------|
 | **Claude API** | AI processing (questionnaire gen, doc extraction, matching) | User provides API key |
-| **Python 3.10+ / FastAPI** | Backend | Handles API, document processing |
-| **Next.js or SvelteKit** | Frontend | Modern, deployable to Vercel |
-| **PostgreSQL** | Cloud database | Supabase or Railway |
-| **pypdf / python-docx** | Document parsing | Extract text from uploads |
+| **TypeScript engine (Next.js API routes)** | Backend | Handles API, document processing (the original Python/FastAPI engine in `backend/` is reference only) |
+| **Next.js** | Frontend | Same app as the engine, deployed to Netlify |
+| **Netlify Blobs** | Storage | Built into Netlify; no separate database service |
+| **unpdf / mammoth** | Document parsing | Extract text from uploads |
 
 ### Hosting
 
-| Component | Recommended | Alternative |
-|-----------|-------------|-------------|
-| Frontend | Vercel | Netlify, Cloudflare Pages |
-| Backend | Railway | Render, Fly.io |
-| Database | Supabase Postgres | Railway Postgres, PlanetScale |
-| File Storage | Supabase Storage | S3, Cloudflare R2 |
+| Component | Where it runs |
+|-----------|---------------|
+| Website | Netlify (Next.js) |
+| Engine API | Netlify (API routes in the same Next.js app) |
+| Long AI steps | Netlify background function (up to 15 minutes each) |
+| Database and file storage | Netlify Blobs |
+
+Everything is on Netlify. No other hosting service (no Vercel, Railway, Render, or Supabase) is used.
 
 > **Implementation note (October 2026):** GrantFinder now runs entirely on **Netlify**: one
 > Next.js + TypeScript app serves the website and the engine API (`frontend/src/server`), a
@@ -723,7 +725,7 @@ A lighter version for individual teachers to find and apply to classroom grants.
 - [ ] Works on desktop and mobile browsers
 - [ ] Handles errors gracefully (bad API key, failed upload, etc.)
 - [ ] README with setup instructions for self-hosting
-- [ ] Deployable to Vercel + Railway with one-click (or near it) (built instead: Netlify only, one environment variable; see `docs/deployment.md`)
+- [x] Deployable in a few clicks: Netlify only, one required environment variable (see `docs/deployment.md`)
 - [ ] Code ready for GitHub public release
 
 ### Quantitative Success Metrics
