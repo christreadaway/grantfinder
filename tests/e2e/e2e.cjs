@@ -37,6 +37,7 @@ const FX = require('./lib/fixtures.cjs');
 // The starter database's size changes as grants are verified; the test reads it instead of hard-coding it.
 const SEED_GRANTS = JSON.parse(fs.readFileSync(path.join(FRONTEND, 'src/server/data/seed_grants.json'), 'utf8')).grants;
 const SEED_COUNT = SEED_GRANTS.length;
+const KENEDY_DEADLINE = (SEED_GRANTS.find((g) => g.grant_name === 'Kenedy Memorial Foundation Grants') || {}).deadline || 'Annual: October 15';
 
 const BASE = (process.env.E2E_BASE_URL || 'http://127.0.0.1:3199').replace(/\/+$/, '');
 const MOCK = (process.env.E2E_MOCK_URL || 'http://127.0.0.1:4999').replace(/\/+$/, '');
@@ -395,14 +396,30 @@ function parseCsv(text) {
   return rows.filter((r) => r.some((cell) => cell.trim()));
 }
 
-/** The next "Annual: October 15" in Central time and whether it is within 10 days (writer urgency rule). */
+/** Today in Central time (YYYY-MM-DD), the way the engine counts deadlines. */
+function centralToday() {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: process.env.GRANTFINDER_TIMEZONE || 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+}
+
+/** A date `days` from today (YYYY-MM-DD), so test grants never expire as the calendar moves on. */
+function daysFromToday(days) {
+  const [y, m, d] = centralToday().split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
+}
+
+const MONTH_NUMBERS = { january: 1, february: 2, march: 3, april: 4, may: 5, june: 6, july: 7, august: 8, september: 9, october: 10, november: 11, december: 12 };
+
+/** Kenedy's next due date (its seed deadline is "Annual: Month D") in Central time, and whether it is within 10 days (writer urgency rule). */
 function kenedyUrgency() {
-  const today = new Intl.DateTimeFormat('en-CA', { timeZone: process.env.GRANTFINDER_TIMEZONE || 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  const today = centralToday();
+  const seedDeadline = (SEED_GRANTS.find((g) => g.grant_name === 'Kenedy Memorial Foundation Grants') || {}).deadline || 'Annual: October 15';
+  const m = /^Annual: ([A-Za-z]+) (\d{1,2})$/.exec(seedDeadline) || [null, 'October', '15'];
+  const mmdd = `${String(MONTH_NUMBERS[m[1].toLowerCase()] || 10).padStart(2, '0')}-${String(Number(m[2])).padStart(2, '0')}`;
   const year = Number(today.slice(0, 4));
-  let due = `${year}-10-15`;
-  if (due < today) due = `${year + 1}-10-15`;
+  let due = `${year}-${mmdd}`;
+  if (due < today) due = `${year + 1}-${mmdd}`;
   const days = Math.round((Date.parse(`${due}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86400000);
-  return { today, due, days, urgent: days <= 10 };
+  return { today, due, days, urgent: days <= 10, seedDeadline };
 }
 
 async function readState() {
@@ -710,7 +727,10 @@ async function journey(browser) {
       S.grants.filter((g) => !g.religious_eligibility || !g.last_verified).map((g) => g.grant_name).slice(0, 5));
     const kenedy = S.grants.find((g) => g.grant_name === KENEDY);
     S.kenedyId = kenedy && kenedy.id;
-    check('Kenedy grant present with deadline "Annual: October 15"', kenedy && kenedy.deadline === 'Annual: October 15', kenedy);
+    const kenedySeed = SEED_GRANTS.find((g) => g.grant_name === KENEDY) || {};
+    check(`Kenedy grant present with the starter deadline ("${kenedySeed.deadline}")`, kenedy && kenedy.deadline === kenedySeed.deadline && /^Annual: /.test(kenedy.deadline), kenedy);
+    check('Kenedy carries its verified facts (Catholic schools eligible, Texas, last verified)',
+      kenedy && kenedy.religious_eligibility === 'eligible' && kenedy.geo_qualified === 'Yes - TX Only' && /^\d{4}-\d{2}-\d{2}$/.test(kenedy.last_verified || ''), kenedy);
     const stats = await api('GET', '/api/grants/stats', { token: S.token });
     check(`grant stats total ${SEED_COUNT}`, stats.data?.total_grants === SEED_COUNT, stats.data);
 
@@ -949,7 +969,9 @@ async function journey(browser) {
     check('every grant was evaluated (total_grants_evaluated = matches)', L.total_grants_evaluated === (L.matches || []).length, `${L.total_grants_evaluated} vs ${(L.matches || []).length}`);
     check(`at least ${SEED_COUNT} grants scored`, S.matchesShown >= SEED_COUNT, S.matchesShown);
     check('one excellent match (Kenedy 92%)', S.counts.excellent >= 1, S.counts);
-    check('grants outside the area are "Not Eligible"', S.counts.not_eligible >= 2, S.counts);
+    // Starter grants are all open to a Texas Catholic school, so only ones the hard filters must rule out count here.
+    const mustRuleOut = SEED_GRANTS.filter((g) => g.geo_qualified === 'No' || g.status === 'CLOSED' || g.religious_eligibility === 'excluded').length;
+    check(`grants the hard filters rule out are "Not Eligible" (${mustRuleOut} in the starter database)`, S.counts.not_eligible >= mustRuleOut, S.counts);
     const scores = (L.matches || []).map((m) => m.score);
     check('matches sorted best first', scores.every((s, i) => i === 0 || scores[i - 1] >= s), scores.slice(0, 10));
 
@@ -959,13 +981,20 @@ async function journey(browser) {
     if (kenedyVisible) {
       const text = await kenedyCard.innerText();
       check('Kenedy shows its AI score (92%)', /92%/.test(text), text.slice(0, 200));
-      check('Kenedy shows the "Annual: October 15" deadline', /Annual: October 15/.test(text), text.slice(0, 300));
+      check(`Kenedy shows its "${KENEDY_DEADLINE}" deadline`, text.includes(KENEDY_DEADLINE), text.slice(0, 300));
+      check('Kenedy card shows "Catholic schools eligible"', text.includes('Catholic schools eligible'), text.slice(0, 600));
+      check('Kenedy card shows when it was verified', /(Partly verified|Verified) [A-Z][a-z]{2} \d{1,2}, \d{4}/.test(text), text.slice(0, 600));
+      check('Kenedy card shows who can apply', /Who can apply:/.test(text), text.slice(0, 900));
       check('Kenedy (Texas-only) was not ruled out for a Texas parish', !/^0%$/m.test(text));
     }
     const kenedyMatch = (L.matches || []).find((m) => m.grant_name === KENEDY);
     check('Kenedy is "excellent" in the saved results', kenedyMatch && kenedyMatch.score_tier === 'excellent', kenedyMatch && kenedyMatch.score_tier);
-    const cabrini = (L.matches || []).find((m) => /Mother Cabrini/.test(m.grant_name));
-    check('a "geo: No" grant is Not Eligible with a reason', cabrini && cabrini.score === 0 && /geographic/i.test(cabrini.explanation || ''), cabrini && `${cabrini.score} ${cabrini.explanation}`);
+    const religiousOut = (L.matches || []).filter((m) => /does not fund religious organizations/i.test(m.explanation || ''));
+    check('no starter grant is ruled out for being religious (the starter database only lists grants Catholic schools can apply to)', religiousOut.length === 0, religiousOut.map((m) => m.grant_name));
+    const regional = (L.matches || []).filter((m) => SEED_GRANTS.some((g) => g.grant_name === m.grant_name && g.geo_qualified === 'Yes - TX Only'));
+    check('Texas-only starter grants are not ruled out for a Texas parish', regional.length > 0 && regional.every((m) => m.score_tier !== 'not_eligible' || !/Geographic restriction/.test(m.explanation || '')), regional.map((m) => `${m.grant_name}: ${m.score_tier}`).slice(0, 5));
+    check('saved results carry the grant facts (religious eligibility on every starter match)',
+      (L.matches || []).filter((m) => SEED_GRANTS.some((g) => g.grant_name === m.grant_name)).every((m) => m.religious_eligibility), (L.matches || []).filter((m) => !m.religious_eligibility).map((m) => m.grant_name).slice(0, 5));
     const fallbacks = (L.matches || []).filter((m) => /review manually|not ai-scored|unable to/i.test(m.explanation || ''));
     info(`${fallbacks.length} match(es) carry a "not AI-scored" fallback explanation (expected for foundations the mock did not score)`);
 
@@ -980,6 +1009,23 @@ async function journey(browser) {
     const mdText = md.buf.toString('utf8');
     check('Markdown export downloads (grant_matches.md)', md.name === 'grant_matches.md', md.name);
     check('Markdown report has a title, summary and Kenedy', /^# /m.test(mdText) && /Excellent/i.test(mdText) && mdText.includes(KENEDY), mdText.slice(0, 200));
+    check('Markdown report includes the grant facts (religious eligibility, last verified)', /\| Religious eligibility \| Catholic schools eligible \|/.test(mdText) && /\| Last verified \| \d{4}-\d{2}-\d{2} \|/.test(mdText), mdText.slice(0, 300));
+    check('CSV has the grant-facts columns', ['Geography', 'Religious Eligibility', 'Deadline Notes', 'Typical Award', 'Funder Priorities', 'Eligibility Notes', 'Last Verified'].every((c) => (rows[0] || []).includes(c)), rows[0]);
+
+    const picks = card(page, /Top picks/);
+    const picksText = await picks.innerText();
+    check('Top picks lists Kenedy (excellent, deadline still open)', picksText.includes(KENEDY), picksText.slice(0, 400));
+    check('Top picks show eligibility chips', /Catholic schools eligible|Non-religious uses only|Religious eligibility not stated/.test(picksText), picksText.slice(0, 600));
+
+    const ics = await downloadFrom(page, () => page.getByRole('button', { name: 'Add Deadlines to Calendar' }).click(), errorBox);
+    const icsText = ics.buf.toString('utf8');
+    const icsLines = icsText.split('\r\n');
+    check('calendar export downloads (grant_deadlines.ics)', ics.name === 'grant_deadlines.ics', ics.name);
+    check('calendar file is a VCALENDAR with CRLF lines', icsText.startsWith('BEGIN:VCALENDAR\r\n') && icsText.endsWith('END:VCALENDAR\r\n'), icsText.slice(0, 120));
+    check('calendar lines are folded at 75 bytes', icsLines.every((line) => Buffer.byteLength(line, 'utf8') <= 75), icsLines.filter((line) => Buffer.byteLength(line, 'utf8') > 75).slice(0, 2));
+    const kenedyDue = kenedyUrgency().due.replace(/-/g, '');
+    check(`calendar has a Kenedy event on its next due date (${kenedyUrgency().due})`, icsText.includes('SUMMARY:Grant due: Kenedy Memorial Foundation Grants') && icsText.includes(`DTSTART;VALUE=DATE:${kenedyDue}`), icsText.slice(0, 600));
+    check('calendar events carry two reminders (2 weeks, 3 days)', icsText.includes('TRIGGER:-P14D') && icsText.includes('TRIGGER:-P3D'));
     await shot('results');
   });
 
@@ -1036,6 +1082,20 @@ async function journey(browser) {
     check('application row shows the funder and status', /Kenedy Memorial Foundation/.test(appsText) && /·\s*(Ready to export|Reviewing the draft|Drafting|Gathering information|Reading requirements|Getting started)/i.test(appsText), appsText);
     if (urgency.urgent) check('application row says "deadline soon"', /deadline soon/i.test(appsText), appsText);
 
+    // Pretend this guest loaded an older starter database, so the reload shows the update notice.
+    const me = await api('GET', '/api/auth/me', { token: S.token });
+    const dataDir = process.env.E2E_DATA_DIR;
+    let markedOld = false;
+    if (dataDir && me.data?.id) {
+      const marker = path.join(dataDir, 'store', 'seedloaded', `${String(me.data.id).replace(/[^A-Za-z0-9_.@-]/g, '_')}.json`);
+      markedOld = fs.existsSync(marker);
+      fs.mkdirSync(path.dirname(marker), { recursive: true });
+      fs.writeFileSync(marker, JSON.stringify({ version: '2000-01-01', loaded_at: '2000-01-01T00:00:00.000Z' }));
+    }
+    check('the starter edition this guest loaded is recorded', markedOld, dataDir ? 'no seedloaded marker was written' : 'E2E_DATA_DIR not set');
+    const sourcesOld = await api('GET', '/api/discovery/sources', { token: S.token });
+    check('sources say a newer starter database is out', sourcesOld.data?.starter?.update_available === true && sourcesOld.data?.starter?.loaded === '2000-01-01', sourcesOld.data?.starter);
+
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.getByText('Guest', { exact: true }).first().waitFor({ timeout: 20000 });
     await waitForDashboard(page);
@@ -1060,6 +1120,15 @@ async function journey(browser) {
     await page.getByRole('heading', { name: 'Match Results' }).waitFor({ timeout: 20000 });
     const counts = await tierCounts(page);
     check('after reload: match results restored with the same counts', JSON.stringify(counts) === JSON.stringify(S.counts), `${JSON.stringify(counts)} vs ${JSON.stringify(S.counts)}`);
+
+    const updateNotice = page.getByText(/The starter grant database was updated/);
+    check('results show "The starter grant database was updated"', (await updateNotice.count()) === 1);
+    await page.getByRole('button', { name: 'Update my grants' }).click();
+    await page.getByText(/Starter database loaded: 0 grants added/).waitFor({ timeout: 60000 });
+    check('"Update my grants" refreshes the starter grants and the notice goes away', (await updateNotice.count()) === 0);
+    const sourcesNew = await api('GET', '/api/discovery/sources', { token: S.token });
+    check('after the update the guest has the current edition', sourcesNew.data?.starter?.update_available === false && sourcesNew.data?.starter?.loaded === sourcesNew.data?.starter?.updated, sourcesNew.data?.starter);
+    check('the update kept the results (same counts)', JSON.stringify(await tierCounts(page)) === JSON.stringify(S.counts));
 
     await page.getByRole('button', { name: /Copy debug report/ }).click();
     const notice = page.getByText(/Debug report (copied|downloaded)|Could not get the debug report/).first();
@@ -1480,6 +1549,10 @@ async function basics(browser) {
 
   const CUSTOM = 'Exampleville Community Foundation Grant';
   const BLOCKED_GRANT = 'Example Parish Renewal Grant';
+  const SECULAR_ONLY = 'Example Secular Foundation Grant';
+  // Relative to today, so these test grants never expire or turn urgent as the calendar moves on.
+  const CUSTOM_DUE = daysFromToday(60);
+  const BLOCKED_DUE = daysFromToday(140);
   await step('Upload your own Excel grant list ("Upload and Continue")', async () => {
     await goToStep(page, 'grants', SECOND_KEY);
     const before = (await api('GET', '/api/grants', { token })).data || [];
@@ -1487,7 +1560,7 @@ async function basics(browser) {
       'Mixed Church-School': [{
         'Grant Name': BLOCKED_GRANT,
         Funder: 'Example Parish Renewal Fund',
-        Deadline: '2027-03-01',
+        Deadline: BLOCKED_DUE,
         Description: 'Supports parish facility renewal in Texas.',
         URL: `${SITE}/blocked/guidelines`,
         Status: 'OPEN',
@@ -1495,12 +1568,25 @@ async function basics(browser) {
       }, {
         'Grant Name': CUSTOM,
         Funder: 'Exampleville Community Foundation',
-        Deadline: '2026-12-01',
+        Deadline: CUSTOM_DUE,
         Description: 'Funds facility repairs for faith-based schools in Example County.',
         Contact: 'grants@example.org',
         URL: `${SITE}/grant-guidelines`,
         Status: 'OPEN',
         'Geo Qualified': 'TX',
+        Region: 'Example County, Texas',
+        'Religious Eligibility': 'Faith-based schools welcome',
+        'Typical Award': '$5,000',
+        'Funding Priorities': 'Facility repairs; Safety upgrades',
+      }, {
+        'Grant Name': SECULAR_ONLY,
+        Funder: 'Example Secular Foundation',
+        Deadline: daysFromToday(90),
+        Description: 'Funds after-school programs at public and charter schools.',
+        URL: `${SITE}/grant-guidelines`,
+        Status: 'OPEN',
+        'Geo Qualified': 'TX',
+        'Religious Eligibility': 'Religious organizations are not eligible',
       }],
       'Catholic Foundations': [{ 'Foundation Name': 'Example Catholic Fund', 'Application Cycle': 'Annual - spring', 'Focus Areas': 'Catholic schools', Website: 'https://example.org' }],
     });
@@ -1511,10 +1597,15 @@ async function basics(browser) {
     await upload.click();
     await page.getByRole('heading', { name: 'Enter Website URLs' }).waitFor({ timeout: 30000 });
     const after = (await api('GET', '/api/grants', { token })).data || [];
-    check('uploaded grants added to the database', after.length === before.length + 2, `${before.length} -> ${after.length}`);
+    check('uploaded grants added to the database', after.length === before.length + 3, `${before.length} -> ${after.length}`);
     const custom = after.find((g) => g.grant_name === CUSTOM);
     check('uploaded grant keeps its fields (category, Texas-only, deadline, URL, status)',
-      custom && custom.category === 'mixed' && custom.geo_qualified === 'Yes - TX Only' && custom.deadline === '2026-12-01' && custom.url === `${SITE}/grant-guidelines` && custom.status === 'OPEN', custom);
+      custom && custom.category === 'mixed' && custom.geo_qualified === 'Yes - TX Only' && custom.deadline === CUSTOM_DUE && custom.url === `${SITE}/grant-guidelines` && custom.status === 'OPEN', custom);
+    check('uploaded grant keeps its facts (region, religious eligibility, typical award, priorities)',
+      custom && custom.geography === 'Example County, Texas' && custom.religious_eligibility === 'eligible' && custom.typical_award === '$5,000' &&
+        JSON.stringify(custom.focus_areas) === JSON.stringify(['Facility repairs', 'Safety upgrades']), custom);
+    const secularOnly = after.find((g) => g.grant_name === SECULAR_ONLY);
+    check('"Religious organizations are not eligible" is read as excluded', secularOnly && secularOnly.religious_eligibility === 'excluded', secularOnly);
     check('website step shows the new total', await page.getByText(new RegExp(`${after.length} grants in your database`)).isVisible());
     const foundations = (await api('GET', '/api/grants/foundations', { token })).data || [];
     check('uploaded foundation added', Array.isArray(foundations) && foundations.some((f) => f.foundation_name === 'Example Catholic Fund'), Array.isArray(foundations) ? foundations.map((f) => f.foundation_name) : foundations);
@@ -1595,6 +1686,16 @@ async function basics(browser) {
     check('second guest has no applications yet', (await page.getByRole('heading', { name: /Your applications/ }).count()) === 0);
     check('grants Claude did not score say so plainly ("Not AI-scored")', (await page.getByText(/Not AI-scored/).count()) > 0);
     check('the uploaded grant is in the results', (await page.getByRole('heading', { name: CUSTOM, exact: true }).count()) === 1);
+    const customText = await page.locator('.card').filter({ has: page.getByRole('heading', { name: CUSTOM, exact: true }) }).first().innerText();
+    check('uploaded grant card shows its facts (eligible chip, region, typical award, priorities)',
+      customText.includes('Catholic schools eligible') && customText.includes('Example County, Texas') && /Typical award: \$5,000/.test(customText) && /What they fund now: Facility repairs; Safety upgrades/.test(customText), customText.slice(0, 700));
+    const secularCard = page.locator('.card').filter({ has: page.getByRole('heading', { name: SECULAR_ONLY, exact: true }) }).first();
+    const secularText = await secularCard.innerText();
+    check('a funder that excludes religious organizations is Not Eligible, with the reason and the chip',
+      /0%/.test(secularText) && /does not fund religious organizations/i.test(secularText) && secularText.includes("Doesn't fund religious orgs"), secularText.slice(0, 600));
+    const latest2 = (await api('GET', '/api/processing/match-results/latest', { token })).data || {};
+    const secularMatch = (latest2.matches || []).find((m) => m.grant_name === SECULAR_ONLY);
+    check('...and Claude never scored it (ruled out before any AI call)', secularMatch && secularMatch.score === 0 && secularMatch.score_tier === 'not_eligible' && /No need to apply/.test(secularMatch.explanation || ''), secularMatch);
   });
 
   await step('Saved key: the API Key step offers "Keep my saved key"', async () => {
@@ -1612,7 +1713,7 @@ async function basics(browser) {
     await customCard.getByRole('button', { name: /Write Application/ }).click();
     await page.waitForURL(/\/writer\?id=/, { timeout: 30000 });
     await page.getByRole('heading', { name: CUSTOM }).waitFor({ timeout: 20000 });
-    check('no urgency banner for a December deadline', (await page.getByText(/Deadline soon/).count()) === 0);
+    check('no urgency banner for a deadline two months away', (await page.getByText(/Deadline soon/).count()) === 0);
     const before = await requestCount();
     await site.reset();
     await page.getByRole('button', { name: 'Analyze Requirements' }).click();

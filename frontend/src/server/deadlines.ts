@@ -35,6 +35,10 @@ export function deadlineTimeZone(): string {
 
 /** Today's date (YYYY-MM-DD) in the configured time zone. */
 export function todayIso(timeZone = deadlineTimeZone()): string {
+  // Tests only (GRANTFINDER_TEST_MODE=1): pretend it is another day, so suites can prove they
+  // don't depend on the calendar (a fixture deadline that has since passed, a yearly date).
+  const forced = (process.env.GRANTFINDER_TODAY || '').trim();
+  if (forced && process.env.GRANTFINDER_TEST_MODE === '1' && /^\d{4}-\d{2}-\d{2}$/.test(forced)) return forced;
   try {
     return new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
   } catch {

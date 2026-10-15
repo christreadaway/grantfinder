@@ -200,6 +200,14 @@ def main():
         if data.get("foundations"):
             foundations = data["foundations"]
         is_verify = path.name.startswith(("verify", "existing"))
+        if is_verify:
+            # A listed grant the verifier put only under "excluded" (not open to Catholic schools) comes out too.
+            for entry in data.get("excluded", []):
+                key = norm(entry.get("grant_name") if isinstance(entry, dict) else "")
+                if key in before and key in current:
+                    current.pop(key)
+                    reverified.add(key)
+                    removed[before[key]["grant_name"]] = str(entry.get("reason") or "not open to Catholic schools").strip()
         for record in data.get("grants", []):
             name = str(record.get("grant_name") or "")
             old_names = [norm(name)] + [norm(n) for n in ([record["renamed_from"]] if isinstance(record.get("renamed_from"), str) else record.get("renamed_from") or [])]
@@ -285,8 +293,8 @@ def main():
     print(f"grants: {len(grants)} (was {len(before)}) {by_cat}; foundations: {len(seed.get('foundations', []))}")
     print(f"added {len(added)}, removed {len(removed)}, re-verified {len(reverified)}, not re-verified {len(not_reverified)}, field changes {len(changes)}, stale (>62 days) {len(stale)}")
     print("deadlines:", {k: sum(1 for g in grants if (g['deadline'][:4].isdigit() if k == 'date' else g['deadline'].startswith('Annual') if k == 'annual' else g['deadline'] == k)) for k in ('date', 'annual', 'Rolling', 'Check website')})
-    print("religious:", {k: sum(1 for g in grants if g['religious_eligibility'] == k) for k in sorted(RELIGIOUS)})
-    print("confidence:", {k: sum(1 for g in grants if g['confidence'] == k) for k in ('verified', 'partial')})
+    print("religious:", {k: sum(1 for g in grants if g.get('religious_eligibility') == k) for k in sorted(RELIGIOUS)})
+    print("confidence:", {k: sum(1 for g in grants if g.get('confidence') == k) for k in ('verified', 'partial')})
     for p in merger.problems:
         print(" -", p)
 

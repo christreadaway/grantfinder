@@ -243,7 +243,7 @@ run_phase() {
   say ""
   say "================ phase: $phase ================"
   E2E_BASE_URL="http://127.0.0.1:$APP_PORT" E2E_MOCK_URL="http://127.0.0.1:$MOCK_PORT" E2E_PROXY_URL="$PROXY_URL" \
-  E2E_SITE_URL="http://127.0.0.1:$SITE_PORT" E2E_ARTIFACTS="$ART" E2E_SECRET_KEY="$E2E_SECRET" \
+  E2E_SITE_URL="http://127.0.0.1:$SITE_PORT" E2E_ARTIFACTS="$ART" E2E_SECRET_KEY="$E2E_SECRET" E2E_DATA_DIR="$DATA_DIR" \
   NODE_PATH="$E2E/node_modules${NODE_PATH:+:$NODE_PATH}" \
     node "$E2E/e2e.cjs" "$phase" "$STATE" 2>&1 | tee "$LOGS/phase-$phase.log"
   code=${PIPESTATUS[0]}
