@@ -14,7 +14,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { ContentBlock, MessageParam, ToolUnion } from '@anthropic-ai/sdk/resources/messages';
 
-import { anthropicBaseUrl, claudeModel, testMode } from './config';
+import { anthropicBaseUrl, anthropicHost, claudeModel, testMode } from './config';
 import { ClaudeError } from './errors';
 import { logger } from './log';
 import type { AICallLog } from './types';
@@ -216,6 +216,9 @@ export class Claude {
     this.model = claudeModel();
     this.client = new Anthropic({
       apiKey: ctx.apiKey,
+      // Only this person's key, sent only to Anthropic: never an ANTHROPIC_AUTH_TOKEN or
+      // ANTHROPIC_BASE_URL from the environment (see anthropicBaseUrl).
+      authToken: null,
       baseURL: anthropicBaseUrl(),
       maxRetries: 2,
       timeout: 10 * 60 * 1000,
@@ -311,21 +314,38 @@ export class Claude {
   }
 }
 
+/** The message inside an Anthropic error body ({type:'error', error:{message}}), or ''. */
+function apiErrorMessage(error: InstanceType<typeof Anthropic.APIError>): string {
+  const body = error.error as { error?: { message?: unknown } } | undefined;
+  const message = body?.error?.message;
+  return typeof message === 'string' ? message.slice(0, 200) : '';
+}
+
 /**
  * Cheap check that a key works (lists one model; costs nothing).
  * 'invalid' = Anthropic said no; 'unverified' = couldn't check (network), save anyway.
  */
 export async function verifyApiKey(apiKey: string): Promise<{ result: 'ok' | 'invalid' | 'unverified'; detail?: string }> {
-  const client = new Anthropic({ apiKey, baseURL: anthropicBaseUrl(), maxRetries: 0, timeout: 15000 });
+  const client = new Anthropic({ apiKey, authToken: null, baseURL: anthropicBaseUrl(), maxRetries: 0, timeout: 15000 });
   try {
     await client.models.list({ limit: 1 });
     return { result: 'ok' };
   } catch (error) {
-    if (error instanceof Anthropic.AuthenticationError) {
-      return { result: 'invalid', detail: 'Anthropic rejected this API key. Check that you copied the whole key (it starts with sk-ant-).' };
-    }
-    if (error instanceof Anthropic.PermissionDeniedError) {
-      return { result: 'invalid', detail: 'Anthropic says this API key is not allowed to make requests. Check the key in the Anthropic Console.' };
+    if (error instanceof Anthropic.AuthenticationError || error instanceof Anthropic.PermissionDeniedError) {
+      // Record exactly who said no and why, so a rejected key can be told apart from a
+      // misrouted request (Netlify > Logs > Functions, event api_key_rejected).
+      const said = redact(apiErrorMessage(error));
+      logger.warn('api_key_rejected', {
+        host: anthropicHost(),
+        status: error.status,
+        request_id: error.requestID ?? null,
+        anthropic_message: said,
+      });
+      const quoted = said ? ` (Anthropic said: "${said}")` : '';
+      if (error instanceof Anthropic.AuthenticationError) {
+        return { result: 'invalid', detail: `Anthropic rejected this API key${quoted}. Check that you copied the whole key (it starts with sk-ant-).` };
+      }
+      return { result: 'invalid', detail: `Anthropic says this API key is not allowed to make requests${quoted}. Check the key in the Anthropic Console.` };
     }
     const message = redact((error as Error).message || String(error));
     logger.warn('api_key_verify_unavailable', { error: message });

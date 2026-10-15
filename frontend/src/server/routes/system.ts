@@ -2,7 +2,7 @@
  * /api/health, /api/jobs, /api/debug/report.
  */
 import { hasApiKey } from '../auth';
-import { allowGuestLogin, APP_VERSION, claudeModel, googleClientId, jobMode, onNetlify, storeKind } from '../config';
+import { allowGuestLogin, anthropicHost, APP_VERSION, claudeModel, googleClientId, jobMode, onNetlify, storeKind } from '../config';
 import { HttpError } from '../errors';
 import { listJobs, getJob, runDirectJob, toPublicJob, type Job } from '../jobs';
 import { logger } from '../log';
@@ -62,6 +62,8 @@ export function registerSystemRoutes(router: Router): void {
       // background: Netlify background functions (GRANTFINDER_BACKGROUND_JOBS=true).
       jobs: jobMode(),
       model: claudeModel(),
+      // Where Claude calls go: api.anthropic.com once deployed (never Netlify's AI Gateway).
+      claude_api: anthropicHost(),
       services: { api: true, database: storeOk },
     };
   });
@@ -105,7 +107,7 @@ export function registerSystemRoutes(router: Router): void {
       '# GrantFinder debug report',
       '',
       `- Generated: ${new Date().toISOString()}`,
-      `- Version ${APP_VERSION} | runtime ${onNetlify() ? 'Netlify' : 'local'} | AI steps run ${jobMode()} | storage ${storeKind()} | model ${claudeModel()}`,
+      `- Version ${APP_VERSION} | runtime ${onNetlify() ? 'Netlify' : 'local'} | AI steps run ${jobMode()} | storage ${storeKind()} | model ${claudeModel()} | Claude API ${anthropicHost()}`,
       `- Sign-in options: Google ${googleClientId() ? 'on' : 'off'}, guest ${allowGuestLogin() ? 'on' : 'off'}`,
       `- User \`${user.id}\` | Claude key saved: ${keySaved ? 'yes' : 'NO'}`,
       `- Profile: ${profile ? `yes (${profile.sources.length} sources, ${profile.questionnaire_answers.length} questionnaire answers, ${profile.evidence.length} evidence items)` : 'NO'}`,

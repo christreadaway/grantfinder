@@ -142,8 +142,27 @@ export function claudeModel(): string {
   return raw('CLAUDE_MODEL') || 'claude-sonnet-5';
 }
 
-export function anthropicBaseUrl(): string | undefined {
-  return raw('ANTHROPIC_BASE_URL') || undefined;
+/** Anthropic's own API: where every Claude call goes outside the tests. */
+export const ANTHROPIC_API_URL = 'https://api.anthropic.com';
+
+/**
+ * Where Claude calls go. Always handed to the SDK explicitly, because left unset the SDK reads
+ * ANTHROPIC_BASE_URL, and Netlify's AI Gateway injects that variable into every function on
+ * credit-based plans: the gateway then rejects the person's own Anthropic key (401) and the app
+ * would say the key was rejected. ANTHROPIC_BASE_URL is ignored on purpose; only
+ * GRANTFINDER_CLAUDE_BASE_URL (the tests' mock Claude) changes it.
+ */
+export function anthropicBaseUrl(): string {
+  return raw('GRANTFINDER_CLAUDE_BASE_URL') || ANTHROPIC_API_URL;
+}
+
+/** Host of anthropicBaseUrl(), for health checks and debug reports. */
+export function anthropicHost(): string {
+  try {
+    return new URL(anthropicBaseUrl()).host;
+  } catch {
+    return 'invalid GRANTFINDER_CLAUDE_BASE_URL';
+  }
 }
 
 export function logLevel(): 'debug' | 'info' {

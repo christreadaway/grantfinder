@@ -3,7 +3,7 @@
  * Mock Anthropic API for GrantFinder tests. No dependencies.
  *
  *   node tests/mock-claude/server.mjs --port 4010
- *   ANTHROPIC_BASE_URL=http://127.0.0.1:4010 GRANTFINDER_TEST_MODE=1 ...
+ *   GRANTFINDER_CLAUDE_BASE_URL=http://127.0.0.1:4010 GRANTFINDER_TEST_MODE=1 ...
  *
  * The engine sends header x-grantfinder-prompt-id on every call in test mode.
  * Answers come from tests/mock-claude/fixtures/*.json:
@@ -125,7 +125,10 @@ function streamAnswer(res, model, answer, inputTokens) {
   res.end();
 }
 
-function keyProblem(res, apiKey, forMessages) {
+function keyProblem(res, apiKey, forMessages, authorization) {
+  // The engine sends only the person's key (x-api-key). A bearer token here means an
+  // ANTHROPIC_AUTH_TOKEN from the environment leaked into the request.
+  if (authorization) return apiError(res, 401, 'authentication_error', 'unexpected Authorization header'), true;
   if (!apiKey) return apiError(res, 401, 'authentication_error', 'x-api-key header is required'), true;
   if (apiKey.startsWith('sk-ant-invalid')) return apiError(res, 401, 'authentication_error', 'invalid x-api-key'), true;
   if (forMessages && apiKey.startsWith('sk-ant-nocredit')) {
@@ -169,7 +172,7 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true });
     }
     if (req.method === 'GET' && url.pathname === '/v1/models') {
-      if (keyProblem(res, req.headers['x-api-key'], false)) return;
+      if (keyProblem(res, req.headers['x-api-key'], false, req.headers.authorization)) return;
       return send(res, 200, {
         data: [{ id: 'claude-sonnet-5', type: 'model', display_name: 'Claude Sonnet 5', created_at: '2026-01-01T00:00:00Z' }],
         has_more: false, first_id: 'claude-sonnet-5', last_id: 'claude-sonnet-5',
@@ -191,7 +194,7 @@ const server = http.createServer(async (req, res) => {
         turns: (body.messages || []).length,
         prompt: promptText(body),
       });
-      if (keyProblem(res, apiKey, true)) return;
+      if (keyProblem(res, apiKey, true, req.headers.authorization)) return;
       const forced = failures[promptId];
       if (forced && forced.times !== 0) {
         forced.times -= 1;

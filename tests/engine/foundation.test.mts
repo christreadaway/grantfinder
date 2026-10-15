@@ -30,9 +30,28 @@ check('API key without sk-ant- -> 400 with Python wording', badFormat.status ===
 
 const rejected = await api('POST', '/api/auth/api-key', { token, json: { api_key: 'sk-ant-invalid-123' } });
 check('API key Anthropic rejects -> 400, not saved', rejected.status === 400 && /rejected/i.test(rejected.data.detail), rejected.data);
+check('rejected key: the message quotes what Anthropic said', /Anthropic said: "invalid x-api-key"/.test(rejected.data.detail), rejected.data);
 
 const saved = await api('POST', '/api/auth/api-key', { token, json: { api_key: '  sk-ant-test-good-1234  ' } });
 check('valid API key saved and verified', saved.status === 200 && saved.data.verified === true, saved.data);
+
+// Netlify's AI Gateway injects ANTHROPIC_BASE_URL and friends into deployed functions; the
+// harness sets decoys of both. The key above verified against the mock, so they were ignored.
+check(
+  'Netlify AI Gateway variables ignored: key checked at the mock, no bearer token sent',
+  saved.data.verified === true && /decoy/.test(process.env.ANTHROPIC_BASE_URL ?? '') && /decoy/.test(process.env.ANTHROPIC_AUTH_TOKEN ?? ''),
+  { verified: saved.data.verified },
+);
+const healthHost = await api('GET', '/api/health');
+check('health names the Claude host in use (the mock here)', healthHost.data?.claude_api === new URL(mock.url).host, healthHost.data);
+{
+  const config = await import('../../frontend/src/server/config.ts');
+  const testUrl = process.env.GRANTFINDER_CLAUDE_BASE_URL;
+  delete process.env.GRANTFINDER_CLAUDE_BASE_URL;
+  const deployed = config.anthropicBaseUrl();
+  process.env.GRANTFINDER_CLAUDE_BASE_URL = testUrl;
+  check('deployed: Claude calls go to api.anthropic.com even when ANTHROPIC_BASE_URL is set', deployed === 'https://api.anthropic.com', deployed);
+}
 
 const status = await api('GET', '/api/auth/api-key/status', { token });
 check('key status is_set true', status.data?.is_set === true && status.data?.is_valid === true, status.data);

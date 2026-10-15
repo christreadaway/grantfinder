@@ -68,7 +68,11 @@ export async function startMock(port = 4000 + Math.floor(Math.random() * 900)): 
     });
     mockProcess!.on('exit', (code) => reject(new Error(`mock Claude exited (${code})`)));
   });
-  process.env.ANTHROPIC_BASE_URL = url;
+  process.env.GRANTFINDER_CLAUDE_BASE_URL = url;
+  // What Netlify's AI Gateway injects into deployed functions. The engine must ignore both
+  // (every call still has to reach the mock with the person's own key).
+  process.env.ANTHROPIC_BASE_URL = 'http://127.0.0.1:9/netlify-ai-gateway-decoy';
+  process.env.ANTHROPIC_AUTH_TOKEN = 'netlify-ai-gateway-decoy-token';
   const post = (p: string, body: unknown) =>
     fetch(`${url}${p}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
   return {

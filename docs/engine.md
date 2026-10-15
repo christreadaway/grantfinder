@@ -77,6 +77,12 @@ What keeps a step from being lost or paid for twice:
   promptId, prompt, maxTokens, tools})`. It returns `{text, ...}` with text blocks joined
   (newer models put a thinking block first). Parse model output with `extractJson`,
   `extractJsonObject`, or `extractJsonArray` from `json.ts`, never bare `JSON.parse`.
+- **Claude address**: every Anthropic client gets an explicit `baseURL: anthropicBaseUrl()`
+  (`https://api.anthropic.com`) and `authToken: null`. Netlify's AI Gateway injects
+  `ANTHROPIC_BASE_URL` (and `ANTHROPIC_API_KEY`) into functions on credit-based plans; the SDK
+  would follow it and the gateway rejects the person's own key. The engine ignores those
+  variables; only `GRANTFINDER_CLAUDE_BASE_URL` (the tests' mock Claude) changes the address.
+  `/api/health` shows the host in use as `claude_api`.
 - **Fatal vs. fallback**: a `ClaudeError` with `fatal: true` (bad key, no credits, unknown
   model, malformed request) must propagate so the job fails with a clear message. Use
   `isFatalClaudeError(e)` before falling back. Fallback results must say plainly that
@@ -157,8 +163,11 @@ drafting and matching in parts, and every other AI step ending inside one reques
 `E2E_JOB_MODE=direct bash tests/e2e/run_e2e.sh` runs the browser test in direct mode.
 
 The engine suites call `handleRequest()` in-process with a mock Claude
-(`tests/mock-claude/server.mjs`, answers in `tests/mock-claude/fixtures/*.json`, keyed by
-prompt id) and a throwaway data folder. Mock keys `sk-ant-invalid…`, `sk-ant-nocredit…`,
+(`tests/mock-claude/server.mjs` at `GRANTFINDER_CLAUDE_BASE_URL`, answers in
+`tests/mock-claude/fixtures/*.json`, keyed by prompt id) and a throwaway data folder. Both
+test harnesses also set decoy `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` values, the way
+Netlify's AI Gateway does, and the mock refuses any request carrying an `Authorization`
+header, so a regression there fails every suite. Mock keys `sk-ant-invalid…`, `sk-ant-nocredit…`,
 `sk-ant-overload…`, `sk-ant-spendcap…` and `sk-ant-userlimit…` simulate Anthropic failures
 (bad key, no credits, overloaded, monthly spend cap, a spend limit you set). `/__fail`
 forces errors per prompt, `/__delay` slows one prompt down, and `/__fixtures` swaps answers

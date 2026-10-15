@@ -72,8 +72,9 @@ everyone out and makes saved API keys unreadable, so people would re-enter them)
 ## Step 4. Check it
 
 1. Open `https://<your-site>/api/health`. You should see
-   `{"status":"healthy",...,"runtime":"netlify","store":"blobs","jobs":"direct",...}`.
-   (`"jobs":"direct"` means AI steps run inside normal requests, which works on every plan.)
+   `{"status":"healthy",...,"runtime":"netlify","store":"blobs","jobs":"direct",...,"claude_api":"api.anthropic.com",...}`.
+   (`"jobs":"direct"` means AI steps run inside normal requests, which works on every plan.
+   `"claude_api":"api.anthropic.com"` means your Claude key goes straight to Anthropic.)
 2. Open `https://<your-site>/`. You should see **Continue as guest**.
 3. Click it, paste your Claude API key (from [console.anthropic.com](https://console.anthropic.com),
    it starts with `sk-ant-`), then **Load Starter Database**: 24 grants should load, including
@@ -148,6 +149,7 @@ be opened again from the screens; GrantFinder asks before either one.
 | Site says **Google sign-in is only half set up** | The engine has a Google client ID the website doesn't | Add `NEXT_PUBLIC_GOOGLE_CLIENT_ID` in Netlify and redeploy |
 | Google popup says the origin isn't allowed | Your Netlify address isn't in the Google client | Step 5.4 |
 | **Anthropic rejected your Claude API key** | Typo or revoked key | Re-enter the key on the dashboard's API Key step |
+| API Key step says **Anthropic rejected this API key** although the key is active in the Anthropic Console | The message quotes what Anthropic said. Before Oct 15, 2026, GrantFinder followed the `ANTHROPIC_BASE_URL` that Netlify's AI Gateway adds to every function on credit-based plans, so the key went to Netlify's gateway, which refused it | Redeploy the latest `main` (it always calls `api.anthropic.com`; `/api/health` shows `"claude_api":"api.anthropic.com"`), then paste the key again. If it still fails, copy the key with the Console's copy button |
 | **Your Anthropic account is out of API credits** | No balance left | Add credits at console.anthropic.com (Billing), then retry |
 | **Your Anthropic account reached its monthly API spending cap** (or **hit a spending limit that was set on it**) | A spending limit on the Anthropic account | Raise it at platform.claude.com/settings/billing (the message names the page), then try again |
 | **Can't reach GrantFinder right now**, **Couldn't reach GrantFinder to reopen your saved work**, **Lost the connection to GrantFinder**, or **Lost contact with GrantFinder while this step was running** | The internet connection dropped, or Netlify had a brief error. Your sign-in and saved work are kept, and a step that was running keeps running on Netlify | Check your internet, then click **Try again** (or the same button again: a running step is picked back up, not started twice). Don't start a new guest session; it would be empty |
