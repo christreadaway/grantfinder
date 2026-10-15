@@ -6,10 +6,15 @@ GrantFinder runs entirely on Netlify. There is no second server to host.
 |---|---|---|
 | Website | The screens people use | `frontend/src/app/` |
 | Engine | Sign-in, grants, profile, matching, the grant writer (at `/api/*` on the same site) | `frontend/src/server/` |
-| AI worker | A Netlify background function that runs every Claude step (up to 15 minutes each) | `frontend/netlify/functions/` |
+| AI steps | Every Claude step runs inside a normal Netlify request (up to about a minute each); long steps such as drafting a whole application continue on their own in parts | `frontend/src/server/jobs.ts` |
 | Storage | Netlify Blobs: users, saved API keys, grants, profiles, applications. Survives every deploy | (set up by Netlify automatically) |
 
 `netlify.toml` already tells Netlify how to build all of it. You add one secret and click deploy.
+
+**Works on every Netlify plan**, including the older free (legacy Starter) plan, because it doesn't
+need Netlify background functions. (A deploy that contains a background function fails on plans
+without them, so GrantFinder only adds one when you ask for it; see "Optional: longer AI steps"
+below.)
 
 Total time: about 15 minutes, plus 10 for Google sign-in (optional).
 
@@ -46,6 +51,8 @@ everyone out and makes saved API keys unreadable, so people would re-enter them)
    ALLOW_GUEST_LOGIN=true
    ```
 
+   Keep Netlify's defaults on each variable (all scopes, same value for every deploy context).
+
    Optional:
 
    ```
@@ -53,9 +60,10 @@ everyone out and makes saved API keys unreadable, so people would re-enter them)
    LOG_LEVEL=info
    ```
 
-   `CLAUDE_MODEL` picks the Claude model for every AI step. `claude-sonnet-5` is the default and a
-   good balance. For the strongest writing on an important application, `claude-opus-5-5` costs
-   about twice as much per word and is slower.
+   `CLAUDE_MODEL` picks the Claude model for every AI step. `claude-sonnet-5` is the default and the
+   right choice on most Netlify plans: each AI step has about a minute, and Sonnet finishes well
+   inside it. `claude-opus-5-5` writes a little better but is slower and costs more; use it only
+   with the background option below.
 4. Click **Deploy**. The build takes 2 to 4 minutes. If `SECRET_KEY` is missing or too short, the
    build stops and the log tells you exactly what to fix.
 5. When it finishes, copy your site address, for example `https://grantfinder-abc123.netlify.app`.
@@ -64,7 +72,8 @@ everyone out and makes saved API keys unreadable, so people would re-enter them)
 ## Step 4. Check it
 
 1. Open `https://<your-site>/api/health`. You should see
-   `{"status":"healthy",...,"runtime":"netlify","store":"blobs",...}`.
+   `{"status":"healthy",...,"runtime":"netlify","store":"blobs","jobs":"direct",...}`.
+   (`"jobs":"direct"` means AI steps run inside normal requests, which works on every plan.)
 2. Open `https://<your-site>/`. You should see **Continue as guest**.
 3. Click it, paste your Claude API key (from [console.anthropic.com](https://console.anthropic.com),
    it starts with `sk-ant-`), then **Load Starter Database**: 24 grants should load, including
@@ -72,6 +81,22 @@ everyone out and makes saved API keys unreadable, so people would re-enter them)
 
 Each person brings their own Claude API key; it is encrypted before it is stored, and Netlify
 needs no Anthropic key of its own.
+
+## Optional: longer AI steps (only if your Netlify plan has background functions)
+
+Netlify's current credit-based plans (Free, Personal, Pro; accounts created since September 2025)
+include background functions, which let one AI step run for up to 15 minutes. Legacy plans
+(accounts created before September 4, 2025, such as legacy Starter) don't, and a deploy containing
+one fails there with "Background Functions not allowed by team plan". GrantFinder doesn't need them.
+If your plan has them and you want each step to have more time (for example to use
+`claude-opus-5-5`):
+
+1. In Netlify, add `GRANTFINDER_BACKGROUND_JOBS=true`.
+2. Open **Deploys**, click **Trigger deploy**, then **Deploy site**.
+3. `https://<your-site>/api/health` now shows `"jobs":"background"`.
+
+If that deploy fails with "Background Functions not allowed by team plan", delete the variable and
+deploy again.
 
 ## Step 5 (optional). Turn on Google sign-in
 
@@ -112,8 +137,9 @@ be opened again from the screens; GrantFinder asks before either one.
 | **Your Anthropic account reached its monthly API spending cap** (or **hit a spending limit that was set on it**) | A spending limit on the Anthropic account | Raise it at platform.claude.com/settings/billing (the message names the page), then try again |
 | **Can't reach GrantFinder right now**, **Couldn't reach GrantFinder to reopen your saved work**, **Lost the connection to GrantFinder**, or **Lost contact with GrantFinder while this step was running** | The internet connection dropped, or Netlify had a brief error. Your sign-in and saved work are kept, and a step that was running keeps running on Netlify | Check your internet, then click **Try again** (or the same button again: a running step is picked back up, not started twice). Don't start a new guest session; it would be empty |
 | Sign-in page says **Your session ended** | The sign-in expired (sessions last 30 days) or was refused, for example after `SECRET_KEY` changed | Sign in with Google again and your work is there. A guest session can't be reopened |
-| **Couldn't start the background worker** | The AI worker function wasn't deployed | Netlify > **Logs** > **Functions** should list `grantfinder-jobs-background`; if not, **Trigger deploy** |
-| **This step ran out of time**, **Claude was still working when this step reached its time limit**, or **The background worker stopped unexpectedly** | An AI step reached Netlify's 15-minute limit, or its worker stopped | Try it again; anything that finished was saved. In the writer, **Draft missing sections** drafts only the sections with no draft yet |
+| Deploy fails: **Background Functions not allowed by team plan** | `GRANTFINDER_BACKGROUND_JOBS=true` is set, but the Netlify plan has no background functions | Delete that variable and deploy again. GrantFinder works without it |
+| **Couldn't start the background worker** | `GRANTFINDER_BACKGROUND_JOBS=true` is set, but the worker isn't deployed or allowed | Delete that variable and redeploy (AI steps then run inside normal requests), or **Trigger deploy** if your plan has background functions |
+| **This step was stopped by Netlify**, **This step ran out of time**, **Claude was still working when this step reached its time limit**, or **The background worker stopped unexpectedly** | An AI step reached Netlify's time limit (about a minute per step; 15 minutes with background functions), or its worker stopped | Try it again; anything that finished was saved. In the writer, **Draft missing sections** drafts only the sections with no draft yet. If one step keeps stopping, set `CLAUDE_MODEL=claude-sonnet-5` (faster) |
 | Website scan says the site **blocks automated reading** | Many parish sites block bots | Use **Enter the basics by hand** or **Skip to questions**; upload documents for detail |
 | Writer says **requirements were inferred** | The funder's page couldn't be read | Paste the guidelines under **Paste guidelines and re-analyze** |
 | An upload says it is **larger than 4 MB** (or over the **limit 4 MB**) | Netlify's request size limit | Save a smaller copy (fewer images or pages) and upload again. For a big report, add a plain-text (.txt) copy instead; the Documents step explains how |
@@ -124,8 +150,9 @@ be opened again from the screens; GrantFinder asks before either one.
   and the writer's **Copy debug bundle** button. Each copies a paste-ready report of recent steps,
   every error with its internal detail, and the AI calls behind it. No keys or secrets are included.
   If the browser blocks copying, the report downloads as a `.md` file instead.
-- **Netlify:** **Logs**, then **Functions**. `___netlify-server-handler` is the engine API;
-  `grantfinder-jobs-background` is the AI worker. Every line is one JSON record.
+- **Netlify:** **Logs**, then **Functions**. `___netlify-server-handler` is the engine API and,
+  by default, also runs every AI step; `grantfinder-jobs-background` appears only with the
+  background option. Every line is one JSON record.
 - **Website build:** **Deploys**, then the deploy's log.
 - **In the browser:** right-click, **Inspect**, **Console**. GrantFinder's own messages start with `[GrantFinder]`.
 
@@ -133,8 +160,10 @@ Paste any of these into Claude Code when something breaks.
 
 ## Known limits (today)
 
-- **Each AI step can run up to 15 minutes** (Netlify's background function limit). Matching and
-  drafting are built to finish well inside it and keep partial work if they don't.
+- **Each AI step gets about a minute** (Netlify stops a normal request at 60 seconds; GrantFinder
+  stops its Claude calls at 50 so it can save). Drafting a whole application runs a few sections
+  per request and continues on its own; matching scores its batches at the same time. With the
+  background option, each step can run up to 15 minutes.
 - **Uploads are limited to 4 MB** each, and Claude reads the first 60,000 characters of each
   document. For a long report, upload the later pages as a separate file.
 - **Guest accounts live in one browser.** Clearing the browser's site data, or signing out, loses
@@ -142,8 +171,8 @@ Paste any of these into Claude Code when something breaks.
   computer.
 - **Data stays in Netlify Blobs** across deploys. To wipe everything, delete the `grantfinder`
   store under **Blobs** in the Netlify site menu.
-- **Netlify's free plan is enough** for one school. Each AI step's progress checks count as
-  function calls.
+- **Netlify's free plan is enough** for one school (legacy or current). Each AI step's progress
+  checks count as function calls.
 
 ## Run it on your Mac instead
 

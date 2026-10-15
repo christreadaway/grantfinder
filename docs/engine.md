@@ -1,45 +1,62 @@
 # How the GrantFinder engine works (Netlify edition)
 
-GrantFinder runs entirely on Netlify. There is no separate server to host.
+GrantFinder runs entirely on Netlify, on any plan. There is no separate server to host.
 
 | Piece | Where | What it does |
 |---|---|---|
 | Website | `frontend/src/app/` (Next.js) | The screens people use |
-| Engine API | `frontend/src/server/`, mounted at `/api/*` by `frontend/src/app/api/[...path]/route.ts` | Sign-in, grants, profile, matching, writer |
-| Background worker | `frontend/netlify/functions/grantfinder-jobs-background.mts` | Runs every Claude (AI) step, up to 15 minutes each |
+| Engine API | `frontend/src/server/`, mounted at `/api/*` by `frontend/src/app/api/[...path]/route.ts` | Sign-in, grants, profile, matching, writer; by default also runs every AI step (`POST /api/jobs/{id}/run`) |
+| Background worker (optional) | `frontend/netlify/background/grantfinder-jobs-background.mts`, deployed only when `GRANTFINDER_BACKGROUND_JOBS=true` (`frontend/scripts/netlify-functions.mjs` copies it into `netlify/functions/` before the build) | Runs AI steps for up to 15 minutes each, on Netlify plans that include background functions |
 | Storage | Netlify Blobs (on Netlify) or `frontend/.data/` JSON files (on your Mac) | Users, saved API keys, grants, profiles, applications, jobs |
 
 The old Python engine in `backend/` is the reference the TypeScript engine was ported
 from. It is no longer deployed.
 
-## Why background jobs
+## Jobs, and the three ways they run
 
-Netlify stops a normal function after 60 seconds. Scoring 40 grants or drafting a
-whole application takes minutes. So every Claude call runs as a **job**:
+Every Claude call runs as a **job**, never inside the route that asked for it:
 
 1. The website calls an API route (for example `POST /api/processing/match-grants`).
 2. The route checks everything it can right away (signed in? API key saved? profile
    exists?) and answers `400`/`404`/`409` immediately when something is missing.
-3. Otherwise it records a job and answers `202 {"job_id": "...", "status": "queued", "kind": "..."}`.
-4. On Netlify the route starts the background function (signed with `SECRET_KEY`); locally
-   the job runs inside the same server process.
+3. Otherwise it records a job and answers `202 {"job_id": "...", "status": "queued", "kind": "..."}`
+   (plus `"run": "direct"` in direct mode).
+4. The job runs according to the **job mode** (`config.ts` `jobMode()`, shown by `/api/health`
+   as `"jobs"`):
+   - **direct** (Netlify default, works on every plan): the website calls
+     `POST /api/jobs/{job_id}/run`, which runs the job inside that request. Netlify stops a
+     request at 60 seconds, so the job's Claude calls stop at 50 (`directJobBudgetMs()`),
+     leaving time to save. Handlers check `ctx.timeLeftMs()` before starting another Claude
+     call. Work that doesn't fit (drafting many sections) returns a result with
+     `__continue: {path, body}`; the website makes that request next and uses its result,
+     so the screen sees one finished step.
+   - **background** (`GRANTFINDER_BACKGROUND_JOBS=true`, Netlify plans with background
+     functions): the route starts the background function (signed with `SECRET_KEY`), which
+     runs the job for up to 15 minutes. Legacy Netlify plans (accounts from before
+     September 4, 2025) don't have background functions, and a deploy that contains one
+     fails there, so it is off by default and only copied into the deploy when asked for.
+   - **local** (your Mac, tests): inside the same server process. `GRANTFINDER_JOB_MODE=direct`
+     forces direct mode locally, to test it.
 5. The website polls `GET /api/jobs/{job_id}` until `status` is `done` (the `result` is
    exactly what the old Python endpoint returned) or `failed` (`error.detail` explains
-   what to do). `frontend/src/lib/api.ts` does this polling for every call automatically,
-   so screens see the same response shapes as before.
+   what to do). `frontend/src/lib/api.ts` does this polling, the direct-mode run request,
+   and following `__continue` for every call automatically.
 
 What keeps a step from being lost or paid for twice:
 
 - **One run at a time.** Each job has an exclusive key (by default its kind plus the
   application id; drafting and refining share `writer.sections:{appId}`, the website
-  scan includes its URLs, document uploads have none). A second request while one runs
-  gets `409 {"running": true, "job_id": ...}`, and the website waits for the first run
-  instead of starting (and paying for) another.
+  scan includes its URLs, document uploads have none). The very same request while one
+  runs (a double click) gets `409 {"running": true, "job_id": ...}`, and the website waits
+  for the first run instead of starting (and paying for) another. A different request on
+  the same key (a refine while a redraft runs) gets a plain 409 that says to wait.
 - **Heartbeat.** A running job touches its record every 45 seconds, even during one long
-  Claude call. A job silent for 3 minutes, or running past 16 minutes, reads as failed
-  with a plain message, so a crashed worker never blocks a retry for long.
-- **Hard stop.** Claude calls are cut about 75 seconds before Netlify's 15-minute limit,
-  so the job can still save what finished and say what didn't.
+  Claude call. A background job silent for 3 minutes, or running past 16 minutes, reads as
+  failed with a plain message; a direct job silent for 75 seconds does too (Netlify stopped
+  its request), so a crashed worker never blocks a retry for long.
+- **Hard stop.** Claude calls are cut at 50 seconds in direct mode and about 75 seconds before
+  Netlify's 15-minute limit in background mode, so the job can still save what finished and
+  say what didn't.
 - **Polling survives the network.** The website keeps checking through a Wi-Fi drop or a
   sleeping laptop (it waits for the connection to come back) and through brief Netlify
   errors; it gives up only after 3 minutes online without one good answer, and then
@@ -99,7 +116,7 @@ What keeps a step from being lost or paid for twice:
 | `auth.ts` | Session tokens (HS256, 30 days), users, AES-256-GCM API key storage, rate limits |
 | `store.ts` | Netlify Blobs / local file key-value store with safe `update()` |
 | `repo.ts` | Storage layout and accessors for shared records |
-| `jobs.ts` | Job records, dispatch to the background function, runner, stale-job detection; finished jobs keep only a summary of their input (document text and pasted guidelines are not stored) |
+| `jobs.ts` | Job records, the three job modes (direct run, background dispatch, local), runner with deadline, stale-job detection; finished jobs keep only a summary of their input (document text and pasted guidelines are not stored) |
 | `jobHandlers.ts` | Registry of every job kind → handler (`handlers/*.ts`) |
 | `claude.ts` | Claude client: streaming, pause_turn, logging, error translation, prices |
 | `json.ts` | Lenient JSON extraction from model output and coercion helpers |
@@ -140,7 +157,8 @@ prompt id) and a throwaway data folder. Mock keys `sk-ant-invalid…`, `sk-ant-n
 forces errors per prompt, `/__delay` slows one prompt down, and `/__fixtures` swaps answers
 at runtime.
 
-To exercise the real Netlify runtime (background function + Blobs) on a Mac, install the
+To exercise the real Netlify runtime (direct-mode jobs, or the background function with
+`GRANTFINDER_BACKGROUND_JOBS=true`, plus Blobs) on a Mac, install the
 Netlify CLI and run `netlify build` then `netlify serve` against a copy of `frontend/` with
 its own `netlify.toml` (the CLI's local server mishandles the repo's `base = "frontend"`).
 

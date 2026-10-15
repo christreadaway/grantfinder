@@ -29,6 +29,8 @@
 #   E2E_HEADED=1              show the browser while it runs
 #   E2E_KEEP=1                keep the temporary data folder for inspection
 #   E2E_NO_LATENCY=1          let the mock Claude answer instantly (no realistic delay)
+#   E2E_JOB_MODE=direct       run AI steps the way Netlify does by default (inside each
+#                             request, no background functions) instead of in-process
 #   E2E_APP_PORT=3199 E2E_MOCK_PORT=4999 E2E_SITE_PORT=4998 E2E_PROXY_PORT=4996
 #                             preferred ports (a busy port moves to the next free one)
 set -u
@@ -223,6 +225,7 @@ start_app() {
       GRANTFINDER_TEST_MODE=1 GRANTFINDER_ALLOW_LOCAL_FETCH=1 \
       ANTHROPIC_BASE_URL="$CLAUDE_URL" CLAUDE_MODEL=claude-sonnet-5 \
       GRANTFINDER_DATA_DIR="$DATA_DIR" GRANTFINDER_STORE=fs GRANTFINDER_FILE_LOGS=0 \
+      GRANTFINDER_JOB_MODE="${E2E_JOB_MODE:-}" \
       SECRET_KEY="$E2E_SECRET" LOG_LEVEL=info \
       node "$NEXT_BIN" start -p "$APP_PORT" -H 127.0.0.1 ) >> "$LOGS/app.log" 2>&1 &
   APP_PID=$!; remember_pid "$APP_PID" "$APP_PORT" grantfinder-app

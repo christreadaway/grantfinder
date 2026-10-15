@@ -14,7 +14,7 @@ Product builder, not a coder. I bring requirements and vision — you handle imp
 
 ## Tech Stack
 - **Category:** School
-- **Details:** One Next.js 16 + TypeScript app in `frontend/`, deployed entirely on **Netlify**: website (`frontend/src/app/`), engine API at `/api/*` (`frontend/src/server/`), a background function for AI jobs (`frontend/netlify/functions/`), and Netlify Blobs for storage. Claude via `@anthropic-ai/sdk`. How it fits together: `docs/engine.md`.
+- **Details:** One Next.js 16 + TypeScript app in `frontend/`, deployed entirely on **Netlify**: website (`frontend/src/app/`), engine API at `/api/*` (`frontend/src/server/`), AI jobs that run inside normal requests on any Netlify plan (optional 15-minute background function in `frontend/netlify/background/`), and Netlify Blobs for storage. Claude via `@anthropic-ai/sdk`. How it fits together: `docs/engine.md`.
 - **Legacy:** `backend/` is the original Python FastAPI engine, kept only as the reference the TypeScript engine was ported from. It is not deployed; don't add features there.
 
 ## File Paths
@@ -67,7 +67,7 @@ Last Updated: October 14, 2026
 
 ## Deployment & Testing
 - **Where it runs:** everything on **Netlify** (no other host). `netlify.toml` builds `frontend/`. Click-by-click guide: `docs/deployment.md`.
-- **Long AI work = background jobs:** Netlify stops normal functions at 60 seconds, so every Claude call runs in `frontend/netlify/functions/grantfinder-jobs-background.mts` (15-minute limit). Routes check everything they can, then answer `202 {job_id}`; `frontend/src/lib/api.ts` polls `GET /api/jobs/{id}` automatically. Never call Claude inside a route handler.
+- **Long AI work = jobs that fit any Netlify plan:** every Claude call runs as a job, never inside the route that asked for it. By default (direct mode) the website calls `POST /api/jobs/{id}/run`, which runs the job inside that request: Netlify stops a request at 60 seconds, so Claude calls stop at 50 (`ctx.timeLeftMs()`), and work that doesn't fit returns `__continue` so the website runs the next part. `GRANTFINDER_BACKGROUND_JOBS=true` deploys the optional 15-minute background function (`frontend/netlify/background/`, copied in by `frontend/scripts/netlify-functions.mjs`); legacy Netlify plans don't allow it (the deploy fails), so it stays off by default. Details: `docs/engine.md`.
 - **Storage:** Netlify Blobs (store `grantfinder`) via `frontend/src/server/store.ts`; locally JSON files in `frontend/.data/`. Data and sign-ins survive deploys. Use `update()` (compare-and-swap) for read-modify-write. Keep the buffered `blobsFetch` in `store.ts`: without it, Blobs lookups of missing keys hang inside Netlify functions.
 - **Netlify build guard:** `frontend/next.config.js` fails Netlify builds when `SECRET_KEY` is missing or shorter than 32 characters. Don't remove it.
 - **Sign-in:** Google (`NEXT_PUBLIC_GOOGLE_CLIENT_ID` in Netlify; the engine reads the same value), or guest sign-in when `ALLOW_GUEST_LOGIN=true` (off by default). Every API route except health, sign-in (`/api/auth/options`, `/google`, `/guest`), and `/api/export/formats` needs a session token. Sessions last 30 days.
