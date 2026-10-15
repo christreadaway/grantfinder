@@ -200,7 +200,7 @@ check('parseReligiousEligibility: "No restrictions" / "No religious restrictions
 misses = religiousMisses([
   ['No restrictions', 'eligible'],
   ['Not excluded', 'eligible'],
-  ['Catholic schools eligible', 'eligible'], // the app's own CSV label reads back the same
+  ['Catholic schools eligible', 'eligible'], // the app's earlier CSV label still reads back the same
   ['Religious organizations eligible', 'eligible'],
   ['Yes, religious schools may apply', 'eligible'],
   ['Faith-based schools welcome', 'eligible'],

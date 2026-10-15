@@ -20,9 +20,9 @@ older edition).
 
 `frontend/src/server/data/seed_grants.json` holds 97 grants and 7 foundations (10 of the grants
 are tagged `ai`, for AI in education). It lists only grants a Catholic school or parish in Texas
-can apply to. Programs that ended, are limited to
-another region, or are closed to parishes or parish schools are left out. Its `"updated"` field
-is the date of the last research run (2026-10-15).
+can apply to. Programs that ended, are limited to another region, or are closed to parishes or
+parish schools are left out. Its `"updated"` field is the date of the last research run
+(2026-10-15).
 
 Every starter grant has:
 
