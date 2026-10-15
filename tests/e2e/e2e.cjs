@@ -34,6 +34,9 @@ const { chromium } = require('playwright');
 
 const { FRONTEND, makePdf, makeDocx, makeXlsx, readZipEntry, wordXmlText } = require('./lib/files.cjs');
 const FX = require('./lib/fixtures.cjs');
+// The starter database's size changes as grants are verified; the test reads it instead of hard-coding it.
+const SEED_GRANTS = JSON.parse(fs.readFileSync(path.join(FRONTEND, 'src/server/data/seed_grants.json'), 'utf8')).grants;
+const SEED_COUNT = SEED_GRANTS.length;
 
 const BASE = (process.env.E2E_BASE_URL || 'http://127.0.0.1:3199').replace(/\/+$/, '');
 const MOCK = (process.env.E2E_MOCK_URL || 'http://127.0.0.1:4999').replace(/\/+$/, '');
@@ -682,7 +685,7 @@ async function journey(browser) {
   });
 
   // ---------------------------------------------------------------- grants
-  await step('Grant database: starter database (24 grants)', async () => {
+  await step(`Grant database: starter database (${SEED_COUNT} grants)`, async () => {
     await goToStep(page, 'grants');
     const grantsCard = card(page, 'Build Your Grant Database');
     const continueButton = grantsCard.getByRole('button', { name: /^Continue with/ });
@@ -691,26 +694,30 @@ async function journey(browser) {
     const status = page.getByText(/Starter database loaded|Discovery failed/).first();
     await status.waitFor({ timeout: 60000 });
     const text = await status.innerText();
-    check('starter database loads 24 grants', /24 grants added \(24 total\)/.test(text), text);
+    check(`starter database loads ${SEED_COUNT} grants`, text.includes(`${SEED_COUNT} grants added (${SEED_COUNT} total)`), text);
 
     await grantsCard.getByRole('button', { name: /Load Starter Database/ }).click();
-    await page.getByText(/0 grants added \(24 total\)|Discovery failed/).first().waitFor({ timeout: 60000 });
+    await page.getByText(new RegExp(`0 grants added \\(${SEED_COUNT} total\\)|Discovery failed`)).first().waitFor({ timeout: 60000 });
     const again = await page.getByText(/grants added|Discovery failed/).first().innerText();
-    check('loading it twice adds no duplicates', /0 grants added \(24 total\)/.test(again), again);
+    check('loading it twice adds no duplicates', again.includes(`0 grants added (${SEED_COUNT} total)`), again);
+    check('loading it twice changes nothing (no "Updated" or "Retired" note)', !/Updated \d+ starter|Retired \d+ grant/.test(again), again);
 
     const grants = await api('GET', '/api/grants', { token: S.token });
     S.grants = Array.isArray(grants.data) ? grants.data : [];
-    check('GET /api/grants returns 24 grants', S.grants.length === 24, `${grants.status} ${S.grants.length}`);
+    check(`GET /api/grants returns ${SEED_COUNT} grants`, S.grants.length === SEED_COUNT, `${grants.status} ${S.grants.length}`);
+    check('every starter grant carries its eligibility facts (religious eligibility, last verified, a link)',
+      S.grants.every((g) => g.religious_eligibility && g.religious_eligibility !== 'excluded' && /^\d{4}-\d{2}-\d{2}$/.test(g.last_verified || '') && /^https?:\/\//.test(g.url || '')),
+      S.grants.filter((g) => !g.religious_eligibility || !g.last_verified).map((g) => g.grant_name).slice(0, 5));
     const kenedy = S.grants.find((g) => g.grant_name === KENEDY);
     S.kenedyId = kenedy && kenedy.id;
     check('Kenedy grant present with deadline "Annual: October 15"', kenedy && kenedy.deadline === 'Annual: October 15', kenedy);
     const stats = await api('GET', '/api/grants/stats', { token: S.token });
-    check('grant stats total 24', stats.data?.total_grants === 24, stats.data);
+    check(`grant stats total ${SEED_COUNT}`, stats.data?.total_grants === SEED_COUNT, stats.data);
 
     await continueButton.click();
     await page.getByRole('heading', { name: 'Enter Website URLs' }).waitFor({ timeout: 20000 });
     check('Continue opens the website step', true);
-    check('website step shows "24 grants in your database"', await page.getByText(/24 grants in your database/).isVisible());
+    check(`website step shows "${SEED_COUNT} grants in your database"`, await page.getByText(`${SEED_COUNT} grants in your database`).isVisible());
   });
 
   // ---------------------------------------------------------------- website
@@ -940,7 +947,7 @@ async function journey(browser) {
     check('tier counts add up to the number of match cards', total === S.matchesShown, `${total} vs ${S.matchesShown}`);
     check('saved results match the screen (GET match-results/latest)', latest.status === 200 && (L.matches || []).length === S.matchesShown && L.excellent_matches === S.counts.excellent, `${latest.status} ${(L.matches || []).length}`);
     check('every grant was evaluated (total_grants_evaluated = matches)', L.total_grants_evaluated === (L.matches || []).length, `${L.total_grants_evaluated} vs ${(L.matches || []).length}`);
-    check('at least 24 grants scored', S.matchesShown >= 24, S.matchesShown);
+    check(`at least ${SEED_COUNT} grants scored`, S.matchesShown >= SEED_COUNT, S.matchesShown);
     check('one excellent match (Kenedy 92%)', S.counts.excellent >= 1, S.counts);
     check('grants outside the area are "Not Eligible"', S.counts.not_eligible >= 2, S.counts);
     const scores = (L.matches || []).map((m) => m.score);
@@ -1035,7 +1042,7 @@ async function journey(browser) {
     check('after reload with results: the Results step opens (not a new scan)', await onStep(page, 'results'));
     check('after reload: no API key prompt (saved key remembered)', (await page.getByRole('heading', { name: 'Enter Your Claude API Key' }).count()) === 0);
     await goToStep(page, 'website');
-    check('after reload: grant database remembered (24)', await page.getByText(/24 grants in your database/).isVisible());
+    check(`after reload: grant database remembered (${SEED_COUNT})`, await page.getByText(`${SEED_COUNT} grants in your database`).isVisible());
     check('after reload: website URL remembered', (await page.getByPlaceholder('https://yourparish.org').inputValue()).startsWith(SITE));
     check('after reload: school website URL remembered', (await page.getByPlaceholder('https://yourschool.org').inputValue()) === `${SITE}/school-home`);
     check('after reload: "Your applications" still listed', (await card(page, /Your applications/).innerText()).includes(KENEDY));
@@ -1061,7 +1068,7 @@ async function journey(browser) {
     check('"Copy debug report" copies to the clipboard', /copied/.test(noticeText), noticeText);
     const clip = await page.evaluate(() => navigator.clipboard.readText()).catch((e) => `clipboard error: ${e.message}`);
     check('debug report is the markdown report', clip.includes('# GrantFinder debug report'), clip.slice(0, 200));
-    check('debug report shows the saved key and the grants', /Claude key saved: yes/.test(clip) && /Grants in database: 24/.test(clip), clip.slice(0, 600));
+    check('debug report shows the saved key and the grants', /Claude key saved: yes/.test(clip) && clip.includes(`Grants in database: ${SEED_COUNT}`), clip.slice(0, 600));
     check('debug report lists recent steps', /## Recent steps/.test(clip) && /###/.test(clip), clip.slice(0, 600));
     const recentJobs = ((await api('GET', '/api/jobs', { token: S.token })).data || {}).jobs || [];
     if (recentJobs.slice(0, 15).some((job) => /scan_website/.test(job.kind) && job.status === 'failed')) {
@@ -1445,8 +1452,8 @@ async function basics(browser) {
     await saveKey(page, SECOND_KEY);
     await page.getByRole('heading', { name: 'Build Your Grant Database' }).waitFor({ timeout: 30000 });
     await page.getByRole('button', { name: /Load Starter Database/ }).click();
-    await page.getByText(/Starter database loaded: 24 grants added/).waitFor({ timeout: 60000 });
-    check('second guest gets their own 24 starter grants', true);
+    await page.getByText(`Starter database loaded: ${SEED_COUNT} grants added`).waitFor({ timeout: 60000 });
+    check(`second guest gets their own ${SEED_COUNT} starter grants`, true);
   });
   if (!ready) {
     await context.close();
@@ -1468,7 +1475,7 @@ async function basics(browser) {
     check('web discovery used the web search tool', calls.length >= 1 && calls.every((c) => (c.tools || []).some((t) => /web_search/.test(t))), calls.map((c) => c.tools));
     const total = Number((/\((\d+) total\)/.exec(text) || [])[1] || 0);
     const continueButton = page.getByRole('button', { name: new RegExp(`Continue with ${total} Discovered Grants`) });
-    check('Continue button counts the discovered grants', total >= 24 && (await continueButton.count()) === 1, `${total}`);
+    check('Continue button counts the discovered grants', total >= SEED_COUNT && (await continueButton.count()) === 1, `${total}`);
   });
 
   const CUSTOM = 'Exampleville Community Foundation Grant';
@@ -1583,7 +1590,7 @@ async function basics(browser) {
     await page.getByRole('heading', { name: 'Match Results' }).waitFor({ timeout: 30000 });
     const counts = await tierCounts(page);
     const cards = await page.getByRole('button', { name: /Write Application/ }).count();
-    check('results render for the second guest', cards >= 24 && Object.values(counts).reduce((a, b) => a + b, 0) === cards, `${JSON.stringify(counts)} cards=${cards}`);
+    check('results render for the second guest', cards >= SEED_COUNT && Object.values(counts).reduce((a, b) => a + b, 0) === cards, `${JSON.stringify(counts)} cards=${cards}`);
     check('Kenedy listed for the second guest too', (await page.getByRole('heading', { name: KENEDY, exact: true }).count()) === 1);
     check('second guest has no applications yet', (await page.getByRole('heading', { name: /Your applications/ }).count()) === 0);
     check('grants Claude did not score say so plainly ("Not AI-scored")', (await page.getByText(/Not AI-scored/).count()) > 0);
@@ -2083,7 +2090,7 @@ async function persist(browser) {
     check('old session token still valid after restart', me.status === 200 && me.data?.name === 'Guest', `${me.status} ${me.text.slice(0, 120)}`);
     check('saved API key still there after restart', me.data?.claude_api_key_set === true, me.data);
     const grants = await api('GET', '/api/grants', { token: state.token });
-    check('grants still there after restart (24)', Array.isArray(grants.data) && grants.data.length === 24, grants.data && grants.data.length);
+    check(`grants still there after restart (${SEED_COUNT})`, Array.isArray(grants.data) && grants.data.length === SEED_COUNT, grants.data && grants.data.length);
     const profile = await api('GET', '/api/processing/profile', { token: state.token });
     check('profile still there after restart', profile.status === 200 && profile.data?.organization_name === FX.ORG.name, profile.status);
     const latest = await api('GET', '/api/processing/match-results/latest', { token: state.token });
@@ -2106,7 +2113,7 @@ async function persist(browser) {
     check('a returning user with results lands on Results', await onStep(page, 'results'));
     check('no API key prompt after restart', (await page.getByRole('heading', { name: 'Enter Your Claude API Key' }).count()) === 0);
     await goToStep(page, 'website');
-    check('grant count after restart (24)', await page.getByText(/24 grants in your database/).isVisible());
+    check(`grant count after restart (${SEED_COUNT})`, await page.getByText(`${SEED_COUNT} grants in your database`).isVisible());
     const appsText = await card(page, /Your applications/).innerText();
     check('"Your applications" after restart', appsText.includes(KENEDY), appsText);
     await page.getByRole('button', { name: 'Results', exact: true }).click();
