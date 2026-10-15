@@ -849,6 +849,20 @@ async function journey(browser) {
     }
     check('the skipped-file message clears after a good upload', (await alertBox(page).count()) === 0);
 
+    // Pasted text joins the list like a file, and Claude reads it the same way.
+    const paste = page.locator('[data-paste-material]').first();
+    await paste.locator('summary').click();
+    check('paste box offers the kinds of material', (await paste.getByLabel('What is it?').locator('option').allInnerTexts()).join('|') === 'A past proposal that was funded|Funder or reviewer comments|An analysis, report or data|Other notes');
+    check('"Add this text" is off until there is text', await paste.getByRole('button', { name: 'Add this text' }).isDisabled());
+    await paste.getByLabel('What is it?').selectOption('proposal');
+    await paste.getByLabel('Name it (optional)').fill('2024 library: proposal');
+    await paste.getByLabel('Text to paste').fill('PASTE-MARKER-4410 Our 2024 library proposal was funded. 212 students used the new reading room each week.');
+    check('paste box counts characters', /\d+ characters/.test(await paste.innerText()));
+    await paste.getByRole('button', { name: 'Add this text' }).click();
+    const pastedName = '2024 library proposal (pasted).txt';
+    check('pasted text listed like a file (name made safe)', await page.getByText(pastedName, { exact: true }).isVisible());
+    check('the paste box empties after it was added', (await paste.getByLabel('Text to paste').inputValue()) === '');
+
     // Give the mock real grant ids so scores look like Claude's (unknown ids are ignored).
     const grants = (await api('GET', '/api/grants', { token: S.token })).data || S.grants;
     const foundations = (await api('GET', '/api/grants/foundations', { token: S.token })).data || [];
@@ -877,7 +891,8 @@ async function journey(browser) {
     const lines = (await page.locator('.terminal-body .terminal-line').allInnerTexts()).map((l) => l.replace(/\s+/g, ' ').trim());
     info(`terminal:\n       ${lines.join('\n       ')}`);
     info(`terminal live lines seen: ${terminalProgress.slice(0, 12).join(' | ')}`);
-    check('terminal: processing 3 documents', lines.some((l) => /Processing 3 document/.test(l)), lines);
+    check('terminal: processing 4 documents (3 files and the pasted text)', lines.some((l) => /Processing 4 document/.test(l)), lines);
+    check('terminal: the pasted text was read (not failed)', lines.some((l) => l.includes(`${pastedName}:`) && /grant-relevant item/.test(l)) && !lines.some((l) => l.includes(`${pastedName}: extraction failed`)), lines.filter((l) => l.includes('pasted')));
     for (const f of Object.values(files)) {
       check(`terminal: ${f.name} extracted (not failed)`, lines.some((l) => l.includes(`${f.name}:`) && /grant-relevant item/.test(l)) && !lines.some((l) => l.includes(`${f.name}: extraction failed`)), lines.filter((l) => l.includes(f.name)));
     }
@@ -888,7 +903,10 @@ async function journey(browser) {
     check('terminal: progress said which grants were being scored ("Scoring grants x-y of n")', terminalProgress.some((t) => /Scoring grants \d+-\d+ of \d+/.test(t)), terminalProgress);
 
     const docs = await promptsFor('document_signals_v1', before);
-    check('three document_signals_v1 AI calls', docs.length === 3, docs.length);
+    check('four document_signals_v1 AI calls', docs.length === 4, docs.length);
+    const pastedCall = docs.find((d) => d.prompt.includes('PASTE-MARKER-4410'));
+    check('pasted text reached Claude', Boolean(pastedCall));
+    check('Claude is told the pasted text is a funded proposal, under its name', Boolean(pastedCall) && pastedCall.prompt.includes('What this is: A grant proposal this school or parish wrote earlier that was funded.') && pastedCall.prompt.includes(`DOCUMENT: ${pastedName}`), pastedCall?.prompt.slice(0, 400));
     check('.txt text reached Claude', docs.some((d) => d.prompt.includes('TXT-MARKER-1180')));
     check('.docx text reached Claude (Word extraction works)', docs.some((d) => d.prompt.includes('DOCX-MARKER-6604')));
     check('.pdf text reached Claude (PDF extraction works)', docs.some((d) => d.prompt.includes('PDF-MARKER-2201')));
@@ -1120,6 +1138,20 @@ async function writerFlow(page, S, urgency) {
     check('suggested ask shown', /Suggested ask/.test(funderText), funderText.slice(0, 800));
     const calls = await promptsFor('funder_profile_v1', before);
     check('the pasted funder notes reached Claude', calls.length === 1 && calls[0].prompt.includes('FUNDER-NOTES-MARKER'), calls.length);
+  });
+
+  await step('Writer 1c: paste reviewer comments into Add Materials', async () => {
+    const before = await requestCount();
+    const materials = page.locator('#writer-materials');
+    await materials.locator('summary').click();
+    await materials.getByLabel('What is it?').selectOption('feedback');
+    await materials.getByLabel('Text to paste').fill('WRITER-PASTE-MARKER-7731 Reviewer comments on our 2023 proposal: strong outcomes data; the budget needed more detail.');
+    await materials.getByRole('button', { name: 'Add this text' }).click();
+    await page.getByText(/Funder comments \(pasted\)\.txt": \d+ facts? added for the writer|No facts the writer can cite were found in "Funder comments \(pasted\)\.txt"/).first().waitFor({ timeout: JOB_TIMEOUT });
+    const calls = await promptsFor('document_signals_v1', before);
+    check('pasted material read by Claude once', calls.length === 1 && calls[0].prompt.includes('WRITER-PASTE-MARKER-7731'), calls.length);
+    check('Claude is told what the pasted text is, named after its kind', calls.length === 1 && calls[0].prompt.includes('What this is: Comments from a funder or reviewer') && calls[0].prompt.includes('DOCUMENT: Funder comments (pasted).txt'), calls[0]?.prompt.slice(0, 400));
+    check('the writer paste box empties after it was added', (await materials.getByLabel('Text to paste').inputValue()) === '');
   });
 
   await step('Writer 2: Run Fit Analysis', async () => {

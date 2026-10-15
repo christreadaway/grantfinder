@@ -260,6 +260,17 @@ prior report, letters, data) the same way as the dashboard's Documents step
 draft can use. If a fit analysis already exists, the card offers "Update the
 fit analysis to use it" (re-running replaces the gap list, so it asks first).
 
+**Or paste text** (the same box is on the dashboard's Documents step): pick
+what it is (a past proposal that was funded, funder or reviewer comments, an
+analysis, report or data, or other notes), optionally name it, paste, and
+**Add this text**. The page (`frontend/src/app/PasteMaterial.tsx`) turns it
+into a `.txt` file named after the title or the kind, for example
+`Funded proposal (pasted).txt`, whose first line tells Claude what it is
+("What this is: A grant proposal this school or parish wrote earlier that was
+funded. Its facts describe the school as of when it was written."), then
+uploads it like any document. The server is unchanged. A character count shows
+when the text is longer than the 60,000 characters Claude reads.
+
 ## Application Checklist
 
 A card at the top of the writer that says what is done, what is left and

@@ -167,6 +167,11 @@ per document (enrollment, results, prior grants), is added to your profile as ev
 GrantWriter can cite. The Documents step lists the files already in your profile; to add more
 without matching again, use **Add to my profile only (no new matching)**.
 
+**Or paste text:** open **Or paste text** under the file box (on the Documents step, or in the
+writer's Add Materials card), pick what it is (a past proposal that was funded, funder or reviewer
+comments, an analysis, report or data, or other notes), paste, and click **Add this text**. Claude
+reads it exactly like an uploaded document.
+
 ---
 
 ## 🎨 Interface

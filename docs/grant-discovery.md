@@ -21,7 +21,9 @@ enter the database from four sources, all merged with automatic deduplication
    "Skip to questions" on the Website step (it reads "Go to my questions" once
    Claude has written them); uploaded documents add the detail.
    To add documents later without matching again, use "Add to my profile only
-   (no new matching)" on the Documents step.
+   (no new matching)" on the Documents step. Text you can't upload as a file
+   (a past proposal that was funded, comments, an analysis) goes in "Or paste
+   text" there; it is read like a document.
 3. Run Grants.gov search + AI web discovery — both use the profile to target
    the search, so they find more relevant grants after the profile exists.
 4. Optionally upload your own Excel on top.

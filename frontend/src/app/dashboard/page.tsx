@@ -10,6 +10,7 @@ import {
 import api, { blobErrorDetail, errorDetail, isSessionEnded, onJobProgress } from '@/lib/api';
 import { copyText, saveFile } from '@/lib/download';
 import { useStore } from '@/lib/store';
+import PasteMaterial from '../PasteMaterial';
 
 type SetupStep = 'api-key' | 'grants' | 'website' | 'questionnaire' | 'documents' | 'processing' | 'results';
 type DiscoverySource = 'seed' | 'grants_gov' | 'web_discovery';
@@ -1000,7 +1001,7 @@ export default function Dashboard() {
       router.push(`/writer?id=${app.id}`);
     });
 
-  const handleDocumentUpload = (files: FileList | null) => {
+  const handleDocumentUpload = (files: FileList | File[] | null) => {
     // While documents are being read the list can't change (a file added now would be skipped or lost).
     if (!files || !files.length || busy) return;
     const accepted: File[] = [];
@@ -1823,6 +1824,15 @@ export default function Dashboard() {
                   Browse Files
                 </label>
               </div>
+              <PasteMaterial
+                disabled={Boolean(busy)}
+                takenNames={[...documents.map((doc) => doc.name), ...profileDocs]}
+                onAdd={(file) => {
+                  handleDocumentUpload([file]);
+                  return true;
+                }}
+                buttonLabel="Add this text"
+              />
               {documents.length > 0 && (
                 <div className="mt-4">
                   <p className="text-sm text-gray-400 mb-2">Waiting to be added:</p>

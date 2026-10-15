@@ -18,6 +18,7 @@ import {
 import api, { blobErrorDetail, errorDetail, isSessionEnded, onJobProgress } from '@/lib/api';
 import { copyText, saveFile } from '@/lib/download';
 import ApplicationChecklist, { type ChecklistAction } from './ApplicationChecklist';
+import PasteMaterial from '../PasteMaterial';
 import type {
   Application, FitAnalysis, FunderProfile, FunderRecordView, Gap, GrantSpec, IntakeRequest, RequiredSection, Scorecard, SectionDraft,
 } from '@/server/types';
@@ -492,6 +493,8 @@ function WriterInner({ appId }: { appId: string | null }) {
   const [funderNotes, setFunderNotes] = useState(restored.funderNotes);
   /** A document was added here after the fit analysis: offer to re-run it. */
   const [materialAdded, setMaterialAdded] = useState(false);
+  // Names added on this page, so a second paste never shows up under the same name.
+  const [materialNames, setMaterialNames] = useState<string[]>([]);
   const [emailCopy, setEmailCopy] = useState<Record<string, 'copied' | 'failed'>>({});
 
   // Live status lines from background jobs ("Drafting section 2 of 6: Need")
@@ -762,25 +765,30 @@ function WriterInner({ appId }: { appId: string | null }) {
   };
 
   /** Add a document's facts to the profile as evidence, so drafts can cite them (the same reading as the dashboard's documents). */
-  const addMaterial = (files: FileList | null) => {
-    const file = files?.[0];
-    if (!file || busy !== null) return;
+  /** Claude reads a document (a file or pasted text) and adds its facts to the profile. True when it was read. */
+  const uploadMaterial = async (file: File): Promise<boolean> => {
+    if (busy !== null) return false;
     const problem = fileProblem(file);
     if (problem) {
       setNotice(null);
       setError(problem);
-      return;
+      return false;
     }
     let facts = 0;
-    void (async () => {
-      const ok = await run('material', () => api.uploadDocument(file), (result) => {
-        facts = keyFactsOf(result);
-        return facts > 0
-          ? `"${file.name}": ${facts} fact${facts === 1 ? '' : 's'} added for the writer.`
-          : `No facts the writer can cite were found in "${file.name}".`;
-      });
-      if (ok && facts > 0) setMaterialAdded(true);
-    })();
+    const ok = await run('material', () => api.uploadDocument(file), (result) => {
+      facts = keyFactsOf(result);
+      return facts > 0
+        ? `"${file.name}": ${facts} fact${facts === 1 ? '' : 's'} added for the writer.`
+        : `No facts the writer can cite were found in "${file.name}".`;
+    });
+    if (ok && facts > 0) setMaterialAdded(true);
+    if (ok) setMaterialNames((names) => [...names, file.name]);
+    return ok;
+  };
+
+  const addMaterial = (files: FileList | null) => {
+    const file = files?.[0];
+    if (file) void uploadMaterial(file);
   };
 
   /** What the Application Checklist's buttons do. Steps run only as their own buttons would; approvals stay with the person. */
@@ -1540,6 +1548,13 @@ function WriterInner({ appId }: { appId: string | null }) {
             </label>
             <span className="text-xs text-gray-500">PDF, Word (.docx) or text, up to 4 MB.</span>
           </div>
+          <PasteMaterial
+            disabled={busy !== null}
+            takenNames={materialNames}
+            onAdd={uploadMaterial}
+            buttonLabel="Add this text"
+            working={busy === 'material'}
+          />
           {materialAdded && analysis && (
             <div className="mt-3 p-3 rounded border bg-amber-950 border-amber-800 text-amber-200 text-sm flex flex-wrap items-center justify-between gap-2">
               <span>The fit analysis was made before this document. Re-run it so the gaps and strategy can use the new facts.</span>
